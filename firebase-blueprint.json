@@ -1,0 +1,53 @@
+{
+  "entities": {
+    "CloudSnapshot": {
+      "title": "Cloud Snapshot",
+      "description": "Stores the entire database state as a serialized checkpoint for cloud persistence.",
+      "type": "object",
+      "properties": {
+        "sql_dump": {
+          "type": "string",
+          "description": "The complete SQL dump of the database."
+        },
+        "last_updated": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "version": {
+          "type": "integer"
+        }
+      },
+      "required": ["sql_dump", "last_updated"]
+    },
+    "AppDataDoc": {
+      "title": "Application Data Document",
+      "description": "Stores application entities and tables for client-side cloud synchronization.",
+      "type": "object",
+      "properties": {
+        "payload": {
+          "type": "string",
+          "description": "JSON payload of table rows."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["payload"]
+    }
+  },
+  "firestore": {
+    "/backups/{checkpointId}": {
+      "schema": "CloudSnapshot",
+      "description": "The master cloud checkpoint for the entire application state."
+    },
+    "/test/{testId}": {
+      "schema": "AppDataDoc",
+      "description": "Connection test document for health checks."
+    },
+    "/app_data/{docId}": {
+      "schema": "AppDataDoc",
+      "description": "Cached data collections for offline and serverless deployments."
+    }
+  }
+}

@@ -1,0 +1,58 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Reusable validation helpers
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    // Default deny for unhandled collections
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Health check & test connectivity
+    match /test/{testId} {
+      allow read: if isValidId(testId);
+    }
+
+    // Backups and global cloud state checkpoints
+    match /backups/{checkpointId} {
+      allow read, write: if isValidId(checkpointId);
+    }
+
+    // Application entities for cloud data sync
+    match /schools/{schoolId} {
+      allow read, write: if isValidId(schoolId);
+    }
+
+    match /users/{userId} {
+      allow read, write: if isValidId(userId);
+    }
+
+    match /classes/{classId} {
+      allow read, write: if isValidId(classId);
+    }
+
+    match /students/{studentId} {
+      allow read, write: if isValidId(studentId);
+    }
+
+    match /grades/{gradeId} {
+      allow read, write: if isValidId(gradeId);
+    }
+
+    match /settings/{settingId} {
+      allow read, write: if isValidId(settingId);
+    }
+
+    match /app_data/{docId} {
+      allow read, write: if isValidId(docId);
+    }
+  }
+}

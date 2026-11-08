@@ -1,0 +1,11 @@
+node_modules
+dist
+build
+.git
+.github
+*.db
+*.db-wal
+*.db-shm
+*.log
+.aistudio
+backups/*.bak

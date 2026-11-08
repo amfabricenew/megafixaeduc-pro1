@@ -1,0 +1,10 @@
+{
+  "name": "MEGAFIXAEDUC_PRO",
+  "description": "MEGAFIXAEDUC_PRO - Système complet de gestion scolaire moderne avec installation locale (PWA) et synchronisation intelligente.",
+  "requestFramePermissions": [
+    "geolocation"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

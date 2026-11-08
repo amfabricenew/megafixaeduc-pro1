@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: megafixaeduc-pro
+    runtime: node
+    plan: free
+    region: frankfurt
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: DATABASE_PATH
+        value: megafixaEduc.db
+      - key: OFFLINE_MODE
+        value: "false"
+      - key: JWT_SECRET
+        generateValue: true
+      - key: APP_URL
+        fromService:
+          type: web
+          name: megafixaeduc-pro
+          property: host
