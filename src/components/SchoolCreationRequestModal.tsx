@@ -22,7 +22,8 @@ import {
   HelpCircle,
   Sparkles,
   XCircle,
-  LifeBuoy
+  LifeBuoy,
+  Search
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 
@@ -39,8 +40,11 @@ export default function SchoolCreationRequestModal({
   onClose,
   defaultPlan = 'PRO',
   defaultEmail = '',
-  defaultNom = ''
-}: SchoolCreationRequestModalProps) {
+  defaultNom = '',
+  initialMode = 'creation'
+}: SchoolCreationRequestModalProps & { initialMode?: 'creation' | 'tracking' }) {
+  const [mode, setMode] = useState<'creation' | 'tracking'>(initialMode);
+  const [trackingRef, setTrackingRef] = useState('');
   const [step, setStep] = useState<1 | 2 | 3>(1);
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
@@ -120,6 +124,7 @@ export default function SchoolCreationRequestModal({
             if (data && data.reference) {
               setViewingStatus(data);
               setCreatedRequest(data);
+              setMode('creation');
               if (data.statut === 'rejected' && action === 'complaint') {
                 setStep(3); // Reuse step 3 but with complaint UI
               } else {
@@ -269,6 +274,30 @@ export default function SchoolCreationRequestModal({
     return `https://wa.me/${rawNumber}?text=${message}`;
   };
 
+  const handleTrackRequest = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!trackingRef.trim()) return toast.error("Veuillez saisir votre référence.");
+
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/public/school-requests/${trackingRef.trim()}/status`);
+      const data = await res.json();
+      
+      if (!res.ok || !data.reference) {
+        throw new Error(data.error || "Référence introuvable.");
+      }
+
+      setViewingStatus(data);
+      setCreatedRequest(data);
+      setMode('creation');
+      setStep(3);
+    } catch (err: any) {
+      toast.error(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/80 backdrop-blur-sm overflow-y-auto font-sans">
       <div className="relative w-full max-w-2xl bg-slate-900 border border-slate-800 rounded-3xl shadow-2xl text-white my-8 overflow-hidden">
@@ -287,9 +316,10 @@ export default function SchoolCreationRequestModal({
                 <span className="text-xs text-slate-400">Étape {step} sur 3</span>
               </div>
               <h2 className="text-lg sm:text-xl font-black text-white mt-0.5">
-                {step === 1 && "Demande de création de compte école"}
-                {step === 2 && "Paiement Mobile Money"}
-                {step === 3 && "Vérification en cours (Sous 24H)"}
+                {mode === 'tracking' && "Suivre l'état de ma demande"}
+                {mode === 'creation' && step === 1 && "Demande de création de compte école"}
+                {mode === 'creation' && step === 2 && "Paiement Mobile Money"}
+                {mode === 'creation' && step === 3 && "État de votre demande"}
               </h2>
             </div>
           </div>
@@ -302,17 +332,75 @@ export default function SchoolCreationRequestModal({
         </div>
 
         {/* Step Indicator Progress Bar */}
-        <div className="w-full bg-slate-800 h-1.5 flex">
-          <div className={`h-full bg-emerald-500 transition-all duration-300 ${step === 1 ? 'w-1/3' : step === 2 ? 'w-2/3' : 'w-full'}`} />
-        </div>
+        {mode === 'creation' && (
+          <div className="w-full bg-slate-800 h-1.5 flex">
+            <div className={`h-full bg-emerald-500 transition-all duration-300 ${step === 1 ? 'w-1/3' : step === 2 ? 'w-2/3' : 'w-full'}`} />
+          </div>
+        )}
 
         {/* Body Content */}
         <div className="p-6 sm:p-8 max-h-[75vh] overflow-y-auto space-y-6">
 
           {/* ============================================================== */}
+          {/* TRACKING MODE UI */}
+          {/* ============================================================== */}
+          {mode === 'tracking' && (
+            <div className="space-y-6">
+              <div className="text-center space-y-2">
+                <div className="w-16 h-16 mx-auto rounded-2xl bg-indigo-500/10 flex items-center justify-center text-indigo-400 border border-indigo-500/20">
+                  <Search size={32} />
+                </div>
+                <h3 className="text-lg font-bold">Consulter l'évolution de votre dossier</h3>
+                <p className="text-xs text-slate-400 max-w-sm mx-auto">
+                  Saisissez la référence unique de demande que vous avez reçue par email ou lors de votre inscription.
+                </p>
+              </div>
+
+              <form onSubmit={handleTrackRequest} className="space-y-4">
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-slate-300 uppercase tracking-widest">Référence de demande</label>
+                  <input
+                    type="text"
+                    required
+                    value={trackingRef}
+                    onChange={(e) => setTrackingRef(e.target.value.toUpperCase())}
+                    placeholder="ex: REQ-XXXXXX"
+                    className="w-full px-5 py-3 bg-slate-800 border border-slate-700 rounded-2xl text-base font-mono font-bold text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="w-full py-4 bg-indigo-600 hover:bg-indigo-500 text-white font-black rounded-2xl shadow-xl shadow-indigo-900/20 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                >
+                  {loading ? (
+                    <span className="animate-spin rounded-full h-5 w-5 border-2 border-white border-t-transparent" />
+                  ) : (
+                    <>
+                      <span>Rechercher mon dossier</span>
+                      <ArrowRight size={18} />
+                    </>
+                  )}
+                </button>
+
+                <div className="text-center pt-4">
+                  <button
+                    type="button"
+                    onClick={() => setMode('creation')}
+                    className="text-xs font-bold text-slate-400 hover:text-white underline underline-offset-4"
+                  >
+                    Nouvelle demande d'adhésion
+                  </button>
+                </div>
+              </form>
+            </div>
+          )}
+
+          {/* ============================================================== */}
           {/* STEP 1: INFORMATIONS DE L'ÉCOLE ET DU DEMANDEUR */}
           {/* ============================================================== */}
-          {step === 1 && (
+          {mode === 'creation' && step === 1 && (
             <form onSubmit={handleSubmitRequest} className="space-y-6">
               
               {/* Formule souhaitée banner */}
@@ -573,7 +661,7 @@ export default function SchoolCreationRequestModal({
           {/* ============================================================== */}
           {/* STEP 2: PAIEMENT MOBILE MONEY (CONFIGURÉ PAR LE SUPER ADMIN) */}
           {/* ============================================================== */}
-          {step === 2 && createdRequest && (
+          {mode === 'creation' && step === 2 && createdRequest && (
             <div className="space-y-6">
               
               {/* Request Success Banner */}
@@ -767,7 +855,7 @@ export default function SchoolCreationRequestModal({
           {/* ============================================================== */}
           {/* STEP 3: MESSAGE D'ATTENTE 24H AVEC CONTACTS DE L'ÉQUIPE */}
           {/* ============================================================== */}
-          {step === 3 && createdRequest && (
+          {mode === 'creation' && step === 3 && createdRequest && (
             <div className="space-y-6 py-4">
               
               {createdRequest.statut === 'rejected' ? (

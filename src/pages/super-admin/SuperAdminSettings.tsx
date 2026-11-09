@@ -258,6 +258,8 @@ export default function SuperAdminSettings() {
 
   const [testEmailAddress, setTestEmailAddress] = React.useState('');
   const [testEmailLoading, setTestEmailLoading] = React.useState(false);
+  const [testSmsPhone, setTestSmsPhone] = React.useState('');
+  const [testSmsLoading, setTestSmsLoading] = React.useState(false);
 
   const handleTestEmail = async () => {
     setTestEmailLoading(true);
@@ -284,6 +286,38 @@ export default function SuperAdminSettings() {
       toast.error(err.message || "Erreur lors du test d'envoi");
     } finally {
       setTestEmailLoading(false);
+    }
+  };
+
+  const handleTestSms = async () => {
+    if (!testSmsPhone.trim()) {
+      toast.error("Veuillez entrer un numéro de téléphone");
+      return;
+    }
+    setTestSmsLoading(true);
+    try {
+      const response = await fetch('/api/super-admin/test-sms', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('token')}`
+        },
+        body: JSON.stringify({ phone: testSmsPhone })
+      });
+      const data = await response.json();
+      if (response.ok && data.success) {
+        if (data.simulated) {
+          toast(data.message, { icon: 'ℹ️' });
+        } else {
+          toast.success(data.message || "SMS de test envoyé avec succès !");
+        }
+      } else {
+        toast.error(data.error || "Échec de l'envoi du SMS de test");
+      }
+    } catch (err: any) {
+      toast.error(err.message || "Erreur lors du test d'envoi SMS");
+    } finally {
+      setTestSmsLoading(false);
     }
   };
 
@@ -1079,29 +1113,100 @@ export default function SuperAdminSettings() {
               </section>
 
               <section className="space-y-4">
-                <h3 className="text-sm font-bold text-slate-900 uppercase tracking-widest">Notifications Système</h3>
-                <div className="space-y-3">
-                  {[
-                    { key: 'notify_new_school', label: 'Nouvelle école inscrite' },
-                    { key: 'notify_new_payment', label: 'Nouveau paiement reçu' },
-                    { key: 'notify_ticket_urgent', label: 'Nouveau ticket urgent' },
-                  ].map((notif) => (
-                    <div key={notif.key} className="flex items-center justify-between p-4 bg-slate-50 rounded-xl">
-                      <span className="text-sm font-bold text-slate-700">{notif.label}</span>
-                      <button 
-                        onClick={() => handleChange(notif.key, settings[notif.key] === 'true' ? 'false' : 'true')}
-                        className={cn(
-                          "w-10 h-5 rounded-full transition-all relative",
-                          settings[notif.key] === 'true' ? "bg-indigo-600" : "bg-slate-300"
-                        )}
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-bold text-slate-900 uppercase tracking-widest">Passerelle SMS & WhatsApp</h3>
+                  <span className="text-[11px] font-bold text-emerald-600 bg-emerald-50 px-2.5 py-1 rounded-lg">
+                    Délivrabilité Mobile
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold text-slate-500">Service Provider SMS</label>
+                    <select 
+                      value={settings.sms_provider || 'simulation'} 
+                      onChange={(e) => handleChange('sms_provider', e.target.value)}
+                      className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 font-medium"
+                    >
+                      <option value="simulation">Simulation (Log console uniquement)</option>
+                      <option value="twilio">Twilio (International)</option>
+                      <option value="infobip">Infobip</option>
+                      <option value="orange">Orange SMS API</option>
+                    </select>
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold text-slate-500">Sender ID (Nom d'expéditeur)</label>
+                    <input 
+                      type="text" 
+                      value={settings.sms_sender_id || ''} 
+                      onChange={(e) => handleChange('sms_sender_id', e.target.value)}
+                      placeholder="MEGAFIXA"
+                      className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 font-medium" 
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold text-slate-500">API Key / Account SID</label>
+                    <input 
+                      type="password" 
+                      value={settings.sms_api_key || ''} 
+                      onChange={(e) => handleChange('sms_api_key', e.target.value)}
+                      placeholder="ACxxxxxxxxxxxxxxxxxxxxxxxx"
+                      className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 font-medium" 
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold text-slate-500">Auth Token / Secret</label>
+                    <input 
+                      type="password" 
+                      value={settings.sms_auth_token || ''} 
+                      onChange={(e) => handleChange('sms_auth_token', e.target.value)}
+                      placeholder="••••••••••••••••••••"
+                      className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 font-medium" 
+                    />
+                  </div>
+                </div>
+
+                <div className="p-4 rounded-2xl bg-amber-50 border border-amber-100 space-y-4">
+                  <div className="space-y-2">
+                    <h4 className="text-xs font-bold text-amber-900 flex items-center gap-2">
+                      <Smartphone size={16} />
+                      Configuration WhatsApp & SMS
+                    </h4>
+                    <p className="text-[11px] text-amber-800 leading-relaxed">
+                      Le service WhatsApp utilise par défaut la simulation ou la passerelle configurée. Pour un envoi réel, assurez-vous que les informations d'authentification ci-dessus sont valides pour le provider choisi.
+                    </p>
+                  </div>
+
+                  <div className="pt-2 border-t border-amber-200">
+                    <p className="text-[10px] font-bold text-amber-700 uppercase mb-2">Tester l'envoi SMS / WhatsApp</p>
+                    <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+                      <input
+                        type="text"
+                        placeholder="+2290100000000"
+                        value={testSmsPhone}
+                        onChange={(e) => setTestSmsPhone(e.target.value)}
+                        className="flex-1 px-4 py-2 bg-white border border-amber-200 rounded-xl text-xs font-medium focus:ring-2 focus:ring-amber-500/20 outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleTestSms}
+                        disabled={testSmsLoading}
+                        className="px-5 py-2 bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-slate-950 font-bold text-xs rounded-xl shadow-xs transition-all flex items-center justify-center gap-2 shrink-0 cursor-pointer"
                       >
-                        <div className={cn(
-                          "absolute top-0.5 w-4 h-4 bg-white rounded-full transition-all",
-                          settings[notif.key] === 'true' ? "right-0.5" : "left-0.5"
-                        )} />
+                        {testSmsLoading ? (
+                          <>
+                            <span className="w-3.5 h-3.5 rounded-full border-2 border-slate-950 border-t-transparent animate-spin" />
+                            <span>Envoi...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Smartphone size={15} />
+                            <span>Tester le SMS</span>
+                          </>
+                        )}
                       </button>
                     </div>
-                  ))}
+                  </div>
                 </div>
               </section>
             </div>

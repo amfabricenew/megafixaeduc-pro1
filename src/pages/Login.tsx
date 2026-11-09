@@ -22,7 +22,8 @@ import {
   Check,
   Crown,
   Copy,
-  Globe
+  Globe,
+  Search
 } from 'lucide-react';
 import { apiFetch } from '../utils/api';
 import toast from 'react-hot-toast';
@@ -50,6 +51,7 @@ export default function Login() {
 
   // School creation request modal
   const [showSchoolRequestModal, setShowSchoolRequestModal] = useState(false);
+  const [schoolRequestInitialMode, setSchoolRequestInitialMode] = useState<'creation' | 'tracking'>('creation');
 
   // License Key Activation State
   const [showActivateKeyModal, setShowActivateKeyModal] = useState(false);
@@ -888,15 +890,30 @@ export default function Login() {
               </div>
 
               {/* Bouton officiel : Demande de création de compte école */}
-              <div className="pt-2">
+              <div className="pt-2 flex flex-col gap-2">
                 <button
                   type="button"
-                  onClick={() => setShowSchoolRequestModal(true)}
+                  onClick={() => {
+                    setSchoolRequestInitialMode('creation');
+                    setShowSchoolRequestModal(true);
+                  }}
                   className="w-full py-3.5 px-4 bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-700 hover:from-emerald-500 hover:to-teal-500 text-white font-black text-sm rounded-xl transition-all shadow-lg shadow-emerald-900/30 flex items-center justify-center gap-2.5 cursor-pointer border border-emerald-400/40 group"
                 >
                   <School className="w-5 h-5 text-emerald-200 group-hover:scale-110 transition-transform" />
                   <span>Demande de création de compte école</span>
                   <ArrowRight className="w-4 h-4 text-emerald-200 group-hover:translate-x-1 transition-transform" />
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSchoolRequestInitialMode('tracking');
+                    setShowSchoolRequestModal(true);
+                  }}
+                  className="w-full py-2 px-4 bg-slate-900/40 hover:bg-slate-700/60 text-slate-300 hover:text-white font-bold text-xs rounded-xl transition-all flex items-center justify-center gap-2 border border-slate-700 cursor-pointer"
+                >
+                  <Search size={14} />
+                  <span>Suivre l'état de ma demande</span>
                 </button>
               </div>
             </form>
@@ -924,6 +941,7 @@ export default function Login() {
         isOpen={showSchoolRequestModal}
         onClose={() => setShowSchoolRequestModal(false)}
         defaultEmail={email}
+        initialMode={schoolRequestInitialMode}
       />
 
       {/* Subscription Key Activation Modal (First Access) */}

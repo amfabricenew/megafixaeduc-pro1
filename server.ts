@@ -3424,9 +3424,7 @@ async function getSmtpConfig() {
       if (r.key === 'smtp_secure' && r.value) dbSecure = r.value;
       if (r.key === 'email_from' && r.value) dbFrom = r.value;
     }
-  } catch (err) {
-    // Database table not available yet
-  }
+  } catch (err) {}
 
   const host = (dbHost || process.env.SMTP_HOST || 'smtp.gmail.com').trim();
   const port = parseInt(dbPort || process.env.SMTP_PORT || (host.includes('gmail') ? '465' : '587'), 10);
@@ -3436,6 +3434,25 @@ async function getSmtpConfig() {
   const from = (dbFrom || process.env.EMAIL_FROM || `"MégafixaEduc Pro" <${user}>`).trim();
 
   return { host, port, secure, user, pass, from };
+}
+
+async function getGlobalSmsConfig() {
+  let provider = 'simulation';
+  let apiKey = '';
+  let authToken = '';
+  let senderId = 'MEGAFIXA';
+
+  try {
+    const rows = db.prepare("SELECT key, value FROM super_admin_settings WHERE key IN ('sms_provider', 'sms_api_key', 'sms_auth_token', 'sms_sender_id')").all() as any[];
+    for (const r of rows) {
+      if (r.key === 'sms_provider' && r.value) provider = r.value;
+      if (r.key === 'sms_api_key' && r.value) apiKey = r.value;
+      if (r.key === 'sms_auth_token' && r.value) authToken = r.value;
+      if (r.key === 'sms_sender_id' && r.value) senderId = r.value;
+    }
+  } catch (err) {}
+  
+  return { provider, apiKey, authToken, senderId };
 }
 
 async function createMailTransporter() {
@@ -3486,18 +3503,48 @@ interface SendEmailResult {
 
 async function sendWhatsAppSimulation(options: { to: string, message: string, reference?: string }) {
   const { to, message, reference } = options;
-  const cleanPhone = to.replace(/\s+/g, '');
+  const config = await getGlobalSmsConfig();
+  const cleanPhone = to.replace(/[^0-9+]/g, '');
   
+  if (config.provider === 'twilio' && config.apiKey && config.authToken) {
+    try {
+      const auth = Buffer.from(`${config.apiKey}:${config.authToken}`).toString('base64');
+      const twilioUrl = `https://api.twilio.com/2010-04-01/Accounts/${config.apiKey}/Messages.json`;
+      const params = new URLSearchParams();
+      params.append('To', cleanPhone.startsWith('+') ? cleanPhone : `+${cleanPhone}`);
+      params.append('From', config.senderId || 'MEGAFIXA');
+      params.append('Body', message);
+
+      const twilioRes = await fetch(twilioUrl, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Basic ${auth}`,
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: params.toString()
+      });
+
+      if (twilioRes.ok) {
+        console.log(`[TWILIO SUCCESS] Global SMS/WA sent to ${cleanPhone}`);
+        return { success: true, simulated: false };
+      } else {
+        const errData = await twilioRes.json();
+        console.error("Twilio Global error:", errData);
+      }
+    } catch (e: any) {
+      console.error("Twilio Global exception:", e);
+    }
+  }
+
   console.log(`
   --------------------------------------------------
-  [WHATSAPP SIMULATION]
+  [SMS/WHATSAPP SIMULATION]
   To: ${cleanPhone}
   Reference: ${reference || 'N/A'}
   Message: ${message}
   --------------------------------------------------
   `);
   
-  // Note: Here we could integrate a real API like Twilio, MessageBird, or WhatsApp Business API
   return { success: true, simulated: true };
 }
 
@@ -19975,6 +20022,26 @@ function executeYearTransition(
     }
   });
 
+  app.post("/api/super-admin/test-sms", authenticateToken, requireSuperAdmin, async (req: any, res) => {
+    try {
+      const { phone } = req.body;
+      if (!phone) return res.status(400).json({ error: "Numéro de téléphone requis." });
+      
+      const result = await sendWhatsAppSimulation({
+        to: phone,
+        message: "Test de configuration SMS / WhatsApp - MégafixaEduc Pro. Si vous recevez ce message, votre passerelle est opérationnelle."
+      });
+      
+      if (result.simulated) {
+        res.json({ success: true, simulated: true, message: "Envoi simulé dans la console (aucune passerelle réelle configurée)." });
+      } else {
+        res.json({ success: true, simulated: false, message: "SMS de test envoyé avec succès via votre passerelle !" });
+      }
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
   // Mobile Money: Initiate payment transaction
   app.post("/api/payments/mobile-money/initiate", async (req, res) => {
     try {
@@ -27540,7 +27607,8 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       const request = db.prepare(`
         SELECT id, reference, nom_ecole, type_etablissement, pays, ville, plan_souhaite,
                demandeur_nom, demandeur_email, demandeur_telephone, demandeur_whatsapp,
-               statut, motif_rejet, created_at, updated_at, school_id
+               statut, motif_rejet, created_at, updated_at, school_id,
+               (SELECT COUNT(*) FROM reclamations_demandes WHERE request_id = school_creation_requests.id) as complaints_count
         FROM school_creation_requests
         WHERE reference = ? OR id = ?
       `).get(ref, isNaN(Number(ref)) ? -1 : Number(ref)) as any;
@@ -27549,6 +27617,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         return res.status(404).json({ error: "Dossier introuvable." });
       }
 
+      request.has_complaint = request.complaints_count > 0;
       res.json(request);
     } catch (err: any) {
       res.status(500).json({ error: "Erreur lors de la recherche du statut." });
@@ -28098,6 +28167,27 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
     } catch (err: any) {
       console.error("Test email error:", err);
       res.status(500).json({ error: "Échec de l'envoi du mail : " + (err.message || err) });
+    }
+  });
+
+  app.post("/api/super-admin/test-sms", authenticateToken, requireSuperAdmin, async (req: any, res) => {
+    try {
+      const { phone } = req.body;
+      if (!phone) return res.status(400).json({ error: "Numéro de téléphone requis." });
+      
+      const result = await sendWhatsAppSimulation({
+        to: phone,
+        message: "Test de configuration SMS / WhatsApp - MégafixaEduc Pro. Si vous recevez ce message, votre passerelle est opérationnelle."
+      });
+      
+      if (result.simulated) {
+        res.json({ success: true, simulated: true, message: "Envoi simulé dans la console (aucune passerelle réelle configurée)." });
+      } else {
+        res.json({ success: true, simulated: false, message: "SMS de test envoyé avec succès via votre passerelle !" });
+      }
+    } catch (err: any) {
+      console.error("Test SMS error:", err);
+      res.status(500).json({ success: false, error: err.message });
     }
   });
 
