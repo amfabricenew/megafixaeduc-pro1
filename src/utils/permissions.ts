@@ -545,5 +545,15 @@ export function getUserGrantedPages(permissions: any[] | undefined, userRole?: s
  * Checks if a user has write permissions for a specific page path.
  */
 export function canWritePage(permissions: any[] | undefined, targetPath: string, userRole?: string): boolean {
+  // Global features lock check
+  if (typeof window !== 'undefined' && userRole !== 'super_admin') {
+    const userStr = localStorage.getItem('user');
+    if (userStr) {
+      const userObj = JSON.parse(userStr);
+      if (userObj.features_locked === 1) {
+        return false;
+      }
+    }
+  }
   return getPageAccessMode(permissions, targetPath, userRole) === 'read_write';
 }

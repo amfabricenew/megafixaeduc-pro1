@@ -185,6 +185,28 @@ try { db.prepare("ALTER TABLE classes ADD COLUMN plafond_conduite_t2 REAL DEFAUL
 try { db.prepare("ALTER TABLE classes ADD COLUMN plafond_conduite_t3 REAL DEFAULT 20").run(); } catch(e) {}
 try { db.prepare("ALTER TABLE matieres ADD COLUMN est_disciplinaire INTEGER DEFAULT 0").run(); } catch(e) {}
 
+// School Creation Requests Workflow Migrations
+try { db.prepare("ALTER TABLE school_creation_requests ADD COLUMN last_notice_type TEXT").run(); } catch(e) {}
+try { db.prepare("ALTER TABLE school_creation_requests ADD COLUMN last_notice_sent_at DATETIME").run(); } catch(e) {}
+try { db.prepare("ALTER TABLE school_creation_requests ADD COLUMN complaint_text TEXT").run(); } catch(e) {}
+try { db.prepare("ALTER TABLE school_creation_requests ADD COLUMN complaint_at DATETIME").run(); } catch(e) {}
+try { db.prepare("ALTER TABLE school_creation_requests ADD COLUMN auto_rejected_at DATETIME").run(); } catch(e) {}
+
+try { db.prepare("ALTER TABLE school_info ADD COLUMN features_locked INTEGER DEFAULT 0").run(); } catch(e) {}
+try { db.prepare("ALTER TABLE school_info ADD COLUMN features_locked_motif TEXT").run(); } catch(e) {}
+db.exec(`
+  CREATE TABLE IF NOT EXISTS reclamations_demandes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id INTEGER NOT NULL,
+    message TEXT NOT NULL,
+    statut TEXT DEFAULT 'pending' CHECK(statut IN ('pending', 'resolved', 'closed')),
+    admin_response TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(request_id) REFERENCES school_creation_requests(id) ON DELETE CASCADE
+  );
+`);
+
 // Robust Data Persistence Layer (Checkpoint System)
 // In cloud environments like Cloud Run, the local filesystem is ephemeral.
 // We use a periodic SQL dump to the workspace which AI Studio persists.
@@ -317,6 +339,53 @@ restoreFromCheckpoint().catch((err) => {
 
 // Run an initial checkpoint shortly after startup to ensure cloud persistence is initialized
 setTimeout(saveCheckpoint, 3000);
+
+// Auto-reject school requests older than 24h with no action
+async function processAutoRejection() {
+  try {
+    // Find requests that are pending or payment_pending and older than 24h
+    // We check if created_at is older than 24h AND they are not approved/rejected
+    const requests = db.prepare(`
+      SELECT * FROM school_creation_requests 
+      WHERE statut IN ('pending', 'payment_pending', 'payment_confirmed')
+      AND (
+        (last_notice_sent_at IS NOT NULL AND julianday('now') - julianday(last_notice_sent_at) >= 1)
+        OR 
+        (last_notice_sent_at IS NULL AND julianday('now') - julianday(created_at) >= 1)
+      )
+    `).all() as any[];
+
+    for (const req of requests) {
+      const reason = "Demande rejetée automatiquement après 24H d'inactivité ou absence de validation.";
+      db.prepare(`
+        UPDATE school_creation_requests 
+        SET statut = 'rejected', 
+            motif_rejet = ?, 
+            auto_rejected_at = CURRENT_TIMESTAMP, 
+            updated_at = CURRENT_TIMESTAMP 
+        WHERE id = ?
+      `).run(reason, req.id);
+
+      console.log(`[Auto-Rejection] Request ${req.reference} rejected after 24h.`);
+
+      // Send Email
+      sendMailWithFallback({
+        to: req.demandeur_email,
+        subject: `⚠️ Mise à jour de votre demande d'école - ${req.nom_ecole}`,
+        text: `Bonjour ${req.demandeur_nom},\n\nNous vous informons que votre demande de création de compte pour « ${req.nom_ecole} » a été classée sans suite car elle est restée en attente pendant plus de 24 heures sans action complémentaire.\n\nSi vous estimez qu'il s'agit d'une erreur ou si vous avez déjà effectué votre paiement, vous pouvez déposer une réclamation en cliquant sur le lien ci-dessous.\n\nLien de réclamation : ${APP_URL}/school-request?ref=${req.reference}&action=complaint\n\nCordialement,\nL'équipe MégafixaEduc Pro`,
+      }).catch(() => {});
+
+      // Send WhatsApp
+      const waMessage = `Bonjour ${req.demandeur_nom}, votre demande pour « ${req.nom_ecole} » (Réf: ${req.reference}) a été rejetée automatiquement après 24H. \n\nVous pouvez faire une réclamation ici : ${APP_URL}/school-request?ref=${req.reference}&action=complaint`;
+      sendWhatsAppSimulation({ to: req.demandeur_whatsapp || req.demandeur_telephone, message: waMessage, reference: req.reference }).catch(() => {});
+    }
+  } catch (err) {
+    console.error("[Auto-Rejection Error]:", err);
+  }
+}
+
+// Check for auto-rejections every hour
+setInterval(processAutoRejection, 60 * 60 * 1000);
 
 // Periodic checkpoint (every 10 minutes to reduce frequency and server load)
 setInterval(saveCheckpoint, 10 * 60 * 1000);
@@ -3401,6 +3470,23 @@ interface SendEmailResult {
   success: boolean;
   simulated: boolean;
   error?: string;
+}
+
+async function sendWhatsAppSimulation(options: { to: string, message: string, reference?: string }) {
+  const { to, message, reference } = options;
+  const cleanPhone = to.replace(/\s+/g, '');
+  
+  console.log(`
+  --------------------------------------------------
+  [WHATSAPP SIMULATION]
+  To: ${cleanPhone}
+  Reference: ${reference || 'N/A'}
+  Message: ${message}
+  --------------------------------------------------
+  `);
+  
+  // Note: Here we could integrate a real API like Twilio, MessageBird, or WhatsApp Business API
+  return { success: true, simulated: true };
 }
 
 async function sendMailWithFallback(options: SendEmailOptions): Promise<SendEmailResult> {
@@ -19334,10 +19420,9 @@ function executeYearTransition(
     }
 
     // After account creation or activation, the user's email is an authorized identifier to freely log into their school space with their password
-    if (user.approuve === 0 || user.is_first_login === 1 || user.otp_code) {
-      db.prepare("UPDATE utilisateurs SET approuve = 1, is_first_login = 0, otp_code = NULL, otp_expiry = NULL WHERE id = ?").run(user.id);
+    if (user.approuve === 0 || user.otp_code) {
+      db.prepare("UPDATE utilisateurs SET approuve = 1, otp_code = NULL, otp_expiry = NULL WHERE id = ?").run(user.id);
       user.approuve = 1;
-      user.is_first_login = 0;
     }
     
     logActivity(user.id, 'LOGIN', 'USER', user.id, { email: user.email }, user.school_id);
@@ -19380,6 +19465,7 @@ function executeYearTransition(
         nom: user.nom, 
         email: user.email, 
         role: user.role,
+        is_first_login: user.is_first_login,
         cycle: cycle,
         can_write: user.can_write,
         is_test_account: user.is_test_account || 0,
@@ -19391,7 +19477,7 @@ function executeYearTransition(
   });
 
   app.get("/api/auth/me", authenticateToken, (req: any, res: any) => {
-    const user = db.prepare("SELECT id, nom, email, role, approuve, permissions, enseignant_id, personnel_id, eleve_id, google_id, school_id, is_test_account FROM utilisateurs WHERE id = ?").get(req.user.id) as any;
+    const user = db.prepare("SELECT id, nom, email, role, approuve, permissions, enseignant_id, personnel_id, eleve_id, google_id, school_id, is_test_account, is_first_login FROM utilisateurs WHERE id = ?").get(req.user.id) as any;
     if (!user) return res.status(404).json({ error: "Utilisateur non trouvé" });
     
     // Get default permissions for role
@@ -19418,13 +19504,15 @@ function executeYearTransition(
     
     if (user.school_id) {
       try {
-        const school = db.prepare("SELECT nom, code_ecole, statut_abonnement, plan_abonnement, espace_primaire_actif, espace_secondaire_actif, espace_primaire_motif_verrouillage, espace_secondaire_motif_verrouillage FROM school_info WHERE id = ?").get(user.school_id) as any;
+        const school = db.prepare("SELECT nom, code_ecole, statut_abonnement, plan_abonnement, espace_primaire_actif, espace_secondaire_actif, espace_primaire_motif_verrouillage, espace_secondaire_motif_verrouillage, features_locked, features_locked_motif FROM school_info WHERE id = ?").get(user.school_id) as any;
         if (school) {
           user.school_info = school;
           user.espace_primaire_actif = (school.espace_primaire_actif !== undefined && school.espace_primaire_actif !== null) ? Number(school.espace_primaire_actif) : 1;
           user.espace_secondaire_actif = (school.espace_secondaire_actif !== undefined && school.espace_secondaire_actif !== null) ? Number(school.espace_secondaire_actif) : 1;
           user.espace_primaire_motif_verrouillage = school.espace_primaire_motif_verrouillage || null;
           user.espace_secondaire_motif_verrouillage = school.espace_secondaire_motif_verrouillage || null;
+          user.features_locked = Number(school.features_locked || 0);
+          user.features_locked_motif = school.features_locked_motif || null;
         }
       } catch (e) {}
     }
@@ -26888,7 +26976,9 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         espace_primaire_actif,
         espace_secondaire_actif,
         espace_primaire_motif_verrouillage,
-        espace_secondaire_motif_verrouillage
+        espace_secondaire_motif_verrouillage,
+        features_locked,
+        features_locked_motif
       } = req.body;
 
       if (!nom || !nom.trim()) {
@@ -26913,7 +27003,9 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
           espace_primaire_actif = COALESCE(?, espace_primaire_actif),
           espace_secondaire_actif = COALESCE(?, espace_secondaire_actif),
           espace_primaire_motif_verrouillage = COALESCE(?, espace_primaire_motif_verrouillage),
-          espace_secondaire_motif_verrouillage = COALESCE(?, espace_secondaire_motif_verrouillage)
+          espace_secondaire_motif_verrouillage = COALESCE(?, espace_secondaire_motif_verrouillage),
+          features_locked = COALESCE(?, features_locked),
+          features_locked_motif = COALESCE(?, features_locked_motif)
         WHERE id = ?
       `).run(
         nom.trim(),
@@ -26930,6 +27022,8 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         secActif,
         espace_primaire_motif_verrouillage !== undefined ? (espace_primaire_motif_verrouillage ? String(espace_primaire_motif_verrouillage).trim() : null) : null,
         espace_secondaire_motif_verrouillage !== undefined ? (espace_secondaire_motif_verrouillage ? String(espace_secondaire_motif_verrouillage).trim() : null) : null,
+        features_locked !== undefined ? (features_locked === 1 || features_locked === true ? 1 : 0) : null,
+        features_locked_motif !== undefined ? (features_locked_motif ? String(features_locked_motif).trim() : null) : null,
         schoolId
       );
 
@@ -26960,7 +27054,9 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         espace_primaire_actif,
         espace_secondaire_actif,
         espace_primaire_motif_verrouillage,
-        espace_secondaire_motif_verrouillage
+        espace_secondaire_motif_verrouillage,
+        features_locked,
+        features_locked_motif
       } = req.body;
 
       const primActif = espace_primaire_actif === 0 || espace_primaire_actif === false ? 0 : 1;
@@ -26971,13 +27067,17 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
           espace_primaire_actif = ?,
           espace_secondaire_actif = ?,
           espace_primaire_motif_verrouillage = ?,
-          espace_secondaire_motif_verrouillage = ?
+          espace_secondaire_motif_verrouillage = ?,
+          features_locked = ?,
+          features_locked_motif = ?
         WHERE id = ?
       `).run(
         primActif,
         secActif,
         espace_primaire_motif_verrouillage ? String(espace_primaire_motif_verrouillage).trim() : null,
         espace_secondaire_motif_verrouillage ? String(espace_secondaire_motif_verrouillage).trim() : null,
+        features_locked === 1 || features_locked === true ? 1 : 0,
+        features_locked_motif ? String(features_locked_motif).trim() : null,
         schoolId
       );
 
@@ -27077,13 +27177,21 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       }
 
       // Temporarily disable foreign keys for atomic cascade cleanup
+      // Thoroughly disable foreign key checks for this connection before the transaction
       db.pragma('foreign_keys = OFF');
 
       try {
         const deleteTx = db.transaction(() => {
-          // Identify all tables in the database with a school_id column
+          // 1. Delete dependent records with explicit FK relationships first to be safe
+          try {
+            db.prepare("DELETE FROM audit_logs WHERE school_id = ?").run(schoolId);
+            db.prepare("DELETE FROM utilisateurs WHERE school_id = ?").run(schoolId);
+          } catch (e) {}
+
+          // 2. Identify all other tables in the database with a school_id column
           const allTables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all() as any[];
           for (const t of allTables) {
+            if (t.name === 'school_info' || t.name === 'utilisateurs' || t.name === 'audit_logs') continue;
             try {
               const cols = db.prepare(`PRAGMA table_info(${t.name})`).all() as any[];
               if (cols.some(c => c.name === 'school_id')) {
@@ -27094,7 +27202,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
             }
           }
 
-          // Unlink any transactions or licenses referencing this school_id
+          // 3. Unlink any transactions or licenses referencing this school_id (set to NULL instead of delete)
           try {
             db.prepare("UPDATE subscription_transactions SET school_id = NULL WHERE school_id = ?").run(schoolId);
           } catch (e) {}
@@ -27102,13 +27210,13 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
             db.prepare("UPDATE subscription_licenses SET school_id = NULL WHERE school_id = ?").run(schoolId);
           } catch (e) {}
 
-          // Delete the school itself
+          // 4. Delete the school itself
           db.prepare("DELETE FROM school_info WHERE id = ?").run(schoolId);
         });
 
         deleteTx();
       } finally {
-        // Always restore foreign keys integrity check
+        // Restore foreign keys integrity check
         db.pragma('foreign_keys = ON');
       }
 
@@ -27572,26 +27680,58 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
 
       approveTx();
 
-      // Send email to applicant with credentials
+      // Generate PDF Fiche
+      let pdfBuffer: Buffer | null = null;
       try {
-        sendMailWithFallback({
+        pdfBuffer = generateFicheAbonnementPdfBuffer({
+          reference: request.reference,
+          schoolName: request.nom_ecole,
+          adminNom: request.demandeur_nom,
+          email: cleanEmail,
+          planName: plan,
+          amount: request.montant_estime || 0,
+          licenseKey: subscriptionKey,
+          loginUrl: `${APP_URL}/login?code=${finalCode}&email=${cleanEmail}`,
+          dateDebut: new Date().toISOString().split('T')[0],
+          dateFin: expiryDate
+        });
+      } catch (e) {
+        console.warn("PDF generation failed during approval:", e);
+      }
+
+      // Send email to applicant with credentials and PDF
+      try {
+        await sendMailWithFallback({
           to: cleanEmail,
           subject: `🎉 Bienvenue sur MégafixaEduc Pro ! Votre compte école « ${request.nom_ecole} » est actif`,
-          text: `Bonjour ${request.demandeur_nom},\n\nFélicitations ! Votre demande pour « ${request.nom_ecole} » a été acceptée par l'administration.\n\nVos identifiants d'accès :\n- Nom de l'école : ${request.nom_ecole}\n- Code École : ${finalCode}\n- Email de connexion : ${cleanEmail}\n- Mot de passe temporaire : ${defaultPassword}\n- Formule : ${plan}\n\nConnectez-vous dès maintenant sur la plateforme MégafixaEduc Pro.\n\nCordialement,\nL'équipe MégafixaEduc Pro`,
+          text: `Bonjour ${request.demandeur_nom},\n\nFélicitations ! Votre demande pour « ${request.nom_ecole} » a été acceptée.\n\nVos identifiants :\n- Code École : ${finalCode}\n- Email : ${cleanEmail}\n- Mot de passe : ${defaultPassword}\n\nConnectez-vous ici : ${APP_URL}/login?code=${finalCode}&email=${cleanEmail}\n\nCordialement,`,
           html: `<div style="font-family:sans-serif;padding:24px;background:#f8fafc;border-radius:16px;max-width:560px;margin:auto;">
             <h2 style="color:#0f172a;margin-top:0;">Félicitations et bienvenue ! 🎉</h2>
             <p style="color:#334155;font-size:14px;line-height:1.6;">Bonjour <strong>${request.demandeur_nom}</strong>,</p>
-            <p style="color:#334155;font-size:14px;line-height:1.6;">Votre demande d'ouverture de compte pour l'établissement <strong>${request.nom_ecole}</strong> a été validée avec succès.</p>
+            <p style="color:#334155;font-size:14px;line-height:1.6;">Votre demande pour <strong>${request.nom_ecole}</strong> a été validée.</p>
             <div style="background:#ffffff;border:1px solid #cbd5e1;padding:18px;border-radius:12px;margin:20px 0;">
-              <h4 style="margin-top:0;margin-bottom:12px;color:#4f46e5;font-size:14px;text-transform:uppercase;">Vos Accès Administrateur</h4>
-              <p style="margin:6px 0;font-size:13px;"><strong>Code École :</strong> <span style="font-family:monospace;background:#f1f5f9;padding:2px 6px;border-radius:4px;font-weight:bold;">${finalCode}</span></p>
-              <p style="margin:6px 0;font-size:13px;"><strong>Identifiant (Email) :</strong> ${cleanEmail}</p>
-              <p style="margin:6px 0;font-size:13px;"><strong>Mot de passe initial :</strong> <span style="font-family:monospace;background:#fef3c7;color:#92400e;padding:2px 8px;border-radius:4px;font-weight:bold;">${defaultPassword}</span></p>
-              <p style="margin:6px 0;font-size:13px;"><strong>Formule :</strong> ${plan} (Valable jusqu'au ${expiryDate})</p>
+              <h4 style="margin-top:0;color:#4f46e5;">Vos Accès Administrateur</h4>
+              <p style="margin:6px 0;font-size:13px;"><strong>Code École :</strong> ${finalCode}</p>
+              <p style="margin:6px 0;font-size:13px;"><strong>Identifiant :</strong> ${cleanEmail}</p>
+              <p style="margin:6px 0;font-size:13px;"><strong>Mot de passe initial :</strong> ${defaultPassword}</p>
             </div>
-            <p style="color:#64748b;font-size:12px;">Vous pourrez personnaliser votre mot de passe et vos informations dès votre première connexion.</p>
-          </div>`
-        }).catch(e => console.warn("Email approbation non bloquant:", e));
+            <p style="text-align:center;margin-top:20px;">
+              <a href="${APP_URL}/login?code=${finalCode}&email=${cleanEmail}" style="display:inline-block;padding:12px 24px;background:#4f46e5;color:white;text-decoration:none;border-radius:10px;font-weight:bold;">Se connecter</a>
+            </p>
+            <p style="color:#64748b;font-size:11px;margin-top:20px;">Pour votre sécurité, il vous sera demandé de modifier ce mot de passe dès votre première connexion.</p>
+          </div>`,
+          attachments: pdfBuffer ? [{
+            filename: `Fiche_Creation_Compte_${finalCode}.pdf`,
+            content: pdfBuffer,
+            contentType: 'application/pdf'
+          }] : undefined
+        });
+      } catch (e) {}
+
+      // Send WhatsApp
+      try {
+        const waMessage = `🎉 Félicitations ${request.demandeur_nom} ! Votre compte école « ${request.nom_ecole} » est prêt.\n\n🔑 Vos accès :\n- Code École : ${finalCode}\n- Email : ${cleanEmail}\n- Mot de passe : ${defaultPassword}\n\n🔗 Connectez-vous ici : ${APP_URL}/login?code=${finalCode}&email=${cleanEmail}\n\n⚠️ Veuillez changer votre mot de passe après connexion.`;
+        sendWhatsAppSimulation({ to: request.demandeur_whatsapp || request.demandeur_telephone, message: waMessage, reference: request.reference });
       } catch (e) {}
 
       // SaaS Audit Log
@@ -27625,6 +27765,122 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
   });
 
   // Rejet d'une demande par le Super Admin
+  // Envoi d'une notification spécifique au demandeur
+  app.post("/api/super-admin/school-requests/:id/send-notice", authenticateToken, requireSuperAdmin, async (req, res) => {
+    try {
+      const requestId = parseInt(req.params.id, 10);
+      const { type } = req.body; // 'payment_missing', 'incorrect_reference', 'pending_24h'
+
+      const request = db.prepare("SELECT * FROM school_creation_requests WHERE id = ?").get(requestId) as any;
+      if (!request) return res.status(404).json({ error: "Demande introuvable." });
+
+      let subject = "";
+      let message = "";
+      let waMessage = "";
+
+      if (type === 'payment_missing') {
+        subject = `🕒 Rappel : Paiement non reçu pour votre demande - ${request.nom_ecole}`;
+        message = `Bonjour ${request.demandeur_nom},\n\nNous n'avons pas encore reçu la confirmation de paiement pour votre demande de création de compte école « ${request.nom_ecole} ».\n\nMerci de procéder au règlement ou de nous transmettre votre référence de transaction pour finaliser la création.\n\nCordialement,`;
+        waMessage = `🕒 Bonjour ${request.demandeur_nom}, nous n'avons pas reçu le paiement pour « ${request.nom_ecole} ». Merci de régulariser pour activer votre compte.`;
+      } else if (type === 'incorrect_reference') {
+        subject = `⚠️ Référence de paiement incorrecte - ${request.nom_ecole}`;
+        message = `Bonjour ${request.demandeur_nom},\n\nLa référence de paiement que vous avez fournie pour l'établissement « ${request.nom_ecole} » semble incorrecte ou introuvable.\n\nMerci de vérifier et de nous renvoyer la bonne référence.\n\nCordialement,`;
+        waMessage = `⚠️ Bonjour ${request.demandeur_nom}, la référence de paiement pour « ${request.nom_ecole} » est incorrecte. Merci de nous renvoyer la bonne référence.`;
+      } else if (type === 'pending_24h') {
+        subject = `⏳ Information : Création de compte mise en attente - ${request.nom_ecole}`;
+        message = `Bonjour ${request.demandeur_nom},\n\nVotre demande pour « ${request.nom_ecole} » est en attente de validation finale. Elle sera traitée dans les 24H.\n\nSans action de votre part ou validation de notre part dans ce délai, la demande pourrait être classée.\n\nCordialement,`;
+        waMessage = `⏳ Bonjour ${request.demandeur_nom}, votre demande pour « ${request.nom_ecole} » est en attente (24H). Elle sera traitée très prochainement.`;
+      } else {
+        return res.status(400).json({ error: "Type de notification invalide." });
+      }
+
+      // Update request
+      db.prepare(`
+        UPDATE school_creation_requests 
+        SET last_notice_type = ?, 
+            last_notice_sent_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).run(type, requestId);
+
+      // Send Email
+      sendMailWithFallback({ to: request.demandeur_email, subject, text: message }).catch(() => {});
+      
+      // Send WhatsApp
+      sendWhatsAppSimulation({ to: request.demandeur_whatsapp || request.demandeur_telephone, message: waMessage, reference: request.reference }).catch(() => {});
+
+      res.json({ success: true, message: "Notification envoyée avec succès au demandeur." });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Déposer une réclamation (Public)
+  app.post("/api/public/school-requests/:ref/complaint", async (req, res) => {
+    try {
+      const { ref } = req.params;
+      const { message } = req.body;
+
+      if (!message || message.trim().length < 10) {
+        return res.status(400).json({ error: "Le message de réclamation doit contenir au moins 10 caractères." });
+      }
+
+      const request = db.prepare("SELECT * FROM school_creation_requests WHERE reference = ?").get(ref) as any;
+      if (!request) return res.status(404).json({ error: "Demande introuvable." });
+
+      // Check if already has a pending complaint
+      const existing = db.prepare("SELECT id FROM reclamations_demandes WHERE request_id = ? AND statut = 'pending'").get(request.id);
+      if (existing) {
+        return res.status(400).json({ error: "Une réclamation est déjà en cours de traitement pour cette demande." });
+      }
+
+      db.prepare(`
+        INSERT INTO reclamations_demandes (request_id, message) VALUES (?, ?)
+      `).run(request.id, message.trim());
+
+      db.prepare(`
+        UPDATE school_creation_requests SET updated_at = CURRENT_TIMESTAMP WHERE id = ?
+      `).run(request.id);
+
+      res.json({ success: true, message: "Votre réclamation a été enregistrée. Le Super Admin en a été notifié." });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Liste des réclamations pour le Super Admin
+  app.get("/api/super-admin/complaints", authenticateToken, requireSuperAdmin, (req, res) => {
+    try {
+      const complaints = db.prepare(`
+        SELECT r.*, s.nom_ecole, s.reference, s.demandeur_nom, s.demandeur_email, s.demandeur_telephone
+        FROM reclamations_demandes r
+        JOIN school_creation_requests s ON r.request_id = s.id
+        ORDER BY r.created_at DESC
+      `).all();
+      res.json(complaints);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Résoudre une réclamation
+  app.put("/api/super-admin/complaints/:id/resolve", authenticateToken, requireSuperAdmin, (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const { admin_response, status } = req.body; // status: 'resolved' or 'closed'
+
+      db.prepare(`
+        UPDATE reclamations_demandes 
+        SET statut = ?, admin_response = ?, updated_at = CURRENT_TIMESTAMP 
+        WHERE id = ?
+      `).run(status || 'resolved', admin_response || null, id);
+
+      res.json({ success: true, message: "Réclamation mise à jour." });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.post("/api/super-admin/school-requests/:id/reject", authenticateToken, requireSuperAdmin, (req, res) => {
     try {
       const requestId = parseInt(req.params.id, 10);

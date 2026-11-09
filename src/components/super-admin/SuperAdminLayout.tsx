@@ -31,7 +31,7 @@ import {
   School,
   Check
 } from 'lucide-react';
-import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate, Outlet } from 'react-router-dom';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import toast from 'react-hot-toast';
@@ -152,7 +152,7 @@ const MENU_ITEMS: MenuItem[] = [
   },
 ];
 
-export default function SuperAdminLayout({ children }: { children: React.ReactNode }) {
+export default function SuperAdminLayout() {
   const { user, logout } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
@@ -538,7 +538,7 @@ export default function SuperAdminLayout({ children }: { children: React.ReactNo
         {/* Content Area */}
         <div className="flex-1 overflow-y-auto p-6 scrollbar-hide">
           <div className="max-w-7xl mx-auto">
-            {children}
+            <Outlet />
           </div>
         </div>
       </main>

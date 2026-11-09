@@ -57,11 +57,10 @@ import {
   BellRing,
   BookOpenText,
   Layers,
-  CheckSquare,
-  Github,
+  CheckSquare, 
   Lock
 } from 'lucide-react';
-import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate, Outlet } from 'react-router-dom';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { useTranslation } from '../contexts/TranslationContext';
@@ -73,13 +72,13 @@ import { hasPageAccess, getPageAccessMode } from '../utils/permissions';
 import { PWAInstallButton } from './PWAInstallButton';
 import { useOnlineStatus } from '../hooks/useOnlineStatus';
 import { LanguageSelector } from './LanguageSelector';
-import { GitHubPublishModal } from './GitHubPublishModal';
+
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-export default function Layout({ children }: { children: React.ReactNode }) {
+export default function Layout() {
   const { t } = useTranslation();
   const isOnline = useOnlineStatus();
   const { user, logout, years, selectedYearId, setSelectedYearId } = useAuth();
@@ -88,7 +87,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   const activeYear = years.find((y: any) => y.id === selectedYearId) || years.find((y: any) => y.est_active === 1) || years[0];
   const [schoolInfo, setSchoolInfo] = React.useState<any>(null);
   const [localUser, setLocalUser] = React.useState<any>(null);
-  const [showGitHubModal, setShowGitHubModal] = React.useState(false);
+
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -138,8 +137,8 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     (localUser?.espace_secondaire_actif === 0)
   );
 
-  const primaireLockMotif = schoolInfo?.espace_primaire_motif_verrouillage || localUser?.espace_primaire_motif_verrouillage || "L'accès à l'espace Maternelle & Primaire a été temporairement suspendu ou verrouillé par le Super Administrateur.";
-  const secondaireLockMotif = schoolInfo?.espace_secondaire_motif_verrouillage || localUser?.espace_secondaire_motif_verrouillage || "L'accès à l'espace Secondaire a été temporairement suspendu ou verrouillé par le Super Administrateur.";
+  const primaireLockMotif = schoolInfo?.espace_primaire_motif_verrouillage || localUser?.espace_primaire_motif_verrouillage || "L'accès au cycle Maternelle & Primaire a été verrouillé pour cet établissement par le Super Administrateur. Veuillez contacter l'administration de votre école ou le support technique pour débloquer cet espace.";
+  const secondaireLockMotif = schoolInfo?.espace_secondaire_motif_verrouillage || localUser?.espace_secondaire_motif_verrouillage || "L'accès au cycle Secondaire a été verrouillé pour cet établissement par le Super Administrateur. Veuillez contacter l'administration de votre école ou le support technique pour débloquer cet espace.";
 
   const [lockedModalInfo, setLockedModalInfo] = React.useState<{ spaceName: string; motif: string } | null>(null);
 
@@ -368,13 +367,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
           </div>
         </div>
           <div className="flex items-center gap-1.5 sm:gap-2">
-            <button
-              onClick={() => setShowGitHubModal(true)}
-              className="p-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-lg transition-colors flex items-center justify-center shadow-xs"
-              title="Publier sur GitHub en 1 clic"
-            >
-              <Github size={16} />
-            </button>
+
             <LanguageSelector variant="pill" className="scale-90" />
             <PWAInstallButton />
             <NotificationBell />
@@ -646,22 +639,15 @@ export default function Layout({ children }: { children: React.ReactNode }) {
             </select>
           </div>
 
-          <button
-            onClick={() => setShowGitHubModal(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl shadow-xs transition-all cursor-pointer"
-            title="Publier sur GitHub en 1 clic"
-          >
-            <Github size={14} className="text-white" />
-            <span className="hidden xl:inline">GitHub 1-Clic</span>
-          </button>
+
           <LanguageSelector variant="pill" />
           <PWAInstallButton />
           <NotificationBell />
         </div>
         
         <div className="p-4 md:px-8 md:pb-8 flex-1 w-full max-w-7xl mx-auto">
-          {/* Teacher First Login Password Change Reminder Banner */}
-          {localUser?.role === 'enseignant' && (localUser?.is_first_login === 1 || localUser?.is_first_login === true || localUser?.is_first_login === '1') && location.pathname !== '/mon-compte' && (
+          {/* First Login Password Change Reminder Banner */}
+          {(localUser?.role === 'enseignant' || localUser?.role === 'admin') && (localUser?.is_first_login === 1 || localUser?.is_first_login === true || localUser?.is_first_login === '1') && location.pathname !== '/mon-compte' && (
             <div className="mb-6 p-4 sm:p-5 bg-gradient-to-r from-amber-500 via-amber-600 to-orange-600 rounded-2xl text-white shadow-lg flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border border-amber-400/40 animate-in fade-in slide-in-from-top-2">
               <div className="flex items-center gap-3.5">
                 <div className="w-11 h-11 rounded-xl bg-white/20 backdrop-blur-sm flex items-center justify-center shrink-0 border border-white/30">
@@ -669,10 +655,10 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                 </div>
                 <div>
                   <h4 className="font-bold text-sm sm:text-base text-white flex items-center gap-2">
-                    Première connexion : Sécurisez votre compte enseignant
+                    Sécurisez votre compte : Modification du mot de passe requise
                   </h4>
                   <p className="text-xs sm:text-sm text-amber-100 mt-0.5 max-w-2xl">
-                    Pour garantir la confidentialité de vos notes et de vos données, nous vous rappelons de personnaliser votre mot de passe dans la page <strong>Mon Compte</strong>.
+                    Pour garantir la sécurité de vos données, nous vous demandons de personnaliser votre mot de passe initial dans la page <strong>Mon Compte</strong>.
                   </p>
                 </div>
               </div>
@@ -686,8 +672,30 @@ export default function Layout({ children }: { children: React.ReactNode }) {
             </div>
           )}
 
+          {/* Global Features Lock Banner */}
+          {!isSuperAdmin && (schoolInfo?.features_locked === 1 || localUser?.features_locked === 1) && (
+            <div className="mb-6 p-4 sm:p-5 bg-gradient-to-r from-rose-600 via-rose-700 to-rose-800 rounded-2xl text-white shadow-lg flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border border-rose-500/40 animate-pulse">
+              <div className="flex items-center gap-3.5">
+                <div className="w-11 h-11 rounded-xl bg-white/20 backdrop-blur-sm flex items-center justify-center shrink-0 border border-white/30">
+                  <Lock size={22} className="text-white" />
+                </div>
+                <div>
+                  <h4 className="font-bold text-sm sm:text-base text-white flex items-center gap-2">
+                    Fonctionnalités Verrouillées
+                  </h4>
+                  <p className="text-xs sm:text-sm text-rose-100 mt-0.5 max-w-2xl">
+                    {schoolInfo?.features_locked_motif || localUser?.features_locked_motif || "Toutes les fonctionnalités de modification ont été suspendues pour votre établissement par le Super Administrateur."}
+                  </p>
+                </div>
+              </div>
+              <div className="px-5 py-2.5 bg-white/10 rounded-xl border border-white/20 text-white font-bold text-xs sm:text-sm whitespace-nowrap">
+                Accès en lecture seule
+              </div>
+            </div>
+          )}
+
           <ErrorBoundary inline key={location.pathname + location.search}>
-            {children}
+            <Outlet />
           </ErrorBoundary>
         </div>
         
@@ -775,7 +783,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
         </div>
       )}
 
-      <GitHubPublishModal isOpen={showGitHubModal} onClose={() => setShowGitHubModal(false)} />
+
     </div>
   );
 }

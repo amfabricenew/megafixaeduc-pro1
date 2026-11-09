@@ -29,15 +29,14 @@ import {
   ArrowDownToLine,
   Activity,
   Check,
-  Info,
-  Github
+  Info
 } from 'lucide-react';
 import { BackupConfig, BackupSnapshot } from '../../types';
-import { GitHubPublishModal } from '../GitHubPublishModal';
+
 
 export default function BackupSettingsTab() {
   const confirm = useConfirm();
-  const [showGitHubModal, setShowGitHubModal] = useState(false);
+
   const [config, setConfig] = useState<BackupConfig>({
     school_id: 1,
     auto_backup_enabled: 1,
@@ -389,14 +388,7 @@ export default function BackupSettingsTab() {
             <span>Télécharger le code source (ZIP &lt; 25 Mo)</span>
           </a>
 
-          <button
-            onClick={() => setShowGitHubModal(true)}
-            className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white border border-slate-800 text-xs font-bold transition-all shadow-sm cursor-pointer"
-            title="Publier directement sur GitHub en 1 clic"
-          >
-            <Github className="w-4 h-4 text-white" />
-            <span>Publier sur GitHub (1 Clic)</span>
-          </button>
+
         </div>
 
         <div className="flex items-center gap-2">
@@ -905,7 +897,7 @@ export default function BackupSettingsTab() {
         </div>
       )}
 
-      <GitHubPublishModal isOpen={showGitHubModal} onClose={() => setShowGitHubModal(false)} />
+
     </div>
   );
 }

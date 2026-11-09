@@ -20,7 +20,9 @@ import {
   ArrowRight, 
   MessageSquare,
   HelpCircle,
-  Sparkles
+  Sparkles,
+  XCircle,
+  LifeBuoy
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 
@@ -98,9 +100,36 @@ export default function SchoolCreationRequestModal({
   const [paymentRef, setPaymentRef] = useState('');
   const [submittingPayment, setSubmittingPayment] = useState(false);
 
+  const [complaintText, setComplaintText] = useState('');
+  const [submittingComplaint, setSubmittingComplaint] = useState(false);
+  const [viewingStatus, setViewingStatus] = useState<any>(null);
+
   // Load config on mount or open
   useEffect(() => {
     if (isOpen) {
+      // Check for ref in URL to show status/complaint
+      const params = new URLSearchParams(window.location.search);
+      const ref = params.get('ref');
+      const action = params.get('action');
+
+      if (ref) {
+        setLoading(true);
+        fetch(`/api/public/school-requests/${ref}/status`)
+          .then(res => res.json())
+          .then(data => {
+            if (data && data.reference) {
+              setViewingStatus(data);
+              setCreatedRequest(data);
+              if (data.statut === 'rejected' && action === 'complaint') {
+                setStep(3); // Reuse step 3 but with complaint UI
+              } else {
+                setStep(3);
+              }
+            }
+          })
+          .finally(() => setLoading(false));
+      }
+
       fetch('/api/public/school-requests/config')
         .then(res => res.json())
         .then(data => {
@@ -114,6 +143,33 @@ export default function SchoolCreationRequestModal({
         .catch(err => console.warn('Could not load public school request config:', err));
     }
   }, [isOpen]);
+
+  const handleSubmitComplaint = async () => {
+    if (!complaintText.trim() || complaintText.length < 10) {
+      return toast.error("Veuillez saisir au moins 10 caractères.");
+    }
+    setSubmittingComplaint(true);
+    try {
+      const res = await fetch(`/api/public/school-requests/${createdRequest.reference}/complaint`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: complaintText })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        toast.success("Votre réclamation a été transmise.");
+        setComplaintText('');
+        setStep(3);
+        setViewingStatus(prev => ({ ...prev, has_complaint: true }));
+      } else {
+        toast.error(data.error || "Erreur lors de l'envoi");
+      }
+    } catch (e) {
+      toast.error("Erreur de connexion");
+    } finally {
+      setSubmittingComplaint(false);
+    }
+  };
 
   if (!isOpen) return null;
 
@@ -712,39 +768,88 @@ export default function SchoolCreationRequestModal({
           {/* STEP 3: MESSAGE D'ATTENTE 24H AVEC CONTACTS DE L'ÉQUIPE */}
           {/* ============================================================== */}
           {step === 3 && createdRequest && (
-            <div className="space-y-6 text-center py-4">
+            <div className="space-y-6 py-4">
               
-              {/* Big Animated Icon */}
-              <div className="w-20 h-20 mx-auto rounded-3xl bg-emerald-500/20 border-2 border-emerald-500/40 flex items-center justify-center text-emerald-400 shadow-xl shadow-emerald-500/20 animate-pulse">
-                <Clock size={40} />
-              </div>
+              {createdRequest.statut === 'rejected' ? (
+                <div className="space-y-6">
+                  <div className="w-20 h-20 mx-auto rounded-3xl bg-rose-500/20 border-2 border-rose-500/40 flex items-center justify-center text-rose-400">
+                    <XCircle size={40} />
+                  </div>
 
-              <div className="space-y-2">
-                <span className="text-xs font-black uppercase tracking-widest text-emerald-400 bg-emerald-500/10 px-3 py-1 rounded-full border border-emerald-500/30">
-                  Dossier en cours de traitement
-                </span>
-                <h3 className="text-xl sm:text-2xl font-black text-white">
-                  Votre demande a été transmise avec succès !
-                </h3>
-                <p className="text-xs sm:text-sm text-slate-300 max-w-lg mx-auto leading-relaxed">
-                  Nos équipes techniques et pédagogiques procèdent aux vérifications réglementaires. Votre compte école sera configuré et vos accès administrateurs vous seront transmis <strong className="text-emerald-400">dans les 24 heures au plus</strong>.
-                </p>
-              </div>
+                  <div className="text-center space-y-2">
+                    <span className="text-xs font-black uppercase tracking-widest text-rose-400 bg-rose-500/10 px-3 py-1 rounded-full border border-rose-500/30">
+                      Demande Rejetée
+                    </span>
+                    <h3 className="text-xl font-black text-white">Dossier classé sans suite</h3>
+                    <p className="text-xs text-slate-300 max-w-lg mx-auto leading-relaxed">
+                      Votre demande pour <strong className="text-white">{createdRequest.nom_ecole}</strong> a été rejetée.
+                    </p>
+                    {createdRequest.motif_rejet && (
+                      <div className="mt-3 p-4 bg-rose-950/40 border border-rose-500/30 rounded-2xl text-xs text-rose-200 italic">
+                        " {createdRequest.motif_rejet} "
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Complaint Form */}
+                  <div className="p-6 bg-slate-800/80 border border-slate-700 rounded-3xl space-y-4">
+                    <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                      <LifeBuoy size={18} className="text-indigo-400" />
+                      <span>Faire une réclamation</span>
+                    </h4>
+                    <p className="text-[11px] text-slate-400">Si vous avez déjà payé ou s'il s'agit d'une erreur, expliquez votre situation ci-dessous :</p>
+                    
+                    <textarea
+                      rows={3}
+                      value={complaintText}
+                      onChange={(e) => setComplaintText(e.target.value)}
+                      placeholder="Saisissez votre message ici..."
+                      className="w-full p-4 bg-slate-900 border border-slate-700 rounded-2xl text-xs text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+
+                    <button
+                      onClick={handleSubmitComplaint}
+                      disabled={submittingComplaint}
+                      className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs rounded-xl shadow-lg transition-all flex items-center justify-center gap-2"
+                    >
+                      {submittingComplaint ? <span className="animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent" /> : <Send size={14} />}
+                      <span>Envoyer la réclamation</span>
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="text-center space-y-6">
+                  <div className="w-20 h-20 mx-auto rounded-3xl bg-emerald-500/20 border-2 border-emerald-500/40 flex items-center justify-center text-emerald-400 shadow-xl shadow-emerald-500/20 animate-pulse">
+                    <Clock size={40} />
+                  </div>
+
+                  <div className="space-y-2">
+                    <span className="text-xs font-black uppercase tracking-widest text-emerald-400 bg-emerald-500/10 px-3 py-1 rounded-full border border-emerald-500/30">
+                      Dossier en cours de traitement
+                    </span>
+                    <h3 className="text-xl sm:text-2xl font-black text-white">
+                      Demande transmise avec succès !
+                    </h3>
+                    <p className="text-xs sm:text-sm text-slate-300 max-w-lg mx-auto leading-relaxed">
+                      Nos équipes procèdent aux vérifications. Votre compte sera configuré <strong className="text-emerald-400">dans les 24 heures</strong>.
+                    </p>
+                  </div>
+                </div>
+              )}
 
               {/* Reference Card */}
               <div className="p-4 bg-slate-800/80 border border-slate-700 rounded-2xl max-w-md mx-auto flex items-center justify-between gap-3 text-left">
                 <div>
-                  <p className="text-[10px] text-slate-400 uppercase font-black tracking-wider">Référence unique de dossier</p>
+                  <p className="text-[10px] text-slate-400 uppercase font-black tracking-wider">Référence dossier</p>
                   <p className="text-base font-mono font-bold text-indigo-400 mt-0.5">{createdRequest.reference}</p>
-                  <p className="text-[11px] text-slate-400 mt-0.5">{form.nom_ecole} • {selectedPlanDetails.name}</p>
                 </div>
                 <button
                   type="button"
-                  onClick={() => copyToClipboard(createdRequest.reference, 'Référence de dossier')}
+                  onClick={() => copyToClipboard(createdRequest.reference, 'Référence')}
                   className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-xs font-bold text-white rounded-xl transition-colors shrink-0"
                 >
-                  {copied === 'Référence de dossier' ? <Check size={14} className="text-emerald-400" /> : <Copy size={14} />}
-                  <span>{copied === 'Référence de dossier' ? 'Copié' : 'Copier'}</span>
+                  {copied === 'Référence' ? <Check size={14} className="text-emerald-400" /> : <Copy size={14} />}
+                  <span>Copier</span>
                 </button>
               </div>
 
@@ -755,60 +860,47 @@ export default function SchoolCreationRequestModal({
                     <HelpCircle size={18} />
                   </div>
                   <div>
-                    <h4 className="text-sm font-bold text-white">Besoin d'informations ou d'assistance immédiate ?</h4>
-                    <p className="text-xs text-slate-400">Contactez directement notre équipe d'assistance MégafixaEduc Pro :</p>
+                    <h4 className="text-sm font-bold text-white">Besoin d'aide ?</h4>
+                    <p className="text-xs text-slate-400">Contactez l'assistance MégafixaEduc Pro :</p>
                   </div>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2">
-                  {/* WhatsApp */}
                   <a
                     href={getWhatsAppLink(createdRequest.reference)}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="p-3.5 bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 hover:border-emerald-500 rounded-2xl flex flex-col items-center justify-center text-center gap-1.5 transition-all group cursor-pointer"
+                    className="p-3 bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 rounded-2xl flex flex-col items-center justify-center text-center gap-1.5 transition-all group"
                   >
-                    <div className="w-9 h-9 rounded-xl bg-emerald-600 flex items-center justify-center text-white group-hover:scale-110 transition-transform">
-                      <MessageSquare size={18} />
-                    </div>
-                    <span className="text-xs font-black text-white">WhatsApp Direct</span>
-                    <span className="text-[11px] text-emerald-300 font-mono">{config.support_contacts.whatsapp}</span>
+                    <MessageSquare size={18} className="text-emerald-400" />
+                    <span className="text-[10px] font-black text-white">WhatsApp</span>
                   </a>
 
-                  {/* Telephone */}
                   <a
                     href={`tel:${config.support_contacts.phone.replace(/[^0-9+]/g, '')}`}
-                    className="p-3.5 bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/40 hover:border-indigo-500 rounded-2xl flex flex-col items-center justify-center text-center gap-1.5 transition-all group cursor-pointer"
+                    className="p-3 bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/40 rounded-2xl flex flex-col items-center justify-center text-center gap-1.5 transition-all"
                   >
-                    <div className="w-9 h-9 rounded-xl bg-indigo-600 flex items-center justify-center text-white group-hover:scale-110 transition-transform">
-                      <Phone size={18} />
-                    </div>
-                    <span className="text-xs font-black text-white">Appel Téléphonique</span>
-                    <span className="text-[11px] text-indigo-300 font-mono">{config.support_contacts.phone}</span>
+                    <Phone size={18} className="text-indigo-400" />
+                    <span className="text-[10px] font-black text-white">Appel</span>
                   </a>
 
-                  {/* Email */}
                   <a
-                    href={`mailto:${config.support_contacts.email}?subject=Demande%20de%20compte%20école%20${createdRequest.reference}`}
-                    className="p-3.5 bg-slate-800/80 hover:bg-slate-700 border border-slate-700 hover:border-slate-600 rounded-2xl flex flex-col items-center justify-center text-center gap-1.5 transition-all group cursor-pointer"
+                    href={`mailto:${config.support_contacts.email}?subject=Demande%20${createdRequest.reference}`}
+                    className="p-3 bg-slate-800/80 hover:bg-slate-700 border border-slate-700 rounded-2xl flex flex-col items-center justify-center text-center gap-1.5 transition-all"
                   >
-                    <div className="w-9 h-9 rounded-xl bg-slate-700 flex items-center justify-center text-white group-hover:scale-110 transition-transform">
-                      <Mail size={18} />
-                    </div>
-                    <span className="text-xs font-black text-white">Courrier Email</span>
-                    <span className="text-[11px] text-slate-300 truncate max-w-[150px]">{config.support_contacts.email}</span>
+                    <Mail size={18} className="text-slate-400" />
+                    <span className="text-[10px] font-black text-white">Email</span>
                   </a>
                 </div>
               </div>
 
-              {/* Close Button */}
-              <div className="pt-2">
+              <div className="pt-2 text-center">
                 <button
                   type="button"
                   onClick={onClose}
                   className="w-full sm:w-auto px-8 py-3 bg-slate-800 hover:bg-slate-700 text-white font-bold text-sm rounded-xl transition-colors cursor-pointer"
                 >
-                  Fermer cette fenêtre
+                  Fermer
                 </button>
               </div>
 

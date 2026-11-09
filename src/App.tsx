@@ -15,10 +15,10 @@ import { Toaster } from 'react-hot-toast';
 import { hasPageAccess } from './utils/permissions';
 import { isPathAllowedByPlan } from './utils/subscriptions';
 import SubscriptionGatedView from './components/SubscriptionGatedView';
-import { apiFetch } from './utils/api';
 import FloatingNotificationOverlay from './components/FloatingNotificationOverlay';
 import AIAssistantWidget from './components/AIAssistantWidget';
 import Login from './pages/Login';
+import SuperAdminLayout from './components/super-admin/SuperAdminLayout';
 
 // Component that renders system overlays ONLY on non-isolated pages
 function GlobalOverlays() {
@@ -124,7 +124,6 @@ const SuperAdminSchools = lazyWithRetry(() => import('./pages/super-admin/School
 const SuperAdminSettings = lazyWithRetry(() => import('./pages/super-admin/SuperAdminSettings'));
 const AuditLogsManagement = lazyWithRetry(() => import('./pages/super-admin/AuditLogsManagement'));
 const TransactionsManagement = lazyWithRetry(() => import('./pages/super-admin/TransactionsManagement'));
-
 const SuperAdminAnalytics = lazyWithRetry(() => import('./pages/super-admin/Analytics'));
 const SuperAdminProduct = lazyWithRetry(() => import('./pages/super-admin/Product'));
 const SuperAdminPlansCatalog = lazyWithRetry(() => import('./pages/super-admin/PlansCatalog'));
@@ -133,9 +132,6 @@ const SuperAdminMarketing = lazyWithRetry(() => import('./pages/super-admin/Mark
 const SuperAdminSecurity = lazyWithRetry(() => import('./pages/super-admin/Security'));
 const SuperAdminTeam = lazyWithRetry(() => import('./pages/super-admin/Team'));
 const SuperAdminProfile = lazyWithRetry(() => import('./pages/super-admin/SuperAdminProfile'));
-
-const SuperAdminPlaceholder = lazyWithRetry(() => import('./pages/super-admin/Placeholder'));
-const SuperAdminLayout = lazyWithRetry(() => import('./components/super-admin/SuperAdminLayout'));
 
 const LoadingFallback = () => (
   <div className="h-screen w-screen flex items-center justify-center bg-slate-50">
@@ -146,7 +142,7 @@ const LoadingFallback = () => (
   </div>
 );
 
-const ProtectedRoute = ({ children, user, path }: { children: React.ReactNode, allowedRoles?: string[], user?: any, path?: string }) => {
+const ProtectedRoute = ({ children, user, path, allowedRoles }: { children: React.ReactNode, allowedRoles?: string[], user?: any, path?: string }) => {
   const { schoolPlan } = useAuth();
   const [isChecking, setIsChecking] = React.useState(true);
 
@@ -154,13 +150,22 @@ const ProtectedRoute = ({ children, user, path }: { children: React.ReactNode, a
     if (schoolPlan !== null) {
       setIsChecking(false);
     }
-    // If it's still null after 3s, default to standard to avoid infinite spin
     const timer = setTimeout(() => setIsChecking(false), 3000);
     return () => clearTimeout(timer);
   }, [schoolPlan]);
 
   if (!user) {
     return <Navigate to="/login" replace />;
+  }
+
+  if (allowedRoles && !allowedRoles.includes(user.role)) {
+    if (user.role === 'super_admin') return <Navigate to="/super-admin" replace />;
+    return <Navigate to="/accueil" replace />;
+  }
+
+  // If super admin tries to access non super admin routes
+  if (!allowedRoles && user.role === 'super_admin') {
+    return <Navigate to="/super-admin" replace />;
   }
 
   if (path && !hasPageAccess(user.permissions, path, user.role)) {
@@ -187,199 +192,178 @@ export default function App() {
             <NotificationProvider>
               <Toaster position="top-right" />
               <GlobalOverlays />
-            <Suspense fallback={<LoadingFallback />}>
-              <Routes>
-                <Route path="/" element={<LandingPage />} />
-                <Route path="/welcome" element={<LandingPage />} />
-                <Route path="/login" element={<Login />} />
-                <Route path="/parent-login" element={<Login />} />
-                <Route path="/signup" element={<Signup />} />
-                <Route path="/demande-compte-ecole" element={<SchoolCreationRequestPage />} />
-                <Route path="/demande-ecole" element={<SchoolCreationRequestPage />} />
-                <Route path="/school-request" element={<SchoolCreationRequestPage />} />
-                <Route path="/paiement-abonnement" element={<SubscriptionPayment />} />
-                <Route path="/paiement" element={<SubscriptionPayment />} />
-                <Route path="/subscription-payment" element={<SubscriptionPayment />} />
-                <Route path="/setup-password" element={<SetupPassword />} />
-                <Route path="/verifier-document" element={<DocumentVerification />} />
-                <Route path="/verify-doc" element={<DocumentVerification />} />
-                <Route path="/public/recrutement/:token" element={<PublicRecruitment />} />
-                <Route path="/public/inscription/:token" element={<PublicEnrollment />} />
-                <Route path="/public/suivi-candidature" element={<PublicTracking />} />
-                <Route path="/public/suivi-inscription" element={<PublicTracking />} />
-                <Route path="/formulaire-enseignant/:token" element={<PublicTeacherForm />} />
-                <Route path="/public/formulaire-enseignant/:token" element={<PublicTeacherForm />} />
-                <Route path="/public/collecte-enseignant/:token" element={<PublicTeacherForm />} />
-                <Route path="/public/collecte-enseignants/:token" element={<PublicTeacherForm />} />
-                <Route path="/collecte-enseignant/:token" element={<PublicTeacherForm />} />
-                <Route path="/f/:token" element={<PublicTeacherForm />} />
+              <Suspense fallback={<LoadingFallback />}>
+                <Routes>
+                  {/* Public Routes */}
+                  <Route path="/" element={<LandingPage />} />
+                  <Route path="/welcome" element={<LandingPage />} />
+                  <Route path="/login" element={<Login />} />
+                  <Route path="/parent-login" element={<Login />} />
+                  <Route path="/signup" element={<Signup />} />
+                  <Route path="/demande-compte-ecole" element={<SchoolCreationRequestPage />} />
+                  <Route path="/demande-ecole" element={<SchoolCreationRequestPage />} />
+                  <Route path="/school-request" element={<SchoolCreationRequestPage />} />
+                  <Route path="/paiement-abonnement" element={<SubscriptionPayment />} />
+                  <Route path="/paiement" element={<SubscriptionPayment />} />
+                  <Route path="/subscription-payment" element={<SubscriptionPayment />} />
+                  <Route path="/setup-password" element={<SetupPassword />} />
+                  <Route path="/verifier-document" element={<DocumentVerification />} />
+                  <Route path="/verify-doc" element={<DocumentVerification />} />
+                  <Route path="/public/recrutement/:token" element={<PublicRecruitment />} />
+                  <Route path="/public/inscription/:token" element={<PublicEnrollment />} />
+                  <Route path="/public/suivi-candidature" element={<PublicTracking />} />
+                  <Route path="/public/suivi-inscription" element={<PublicTracking />} />
+                  <Route path="/formulaire-enseignant/:token" element={<PublicTeacherForm />} />
+                  <Route path="/public/formulaire-enseignant/:token" element={<PublicTeacherForm />} />
+                  <Route path="/public/collecte-enseignant/:token" element={<PublicTeacherForm />} />
+                  <Route path="/public/collecte-enseignants/:token" element={<PublicTeacherForm />} />
+                  <Route path="/collecte-enseignant/:token" element={<PublicTeacherForm />} />
+                  <Route path="/f/:token" element={<PublicTeacherForm />} />
 
-                {/* Super Admin Routes */}
-                <Route path="/super-admin/*" element={
-                  user?.role === 'super_admin' ? (
-                    <SuperAdminLayout>
-                      <Routes>
-                        <Route path="/" element={<SuperAdminDashboard />} />
-                        <Route path="/stats" element={<SuperAdminDashboard />} />
-                        <Route path="/revenus" element={<SuperAdminDashboard />} />
-                        <Route path="/activite" element={<SuperAdminDashboard />} />
-                        
-                        <Route path="/users" element={<SuperAdminUsers />} />
-                        <Route path="/users/:filter" element={<SuperAdminUsers />} />
-                        <Route path="/clients" element={<SuperAdminSchools />} />
-                        <Route path="/admins" element={<SuperAdminUsers />} />
-                        
-                        <Route path="/subscriptions" element={<SuperAdminSubscriptions />} />
-                        <Route path="/subscriptions/:filter" element={<SuperAdminSubscriptions />} />
-                        <Route path="/history" element={<SuperAdminSubscriptions />} />
-                        
-                        <Route path="/plans" element={<SuperAdminPlans />} />
-                        <Route path="/plans/new" element={<SuperAdminPlans />} />
-                        <Route path="/plans/coupons" element={<SuperAdminPlans />} />
-                        
-                        {/* Analytics & Reports */}
-                        <Route path="/analytics" element={<SuperAdminAnalytics />} />
-                        <Route path="/analytics/*" element={<SuperAdminAnalytics />} />
-                        <Route path="/logs" element={<AuditLogsManagement />} />
-                        <Route path="/logs/*" element={<AuditLogsManagement />} />
-                        
-                        {/* Billing */}
-                        <Route path="/billing/transactions" element={<TransactionsManagement />} />
-                        <Route path="/billing/payments" element={<TransactionsManagement />} />
-                        
-                        {/* Product & Support */}
-                        <Route path="/product" element={<SuperAdminProduct />} />
-                        <Route path="/product/*" element={<SuperAdminProduct />} />
-                        <Route path="/catalog" element={<SuperAdminPlansCatalog />} />
-                        <Route path="/support" element={<SuperAdminSupport />} />
-                        <Route path="/support/*" element={<SuperAdminSupport />} />
-                        
-                        {/* Marketing & Security */}
-                        <Route path="/marketing" element={<SuperAdminMarketing />} />
-                        <Route path="/marketing/*" element={<SuperAdminMarketing />} />
-                        <Route path="/security" element={<SuperAdminSecurity />} />
-                        <Route path="/security/*" element={<SuperAdminSecurity />} />
-                        
-                        {/* Team */}
-                        <Route path="/team" element={<SuperAdminTeam />} />
-                        <Route path="/team/*" element={<SuperAdminTeam />} />
-                        <Route path="/profile" element={<SuperAdminProfile />} />
+                  {/* Super Admin Routes */}
+                  <Route 
+                    path="/super-admin" 
+                    element={
+                      <ProtectedRoute user={user} allowedRoles={['super_admin']}>
+                        <SuperAdminLayout />
+                      </ProtectedRoute>
+                    }
+                  >
+                    <Route index element={<SuperAdminDashboard />} />
+                    <Route path="stats" element={<SuperAdminDashboard />} />
+                    <Route path="revenus" element={<SuperAdminDashboard />} />
+                    <Route path="activite" element={<SuperAdminDashboard />} />
+                    <Route path="users" element={<SuperAdminUsers />} />
+                    <Route path="users/:filter" element={<SuperAdminUsers />} />
+                    <Route path="clients" element={<SuperAdminSchools />} />
+                    <Route path="admins" element={<SuperAdminUsers />} />
+                    <Route path="subscriptions" element={<SuperAdminSubscriptions />} />
+                    <Route path="subscriptions/:filter" element={<SuperAdminSubscriptions />} />
+                    <Route path="history" element={<SuperAdminSubscriptions />} />
+                    <Route path="plans" element={<SuperAdminPlans />} />
+                    <Route path="plans/new" element={<SuperAdminPlans />} />
+                    <Route path="plans/coupons" element={<SuperAdminPlans />} />
+                    <Route path="analytics" element={<SuperAdminAnalytics />} />
+                    <Route path="analytics/*" element={<SuperAdminAnalytics />} />
+                    <Route path="logs" element={<AuditLogsManagement />} />
+                    <Route path="logs/*" element={<AuditLogsManagement />} />
+                    <Route path="billing/transactions" element={<TransactionsManagement />} />
+                    <Route path="billing/payments" element={<TransactionsManagement />} />
+                    <Route path="product" element={<SuperAdminProduct />} />
+                    <Route path="product/*" element={<SuperAdminProduct />} />
+                    <Route path="catalog" element={<SuperAdminPlansCatalog />} />
+                    <Route path="support" element={<SuperAdminSupport />} />
+                    <Route path="support/*" element={<SuperAdminSupport />} />
+                    <Route path="marketing" element={<SuperAdminMarketing />} />
+                    <Route path="marketing/*" element={<SuperAdminMarketing />} />
+                    <Route path="security" element={<SuperAdminSecurity />} />
+                    <Route path="security/*" element={<SuperAdminSecurity />} />
+                    <Route path="team" element={<SuperAdminTeam />} />
+                    <Route path="team/*" element={<SuperAdminTeam />} />
+                    <Route path="profile" element={<SuperAdminProfile />} />
+                    <Route path="settings" element={<SuperAdminSettings />} />
+                    <Route path="settings/:tab" element={<SuperAdminSettings />} />
+                    <Route path="*" element={<Navigate to="/super-admin" replace />} />
+                  </Route>
 
-                        <Route path="/settings" element={<SuperAdminSettings />} />
-                        <Route path="/settings/:tab" element={<SuperAdminSettings />} />
+                  {/* Main App Routes (Schools/Parents/Teachers) */}
+                  <Route 
+                    element={
+                      <ProtectedRoute user={user}>
+                        <Layout />
+                      </ProtectedRoute>
+                    }
+                  >
+                    <Route path="/accueil" element={<Home cycle="all" />} />
+                    <Route path="/mon-compte" element={<TeacherAccount />} />
+                    <Route path="/mes-classes" element={<TeacherClasses />} />
+                    <Route path="/ma-classe" element={<TeacherClasses />} />
+                    <Route path="/mes-cours" element={<TeacherCourses />} />
+                    <Route path="/admin/sessions-actives" element={<AdminActiveSessions />} />
+                    <Route path="/tableau-de-bord" element={<Dashboard cycle="all" />} />
+                    <Route path="/eleves" element={<Students cycle="all" />} />
+                    <Route path="/promotions" element={<Passages cycle="all" />} />
+                    <Route path="/enseignants" element={<Teachers cycle="all" />} />
+                    <Route path="/classes" element={<Classes cycle="all" />} />
+                    <Route path="/batiments-salles" element={<BatimentsSalles />} />
+                    <Route path="/ressources-materielles" element={<MaterialResources />} />
+                    <Route path="/materiels" element={<Navigate to="/ressources-materielles" replace />} />
+                    <Route path="/matieres" element={<Subjects cycle="all" />} />
+                    <Route path="/notes" element={<Grades cycle="all" />} />
+                    <Route path="/emploi-du-temps" element={<Timetable cycle="all" />} />
+                    <Route path="/bibliotheque" element={<Bibliotheque cycleProp="tous" />} />
+                    <Route path="/bibliotheque-physique" element={<BibliothequePhysique cycleProp="tous" />} />
+                    <Route path="/epreuves" element={<Epreuves cycleProp="tous" />} />
+                    <Route path="/epreuves-composition" element={<EpreuvesComposition />} />
+                    <Route path="/recrutement-inscriptions" element={<RecruitmentManagement />} />
+                    <Route path="/collecte-enseignants" element={<TeacherCollectionManagement />} />
 
-                        <Route path="*" element={<Navigate to="/super-admin" replace />} />
-                      </Routes>
-                    </SuperAdminLayout>
-                  ) : (
-                    <Navigate to="/login" replace />
-                  )
-                } />
+                    <Route path="/accueil-primaire" element={<Home cycle="primaire" />} />
+                    <Route path="/tableau-de-bord-primaire" element={<Dashboard cycle="primaire" />} />
+                    <Route path="/classes-primaire" element={<Classes cycle="primaire" />} />
+                    <Route path="/eleves-primaire" element={<Students cycle="primaire" />} />
+                    <Route path="/promotions-primaire" element={<Passages cycle="primaire" />} />
+                    <Route path="/enseignants-primaire" element={<Teachers cycle="primaire" />} />
+                    <Route path="/matieres-primaire" element={<Subjects cycle="primaire" />} />
+                    <Route path="/notes-primaire" element={<Grades cycle="primaire" />} />
+                    <Route path="/epreuves-primaire" element={<Epreuves cycleProp="primaire" />} />
+                    <Route path="/bibliotheque-primaire" element={<Bibliotheque cycleProp="primaire" />} />
+                    <Route path="/bibliotheque-physique-primaire" element={<BibliothequePhysique cycleProp="primaire" />} />
+                    <Route path="/paiements-primaire" element={<Payments cycle="primaire" />} />
+                    <Route path="/finances-primaire" element={<FinanceDashboard cycleProp="primaire" />} />
+                    <Route path="/emploi-du-temps-primaire" element={<Timetable cycle="primaire" />} />
+                    <Route path="/examens-primaire" element={<Examens cycle="primaire" />} />
 
-                <Route path="/*" element={
-                  user ? (
-                    user.role === 'super_admin' ? (
-                      <Navigate to="/super-admin" replace />
-                    ) : (
-                      <Layout>
-                        <Routes>
-                          <Route path="/" element={<Navigate to="/accueil" replace />} />
-                        
-                        {/* General / Main Shared Routes */}
-                        <Route path="/accueil" element={<ProtectedRoute user={user} path="/accueil"><Home cycle="all" /></ProtectedRoute>} />
-                        <Route path="/mon-compte" element={<ProtectedRoute user={user} path="/mon-compte"><TeacherAccount /></ProtectedRoute>} />
-                        <Route path="/mes-classes" element={<ProtectedRoute user={user} path="/mes-classes"><TeacherClasses /></ProtectedRoute>} />
-                        <Route path="/ma-classe" element={<ProtectedRoute user={user} path="/ma-classe"><TeacherClasses /></ProtectedRoute>} />
-                        <Route path="/mes-cours" element={<ProtectedRoute user={user} path="/mes-cours"><TeacherCourses /></ProtectedRoute>} />
-                        <Route path="/admin/sessions-actives" element={<ProtectedRoute user={user} path="/admin/sessions-actives"><AdminActiveSessions /></ProtectedRoute>} />
-                        <Route path="/tableau-de-bord" element={<ProtectedRoute user={user} path="/"><Dashboard cycle="all" /></ProtectedRoute>} />
-                        <Route path="/eleves" element={<ProtectedRoute user={user} path="/eleves"><Students cycle="all" /></ProtectedRoute>} />
-                        <Route path="/promotions" element={<ProtectedRoute user={user} path="/promotions"><Passages cycle="all" /></ProtectedRoute>} />
-                        <Route path="/enseignants" element={<ProtectedRoute user={user} path="/enseignants"><Teachers cycle="all" /></ProtectedRoute>} />
-                        <Route path="/classes" element={<ProtectedRoute user={user} path="/classes"><Classes cycle="all" /></ProtectedRoute>} />
-                        <Route path="/batiments-salles" element={<ProtectedRoute user={user} path="/batiments-salles"><BatimentsSalles /></ProtectedRoute>} />
-                        <Route path="/ressources-materielles" element={<ProtectedRoute user={user} path="/ressources-materielles"><MaterialResources /></ProtectedRoute>} />
-                        <Route path="/materiels" element={<Navigate to="/ressources-materielles" replace />} />
-                        <Route path="/matieres" element={<ProtectedRoute user={user} path="/matieres"><Subjects cycle="all" /></ProtectedRoute>} />
-                        <Route path="/notes" element={<ProtectedRoute user={user} path="/notes"><Grades cycle="all" /></ProtectedRoute>} />
-                        <Route path="/emploi-du-temps" element={<ProtectedRoute user={user} path="/emploi-du-temps"><Timetable cycle="all" /></ProtectedRoute>} />
-                        <Route path="/bibliotheque" element={<ProtectedRoute user={user} path="/bibliotheque"><Bibliotheque cycleProp="tous" /></ProtectedRoute>} />
-                        <Route path="/bibliotheque-physique" element={<ProtectedRoute user={user} path="/bibliotheque-physique"><BibliothequePhysique cycleProp="tous" /></ProtectedRoute>} />
-                        <Route path="/epreuves" element={<ProtectedRoute user={user} path="/epreuves"><Epreuves cycleProp="tous" /></ProtectedRoute>} />
-                        <Route path="/epreuves-composition" element={<ProtectedRoute user={user} path="/epreuves-composition"><EpreuvesComposition /></ProtectedRoute>} />
-                        <Route path="/recrutement-inscriptions" element={<ProtectedRoute user={user} path="/recrutement-inscriptions"><RecruitmentManagement /></ProtectedRoute>} />
-                        <Route path="/collecte-enseignants" element={<ProtectedRoute user={user} path="/collecte-enseignants"><TeacherCollectionManagement /></ProtectedRoute>} />
+                    <Route path="/accueil-secondaire" element={<Home cycle="secondaire" />} />
+                    <Route path="/tableau-de-bord-secondaire" element={<Dashboard cycle="secondaire" />} />
+                    <Route path="/classes-secondaire" element={<Classes cycle="secondaire" />} />
+                    <Route path="/eleves-secondaire" element={<Students cycle="secondaire" />} />
+                    <Route path="/promotions-secondaire" element={<Passages cycle="secondaire" />} />
+                    <Route path="/enseignants-secondaire" element={<Teachers cycle="secondaire" />} />
+                    <Route path="/matieres-secondaire" element={<Subjects cycle="secondaire" />} />
+                    <Route path="/notes-secondaire" element={<Grades cycle="secondaire" />} />
+                    <Route path="/epreuves-secondaire" element={<Epreuves cycleProp="secondaire" />} />
+                    <Route path="/bibliotheque-secondaire" element={<Bibliotheque cycleProp="secondaire" />} />
+                    <Route path="/bibliotheque-physique-secondaire" element={<BibliothequePhysique cycleProp="secondaire" />} />
+                    <Route path="/paiements-secondaire" element={<Payments cycle="secondaire" />} />
+                    <Route path="/finances-secondaire" element={<FinanceDashboard cycleProp="secondaire" />} />
+                    <Route path="/emploi-du-temps-secondaire" element={<Timetable cycle="secondaire" />} />
+                    <Route path="/examens-secondaire" element={<Examens cycle="secondaire" />} />
+                    <Route path="/collecte-enseignants-secondaire" element={<TeacherCollectionManagement />} />
 
-                        {/* Maternelle & Primaire Routes */}
-                        <Route path="/accueil-primaire" element={<ProtectedRoute user={user} path="/accueil"><Home cycle="primaire" /></ProtectedRoute>} />
-                        <Route path="/tableau-de-bord-primaire" element={<ProtectedRoute user={user} path="/tableau-de-bord"><Dashboard cycle="primaire" /></ProtectedRoute>} />
-                        <Route path="/classes-primaire" element={<ProtectedRoute user={user} path="/classes"><Classes cycle="primaire" /></ProtectedRoute>} />
-                        <Route path="/eleves-primaire" element={<ProtectedRoute user={user} path="/eleves"><Students cycle="primaire" /></ProtectedRoute>} />
-                        <Route path="/promotions-primaire" element={<ProtectedRoute user={user} path="/promotions"><Passages cycle="primaire" /></ProtectedRoute>} />
-                        <Route path="/enseignants-primaire" element={<ProtectedRoute user={user} path="/enseignants"><Teachers cycle="primaire" /></ProtectedRoute>} />
-                        <Route path="/matieres-primaire" element={<ProtectedRoute user={user} path="/matieres"><Subjects cycle="primaire" /></ProtectedRoute>} />
-                        <Route path="/notes-primaire" element={<ProtectedRoute user={user} path="/notes"><Grades cycle="primaire" /></ProtectedRoute>} />
-                        <Route path="/epreuves-primaire" element={<ProtectedRoute user={user} path="/epreuves"><Epreuves cycleProp="primaire" /></ProtectedRoute>} />
-                        <Route path="/bibliotheque-primaire" element={<ProtectedRoute user={user} path="/bibliotheque"><Bibliotheque cycleProp="primaire" /></ProtectedRoute>} />
-                        <Route path="/bibliotheque-physique-primaire" element={<ProtectedRoute user={user} path="/bibliotheque-physique"><BibliothequePhysique cycleProp="primaire" /></ProtectedRoute>} />
-                        <Route path="/paiements-primaire" element={<ProtectedRoute user={user} path="/paiements"><Payments cycle="primaire" /></ProtectedRoute>} />
-                        <Route path="/finances-primaire" element={<ProtectedRoute user={user} path="/finances"><FinanceDashboard cycleProp="primaire" /></ProtectedRoute>} />
-                        <Route path="/emploi-du-temps-primaire" element={<ProtectedRoute user={user} path="/emploi-du-temps"><Timetable cycle="primaire" /></ProtectedRoute>} />
-                        <Route path="/examens-primaire" element={<ProtectedRoute user={user} path="/notes"><Examens cycle="primaire" /></ProtectedRoute>} />
+                    <Route path="/mon-enfant" element={<ParentGrades />} />
+                    <Route path="/paiements" element={<Payments cycle="all" />} />
+                    <Route path="/finances" element={<FinanceDashboard cycleProp="all" />} />
+                    <Route path="/tresorerie" element={<Navigate to="/finances" replace />} />
+                    <Route path="/personnel-administratif" element={<AdministrativeStaff />} />
+                    <Route path="/cartes-et-badges" element={<SchoolCards />} />
+                    <Route path="/salaires-enseignants" element={<TeacherSalaries />} />
+                    <Route path="/salaires" element={<TeacherSalaries />} />
+                    <Route path="/emploi-du-temps-requests" element={<TimetableRequests />} />
+                    <Route path="/demandes-emploi-du-temps" element={<Navigate to="/emploi-du-temps-requests" replace />} />
+                    <Route path="/documents-demandes" element={<DocumentRequests />} />
+                    <Route path="/documents-administratifs" element={<DocumentRequests isTeacherAdministrativePage={true} />} />
+                    <Route path="/demandes" element={<Navigate to="/documents-demandes" replace />} />
+                    <Route path="/alertes" element={<Alerts />} />
+                    <Route path="/messagerie" element={<Messaging />} />
+                    <Route path="/gmail" element={<GmailPage />} />
+                    <Route path="/workspace" element={<WorkspacePage />} />
+                    <Route path="/google-workspace" element={<Navigate to="/workspace" replace />} />
+                    <Route path="/ecole" element={<SchoolInfo />} />
+                    <Route path="/audit-logs" element={<AuditLogs />} />
+                    <Route path="/parametres" element={<Settings />} />
+                    <Route path="/annees-scolaires" element={<Navigate to="/parametres" replace />} />
+                    <Route path="/annees" element={<Navigate to="/parametres" replace />} />
+                    <Route path="/settings" element={<Navigate to="/parametres" replace />} />
+                    <Route path="/lab-ia" element={<AILab />} />
+                    
+                    <Route path="/" element={<Navigate to="/accueil" replace />} />
+                  </Route>
 
-                        {/* Secondaire Routes */}
-                        <Route path="/accueil-secondaire" element={<ProtectedRoute user={user} path="/accueil"><Home cycle="secondaire" /></ProtectedRoute>} />
-                        <Route path="/tableau-de-bord-secondaire" element={<ProtectedRoute user={user} path="/tableau-de-bord"><Dashboard cycle="secondaire" /></ProtectedRoute>} />
-                        <Route path="/classes-secondaire" element={<ProtectedRoute user={user} path="/classes"><Classes cycle="secondaire" /></ProtectedRoute>} />
-                        <Route path="/eleves-secondaire" element={<ProtectedRoute user={user} path="/eleves"><Students cycle="secondaire" /></ProtectedRoute>} />
-                        <Route path="/promotions-secondaire" element={<ProtectedRoute user={user} path="/promotions"><Passages cycle="secondaire" /></ProtectedRoute>} />
-                        <Route path="/enseignants-secondaire" element={<ProtectedRoute user={user} path="/enseignants"><Teachers cycle="secondaire" /></ProtectedRoute>} />
-                        <Route path="/matieres-secondaire" element={<ProtectedRoute user={user} path="/matieres"><Subjects cycle="secondaire" /></ProtectedRoute>} />
-                        <Route path="/notes-secondaire" element={<ProtectedRoute user={user} path="/notes"><Grades cycle="secondaire" /></ProtectedRoute>} />
-                        <Route path="/epreuves-secondaire" element={<ProtectedRoute user={user} path="/epreuves"><Epreuves cycleProp="secondaire" /></ProtectedRoute>} />
-                        <Route path="/bibliotheque-secondaire" element={<ProtectedRoute user={user} path="/bibliotheque"><Bibliotheque cycleProp="secondaire" /></ProtectedRoute>} />
-                        <Route path="/bibliotheque-physique-secondaire" element={<ProtectedRoute user={user} path="/bibliotheque-physique"><BibliothequePhysique cycleProp="secondaire" /></ProtectedRoute>} />
-                        <Route path="/paiements-secondaire" element={<ProtectedRoute user={user} path="/paiements"><Payments cycle="secondaire" /></ProtectedRoute>} />
-                        <Route path="/finances-secondaire" element={<ProtectedRoute user={user} path="/finances"><FinanceDashboard cycleProp="secondaire" /></ProtectedRoute>} />
-                        <Route path="/emploi-du-temps-secondaire" element={<ProtectedRoute user={user} path="/emploi-du-temps"><Timetable cycle="secondaire" /></ProtectedRoute>} />
-                        <Route path="/examens-secondaire" element={<ProtectedRoute user={user} path="/notes"><Examens cycle="secondaire" /></ProtectedRoute>} />
-                        <Route path="/collecte-enseignants-secondaire" element={<ProtectedRoute user={user} path="/collecte-enseignants"><TeacherCollectionManagement /></ProtectedRoute>} />
-
-                        {/* Shared Administrative Pages */}
-                        <Route path="/mon-enfant" element={<ProtectedRoute user={user} path="/mon-enfant"><ParentGrades /></ProtectedRoute>} />
-                        <Route path="/paiements" element={<ProtectedRoute user={user} path="/paiements"><Payments cycle="all" /></ProtectedRoute>} />
-                        <Route path="/finances" element={<ProtectedRoute user={user} path="/finances"><FinanceDashboard cycleProp="all" /></ProtectedRoute>} />
-                        <Route path="/tresorerie" element={<Navigate to="/finances" replace />} />
-                        <Route path="/personnel-administratif" element={<ProtectedRoute user={user} path="/personnel-administratif"><AdministrativeStaff /></ProtectedRoute>} />
-                        <Route path="/cartes-et-badges" element={<ProtectedRoute user={user} path="/cartes-et-badges"><SchoolCards /></ProtectedRoute>} />
-                        <Route path="/salaires-enseignants" element={<ProtectedRoute user={user} path="/salaires-enseignants"><TeacherSalaries /></ProtectedRoute>} />
-                        <Route path="/salaires" element={<ProtectedRoute user={user} path="/salaires"><TeacherSalaries /></ProtectedRoute>} />
-                        <Route path="/emploi-du-temps-requests" element={<ProtectedRoute user={user} path="/emploi-du-temps-requests"><TimetableRequests /></ProtectedRoute>} />
-                        <Route path="/demandes-emploi-du-temps" element={<Navigate to="/emploi-du-temps-requests" replace />} />
-                        <Route path="/documents-demandes" element={<ProtectedRoute user={user} path="/documents-demandes"><DocumentRequests /></ProtectedRoute>} />
-                        <Route path="/documents-administratifs" element={<ProtectedRoute user={user} path="/documents-administratifs"><DocumentRequests isTeacherAdministrativePage={true} /></ProtectedRoute>} />
-                        <Route path="/demandes" element={<Navigate to="/documents-demandes" replace />} />
-                        <Route path="/alertes" element={<ProtectedRoute user={user} path="/alertes"><Alerts /></ProtectedRoute>} />
-                        <Route path="/messagerie" element={<ProtectedRoute user={user} path="/messagerie"><Messaging /></ProtectedRoute>} />
-                        <Route path="/gmail" element={<ProtectedRoute user={user}><GmailPage /></ProtectedRoute>} />
-                        <Route path="/workspace" element={<ProtectedRoute user={user}><WorkspacePage /></ProtectedRoute>} />
-                        <Route path="/google-workspace" element={<Navigate to="/workspace" replace />} />
-                        <Route path="/ecole" element={<ProtectedRoute user={user} path="/ecole"><SchoolInfo /></ProtectedRoute>} />
-                        <Route path="/audit-logs" element={<ProtectedRoute user={user} path="/audit-logs"><AuditLogs /></ProtectedRoute>} />
-                        <Route path="/parametres" element={<ProtectedRoute user={user} path="/parametres"><Settings /></ProtectedRoute>} />
-                        <Route path="/annees-scolaires" element={<Navigate to="/parametres" replace />} />
-                        <Route path="/annees" element={<Navigate to="/parametres" replace />} />
-                        <Route path="/settings" element={<Navigate to="/parametres" replace />} />
-                        <Route path="/lab-ia" element={<ProtectedRoute user={user}><AILab /></ProtectedRoute>} />
-                      </Routes>
-                    </Layout>
-                  )
-                ) : (
-                  <Navigate to="/login" replace />
-                )
-              } />
-              </Routes>
-            </Suspense>
+                  {/* Catch all */}
+                  <Route path="*" element={<Navigate to="/accueil" replace />} />
+                </Routes>
+              </Suspense>
             </NotificationProvider>
           </Router>
         </ConfirmProvider>
@@ -387,4 +371,3 @@ export default function App() {
     </TranslationProvider>
   );
 }
-

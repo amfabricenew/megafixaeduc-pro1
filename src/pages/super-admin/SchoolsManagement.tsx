@@ -82,10 +82,11 @@ export default function SchoolsManagement() {
   const [spacesLockSchool, setSpacesLockSchool] = useState<any | null>(null);
   const [submittingSpacesLock, setSubmittingSpacesLock] = useState(false);
   const [spacesLockForm, setSpacesLockForm] = useState({
-    espace_primaire_actif: 1,
     espace_secondaire_actif: 1,
     espace_primaire_motif_verrouillage: '',
-    espace_secondaire_motif_verrouillage: ''
+    espace_secondaire_motif_verrouillage: '',
+    features_locked: 0,
+    features_locked_motif: ''
   });
 
   // Copy state
@@ -257,7 +258,9 @@ export default function SchoolsManagement() {
       espace_primaire_actif: (school.espace_primaire_actif !== undefined && school.espace_primaire_actif !== null) ? Number(school.espace_primaire_actif) : 1,
       espace_secondaire_actif: (school.espace_secondaire_actif !== undefined && school.espace_secondaire_actif !== null) ? Number(school.espace_secondaire_actif) : 1,
       espace_primaire_motif_verrouillage: school.espace_primaire_motif_verrouillage || '',
-      espace_secondaire_motif_verrouillage: school.espace_secondaire_motif_verrouillage || ''
+      espace_secondaire_motif_verrouillage: school.espace_secondaire_motif_verrouillage || '',
+      features_locked: (school.features_locked !== undefined && school.features_locked !== null) ? Number(school.features_locked) : 0,
+      features_locked_motif: school.features_locked_motif || ''
     });
   };
 
@@ -268,7 +271,9 @@ export default function SchoolsManagement() {
       espace_primaire_actif: (school.espace_primaire_actif !== undefined && school.espace_primaire_actif !== null) ? Number(school.espace_primaire_actif) : 1,
       espace_secondaire_actif: (school.espace_secondaire_actif !== undefined && school.espace_secondaire_actif !== null) ? Number(school.espace_secondaire_actif) : 1,
       espace_primaire_motif_verrouillage: school.espace_primaire_motif_verrouillage || '',
-      espace_secondaire_motif_verrouillage: school.espace_secondaire_motif_verrouillage || ''
+      espace_secondaire_motif_verrouillage: school.espace_secondaire_motif_verrouillage || '',
+      features_locked: (school.features_locked !== undefined && school.features_locked !== null) ? Number(school.features_locked) : 0,
+      features_locked_motif: school.features_locked_motif || ''
     });
   };
 
@@ -306,7 +311,9 @@ export default function SchoolsManagement() {
             espace_primaire_actif: data.espace_primaire_actif,
             espace_secondaire_actif: data.espace_secondaire_actif,
             espace_primaire_motif_verrouillage: data.espace_primaire_motif_verrouillage,
-            espace_secondaire_motif_verrouillage: data.espace_secondaire_motif_verrouillage
+            espace_secondaire_motif_verrouillage: data.espace_secondaire_motif_verrouillage,
+            features_locked: data.features_locked,
+            features_locked_motif: data.features_locked_motif
           }
         }));
       }
@@ -1415,6 +1422,49 @@ export default function SchoolsManagement() {
                       {selectedSchoolDetails.school.espace_secondaire_actif === 0 ? "Déverrouiller le Secondaire" : "Verrouiller le Secondaire"}
                     </button>
                   </div>
+
+                  {/* Accès Fonctionnalités Status Card */}
+                  <div className="p-3 bg-slate-50 rounded-xl border border-slate-200/70 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Fonctionnalités</span>
+                      <span className={cn(
+                        "px-2 py-0.5 rounded-full text-[9px] font-extrabold uppercase",
+                        selectedSchoolDetails.school.features_locked === 1
+                          ? "bg-rose-100 text-rose-800"
+                          : "bg-emerald-100 text-emerald-800"
+                      )}>
+                        {selectedSchoolDetails.school.features_locked === 1 ? "Bloquées" : "Libres"}
+                      </span>
+                    </div>
+                    {selectedSchoolDetails.school.features_locked === 1 && selectedSchoolDetails.school.features_locked_motif && (
+                      <p className="text-[10px] text-rose-700 italic">
+                        Motif : {selectedSchoolDetails.school.features_locked_motif}
+                      </p>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const newStatus = selectedSchoolDetails.school.features_locked === 1 ? 0 : 1;
+                        const motif = newStatus === 1 ? prompt("Motif du blocage des fonctionnalités (ex: impayé) :", "Accès suspendu par le Super Administrateur") : "";
+                        handleSaveSpacesLock(selectedSchoolDetails.school.id, {
+                          espace_primaire_actif: selectedSchoolDetails.school.espace_primaire_actif !== undefined ? selectedSchoolDetails.school.espace_primaire_actif : 1,
+                          espace_secondaire_actif: selectedSchoolDetails.school.espace_secondaire_actif !== undefined ? selectedSchoolDetails.school.espace_secondaire_actif : 1,
+                          espace_primaire_motif_verrouillage: selectedSchoolDetails.school.espace_primaire_motif_verrouillage || null,
+                          espace_secondaire_motif_verrouillage: selectedSchoolDetails.school.espace_secondaire_motif_verrouillage || null,
+                          features_locked: newStatus,
+                          features_locked_motif: motif
+                        });
+                      }}
+                      className={cn(
+                        "w-full py-1.5 px-2 rounded-lg text-[10px] font-bold cursor-pointer transition-all",
+                        selectedSchoolDetails.school.features_locked === 1
+                          ? "bg-emerald-600 hover:bg-emerald-700 text-white"
+                          : "bg-rose-600 hover:bg-rose-700 text-white"
+                      )}
+                    >
+                      {selectedSchoolDetails.school.features_locked === 1 ? "Libérer les fonctions" : "Bloquer les fonctions"}
+                    </button>
+                  </div>
                 </div>
               </div>
 
@@ -2028,6 +2078,64 @@ export default function SchoolsManagement() {
                       placeholder="Ex: Formule primaire seule, abonnement secondaire suspendu..."
                       value={spacesLockForm.espace_secondaire_motif_verrouillage}
                       onChange={(e) => setSpacesLockForm(prev => ({ ...prev, espace_secondaire_motif_verrouillage: e.target.value }))}
+                      className="w-full px-3 py-2 bg-white border border-rose-200 rounded-xl text-xs text-rose-900 placeholder:text-rose-300 focus:outline-none focus:ring-2 focus:ring-rose-500/20"
+                    />
+                  </div>
+                )}
+              </div>
+              
+              {/* Global Features Lock Card */}
+              <div className={cn(
+                "p-4 rounded-2xl border transition-all space-y-3",
+                spacesLockForm.features_locked === 0 
+                  ? "bg-slate-50 border-slate-200" 
+                  : "bg-rose-50/60 border-rose-200"
+              )}>
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Sparkles size={18} className={spacesLockForm.features_locked === 0 ? "text-indigo-600" : "text-rose-600"} />
+                    <div>
+                      <h4 className="font-bold text-slate-900 text-xs">Verrouiller toutes les fonctionnalités</h4>
+                      <p className="text-[10px] text-slate-500">Bloquer l'accès à tous les modules d'écriture/modification</p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setSpacesLockForm(prev => ({
+                      ...prev,
+                      features_locked: prev.features_locked === 1 ? 0 : 1
+                    }))}
+                    className={cn(
+                      "px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5",
+                      spacesLockForm.features_locked === 0
+                        ? "bg-emerald-600 text-white shadow-xs"
+                        : "bg-rose-600 text-white shadow-xs"
+                    )}
+                  >
+                    {spacesLockForm.features_locked === 0 ? (
+                      <>
+                        <Check size={14} />
+                        <span>Libre</span>
+                      </>
+                    ) : (
+                      <>
+                        <Lock size={14} />
+                        <span>Verrouillé</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                {spacesLockForm.features_locked === 1 && (
+                  <div className="space-y-1 pt-1 animate-in fade-in duration-150">
+                    <label className="text-[10px] font-bold text-rose-800 uppercase tracking-wider block">
+                      Motif du verrouillage des fonctionnalités
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="Ex: Abonnement expiré, maintenance, solde impayé..."
+                      value={spacesLockForm.features_locked_motif}
+                      onChange={(e) => setSpacesLockForm(prev => ({ ...prev, features_locked_motif: e.target.value }))}
                       className="w-full px-3 py-2 bg-white border border-rose-200 rounded-xl text-xs text-rose-900 placeholder:text-rose-300 focus:outline-none focus:ring-2 focus:ring-rose-500/20"
                     />
                   </div>
