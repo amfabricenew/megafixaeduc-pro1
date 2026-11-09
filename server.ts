@@ -142,6 +142,54 @@ function initDatabase(dbPath: string): Database.Database {
 
 const db = initDatabase(DATABASE_PATH);
 
+// Initial Core Tables (for School Creation Flow)
+db.exec(`
+  CREATE TABLE IF NOT EXISTS school_creation_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    reference TEXT UNIQUE NOT NULL,
+    nom_ecole TEXT NOT NULL,
+    type_etablissement TEXT,
+    pays TEXT DEFAULT 'Bénin',
+    ville TEXT,
+    adresse TEXT,
+    telephone_ecole TEXT,
+    email_ecole TEXT,
+    plan_souhaite TEXT DEFAULT 'PRO',
+    montant_estime REAL DEFAULT 0,
+    demandeur_nom TEXT NOT NULL,
+    demandeur_fonction TEXT,
+    demandeur_email TEXT NOT NULL,
+    demandeur_telephone TEXT NOT NULL,
+    demandeur_whatsapp TEXT,
+    notes TEXT,
+    payment_method TEXT,
+    payment_phone TEXT,
+    payment_reference TEXT,
+    statut TEXT DEFAULT 'pending' CHECK(statut IN ('pending', 'payment_pending', 'payment_confirmed', 'approved', 'rejected')),
+    school_id INTEGER,
+    motif_rejet TEXT,
+    admin_notes TEXT,
+    last_notice_type TEXT,
+    last_notice_sent_at DATETIME,
+    complaint_text TEXT,
+    complaint_at DATETIME,
+    auto_rejected_at DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS reclamations_demandes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id INTEGER NOT NULL,
+    message TEXT NOT NULL,
+    statut TEXT DEFAULT 'pending' CHECK(statut IN ('pending', 'resolved', 'closed')),
+    admin_response TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(request_id) REFERENCES school_creation_requests(id) ON DELETE CASCADE
+  );
+`);
+
 // Graceful cleanup to ensure WAL pages are flushed and checkpointed
 const flushAndCloseDb = () => {
   try {
@@ -185,27 +233,17 @@ try { db.prepare("ALTER TABLE classes ADD COLUMN plafond_conduite_t2 REAL DEFAUL
 try { db.prepare("ALTER TABLE classes ADD COLUMN plafond_conduite_t3 REAL DEFAULT 20").run(); } catch(e) {}
 try { db.prepare("ALTER TABLE matieres ADD COLUMN est_disciplinaire INTEGER DEFAULT 0").run(); } catch(e) {}
 
-// School Creation Requests Workflow Migrations
+try { db.prepare("ALTER TABLE school_info ADD COLUMN features_locked INTEGER DEFAULT 0").run(); } catch(e) {}
+try { db.prepare("ALTER TABLE school_info ADD COLUMN features_locked_motif TEXT").run(); } catch(e) {}
+try { db.prepare("ALTER TABLE school_creation_requests ADD COLUMN school_id INTEGER").run(); } catch(e) {}
+try { db.prepare("ALTER TABLE school_creation_requests ADD COLUMN motif_rejet TEXT").run(); } catch(e) {}
+try { db.prepare("ALTER TABLE school_creation_requests ADD COLUMN admin_notes TEXT").run(); } catch(e) {}
 try { db.prepare("ALTER TABLE school_creation_requests ADD COLUMN last_notice_type TEXT").run(); } catch(e) {}
 try { db.prepare("ALTER TABLE school_creation_requests ADD COLUMN last_notice_sent_at DATETIME").run(); } catch(e) {}
 try { db.prepare("ALTER TABLE school_creation_requests ADD COLUMN complaint_text TEXT").run(); } catch(e) {}
 try { db.prepare("ALTER TABLE school_creation_requests ADD COLUMN complaint_at DATETIME").run(); } catch(e) {}
 try { db.prepare("ALTER TABLE school_creation_requests ADD COLUMN auto_rejected_at DATETIME").run(); } catch(e) {}
-
-try { db.prepare("ALTER TABLE school_info ADD COLUMN features_locked INTEGER DEFAULT 0").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE school_info ADD COLUMN features_locked_motif TEXT").run(); } catch(e) {}
-db.exec(`
-  CREATE TABLE IF NOT EXISTS reclamations_demandes (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    request_id INTEGER NOT NULL,
-    message TEXT NOT NULL,
-    statut TEXT DEFAULT 'pending' CHECK(statut IN ('pending', 'resolved', 'closed')),
-    admin_response TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY(request_id) REFERENCES school_creation_requests(id) ON DELETE CASCADE
-  );
-`);
+try { db.prepare("ALTER TABLE utilisateurs ADD COLUMN must_change_password INTEGER DEFAULT 0").run(); } catch(e) {}
 
 // Robust Data Persistence Layer (Checkpoint System)
 // In cloud environments like Cloud Run, the local filesystem is ephemeral.
@@ -1022,6 +1060,7 @@ async function initializeDatabase() {
     question_secrete TEXT,
     reponse_secrete TEXT,
     school_id INTEGER,
+    must_change_password INTEGER DEFAULT 0,
     FOREIGN KEY(parent_admin_id) REFERENCES utilisateurs(id),
     FOREIGN KEY(school_id) REFERENCES school_info(id),
     FOREIGN KEY(enseignant_id) REFERENCES enseignants(id),
@@ -1145,33 +1184,6 @@ async function initializeDatabase() {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
-    CREATE TABLE IF NOT EXISTS school_creation_requests (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      reference TEXT UNIQUE NOT NULL,
-      nom_ecole TEXT NOT NULL,
-      type_etablissement TEXT,
-      pays TEXT DEFAULT 'Bénin',
-      ville TEXT,
-      adresse TEXT,
-      telephone_ecole TEXT,
-      email_ecole TEXT,
-      plan_souhaite TEXT DEFAULT 'PRO',
-      montant_estime REAL DEFAULT 0,
-      demandeur_nom TEXT NOT NULL,
-      demandeur_fonction TEXT,
-      demandeur_email TEXT NOT NULL,
-      demandeur_telephone TEXT NOT NULL,
-      demandeur_whatsapp TEXT,
-      notes TEXT,
-      payment_method TEXT,
-      payment_phone TEXT,
-      payment_reference TEXT,
-      statut TEXT DEFAULT 'pending' CHECK(statut IN ('pending', 'payment_pending', 'payment_confirmed', 'approved', 'rejected')),
-      school_id INTEGER,
-      motif_rejet TEXT,
-      admin_notes TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
     `);
   } catch (e) {}
@@ -19257,7 +19269,7 @@ function executeYearTransition(
     const hashedNewPassword = bcrypt.hashSync(newPassword, 10);
     db.prepare(`
       UPDATE utilisateurs 
-      SET mot_de_passe = ?, mot_de_passe_initial = NULL, is_first_login = 0 
+      SET mot_de_passe = ?, mot_de_passe_initial = NULL, is_first_login = 0, must_change_password = 0
       WHERE id = ?
     `).run(hashedNewPassword, user.id);
 
@@ -19385,6 +19397,12 @@ function executeYearTransition(
       return res.status(401).json({ success: false, error: "Identifiants incorrects" });
     }
 
+    // Prepare user object for response (remove sensitive info)
+    const { mot_de_passe, mot_de_passe_initial, ...userSafe } = user;
+    
+    // Check if password change is required
+    const changeRequired = user.must_change_password === 1;
+
     // Check if the school account is awaiting manual key activation
     if (user.role !== 'super_admin' && user.school_id) {
       const userSchool = db.prepare("SELECT nom, statut_abonnement, subscription_key FROM school_info WHERE id = ?").get(user.school_id) as any;
@@ -19466,6 +19484,7 @@ function executeYearTransition(
         email: user.email, 
         role: user.role,
         is_first_login: user.is_first_login,
+        must_change_password: user.must_change_password,
         cycle: cycle,
         can_write: user.can_write,
         is_test_account: user.is_test_account || 0,
@@ -19477,7 +19496,7 @@ function executeYearTransition(
   });
 
   app.get("/api/auth/me", authenticateToken, (req: any, res: any) => {
-    const user = db.prepare("SELECT id, nom, email, role, approuve, permissions, enseignant_id, personnel_id, eleve_id, google_id, school_id, is_test_account, is_first_login FROM utilisateurs WHERE id = ?").get(req.user.id) as any;
+    const user = db.prepare("SELECT id, nom, email, role, approuve, permissions, enseignant_id, personnel_id, eleve_id, google_id, school_id, is_test_account, is_first_login, must_change_password FROM utilisateurs WHERE id = ?").get(req.user.id) as any;
     if (!user) return res.status(404).json({ error: "Utilisateur non trouvé" });
     
     // Get default permissions for role
@@ -26880,8 +26899,8 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         // Create the school's primary admin user
         db.prepare(`
           INSERT INTO utilisateurs (
-            nom, email, mot_de_passe, mot_de_passe_initial, role, approuve, is_first_login, can_write, school_id
-          ) VALUES (?, ?, ?, ?, 'admin', 1, 0, 1, ?)
+            nom, email, mot_de_passe, mot_de_passe_initial, role, approuve, is_first_login, must_change_password, can_write, school_id
+          ) VALUES (?, ?, ?, ?, 'admin', 1, 1, 1, 1, ?)
         `).run(
           admin_nom?.trim() || `Direction ${nom.trim()}`,
           cleanEmail,
@@ -27637,8 +27656,8 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         // 2. Create Principal Administrator User
         db.prepare(`
           INSERT INTO utilisateurs (
-            nom, email, mot_de_passe, mot_de_passe_initial, role, approuve, is_first_login, can_write, school_id
-          ) VALUES (?, ?, ?, ?, 'admin', 1, 0, 1, ?)
+            nom, email, mot_de_passe, mot_de_passe_initial, role, approuve, is_first_login, must_change_password, can_write, school_id
+          ) VALUES (?, ?, ?, ?, 'admin', 1, 1, 1, 1, ?)
         `).run(
           request.demandeur_nom.trim(),
           cleanEmail,
@@ -27769,7 +27788,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
   app.post("/api/super-admin/school-requests/:id/send-notice", authenticateToken, requireSuperAdmin, async (req, res) => {
     try {
       const requestId = parseInt(req.params.id, 10);
-      const { type } = req.body; // 'payment_missing', 'incorrect_reference', 'pending_24h'
+      const { type, motif } = req.body; // 'payment_missing', 'incorrect_reference', 'pending_24h'
 
       const request = db.prepare("SELECT * FROM school_creation_requests WHERE id = ?").get(requestId) as any;
       if (!request) return res.status(404).json({ error: "Demande introuvable." });
@@ -27780,16 +27799,16 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
 
       if (type === 'payment_missing') {
         subject = `🕒 Rappel : Paiement non reçu pour votre demande - ${request.nom_ecole}`;
-        message = `Bonjour ${request.demandeur_nom},\n\nNous n'avons pas encore reçu la confirmation de paiement pour votre demande de création de compte école « ${request.nom_ecole} ».\n\nMerci de procéder au règlement ou de nous transmettre votre référence de transaction pour finaliser la création.\n\nCordialement,`;
-        waMessage = `🕒 Bonjour ${request.demandeur_nom}, nous n'avons pas reçu le paiement pour « ${request.nom_ecole} ». Merci de régulariser pour activer votre compte.`;
+        message = motif || `Bonjour ${request.demandeur_nom},\n\nNous n'avons pas encore reçu la confirmation de paiement pour votre demande de création de compte école « ${request.nom_ecole} ».\n\nMerci de procéder au règlement ou de nous transmettre votre référence de transaction pour finaliser la création.\n\nCordialement,`;
+        waMessage = motif ? `🕒 ${motif}` : `🕒 Bonjour ${request.demandeur_nom}, nous n'avons pas reçu le paiement pour « ${request.nom_ecole} ». Merci de régulariser pour activer votre compte.`;
       } else if (type === 'incorrect_reference') {
         subject = `⚠️ Référence de paiement incorrecte - ${request.nom_ecole}`;
-        message = `Bonjour ${request.demandeur_nom},\n\nLa référence de paiement que vous avez fournie pour l'établissement « ${request.nom_ecole} » semble incorrecte ou introuvable.\n\nMerci de vérifier et de nous renvoyer la bonne référence.\n\nCordialement,`;
-        waMessage = `⚠️ Bonjour ${request.demandeur_nom}, la référence de paiement pour « ${request.nom_ecole} » est incorrecte. Merci de nous renvoyer la bonne référence.`;
+        message = motif || `Bonjour ${request.demandeur_nom},\n\nLa référence de paiement que vous avez fournie pour l'établissement « ${request.nom_ecole} » semble incorrecte ou introuvable.\n\nMerci de vérifier et de nous renvoyer la bonne référence.\n\nCordialement,`;
+        waMessage = motif ? `⚠️ ${motif}` : `⚠️ Bonjour ${request.demandeur_nom}, la référence de paiement pour « ${request.nom_ecole} » est incorrecte. Merci de nous renvoyer la bonne référence.`;
       } else if (type === 'pending_24h') {
         subject = `⏳ Information : Création de compte mise en attente - ${request.nom_ecole}`;
-        message = `Bonjour ${request.demandeur_nom},\n\nVotre demande pour « ${request.nom_ecole} » est en attente de validation finale. Elle sera traitée dans les 24H.\n\nSans action de votre part ou validation de notre part dans ce délai, la demande pourrait être classée.\n\nCordialement,`;
-        waMessage = `⏳ Bonjour ${request.demandeur_nom}, votre demande pour « ${request.nom_ecole} » est en attente (24H). Elle sera traitée très prochainement.`;
+        message = motif || `Bonjour ${request.demandeur_nom},\n\nVotre demande pour « ${request.nom_ecole} » est en attente de validation finale. Elle sera traitée dans les 24H.\n\nSans action de votre part ou validation de notre part dans ce délai, la demande pourrait être classée.\n\nCordialement,`;
+        waMessage = motif ? `⏳ ${motif}` : `⏳ Bonjour ${request.demandeur_nom}, votre demande pour « ${request.nom_ecole} » est en attente (24H). Elle sera traitée très prochainement.`;
       } else {
         return res.status(400).json({ error: "Type de notification invalide." });
       }

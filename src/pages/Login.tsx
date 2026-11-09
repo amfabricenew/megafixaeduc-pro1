@@ -309,6 +309,8 @@ export default function Login() {
         login(data.token || 'demo-token', data.user);
         if (data.user.role === 'super_admin') {
           navigate('/super-admin');
+        } else if (data.user.must_change_password) {
+          navigate('/mon-compte', { state: { mustChangePassword: true } });
         } else {
           navigate('/accueil');
         }

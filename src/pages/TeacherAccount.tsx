@@ -29,18 +29,22 @@ import {
   Home,
   Check
 } from 'lucide-react';
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate, Link, useLocation } from 'react-router-dom';
 import { getUserGrantedPages } from '../utils/permissions';
 
 export default function TeacherAccount() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
 
+  const location = useLocation();
+
   const [teacherDetails, setTeacherDetails] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
   // Active sub-tab in account page: 'pages' | 'profile' | 'password'
-  const [activeSection, setActiveSection] = useState<'pages' | 'profile' | 'password'>('pages');
+  const [activeSection, setActiveSection] = useState<'pages' | 'profile' | 'password'>(
+    (location.state as any)?.mustChangePassword || user?.must_change_password ? 'password' : 'pages'
+  );
 
   // Search & filter for granted pages
   const [pageSearch, setPageSearch] = useState('');
@@ -194,6 +198,7 @@ export default function TeacherAccount() {
         try {
           const parsed = JSON.parse(savedUser);
           parsed.is_first_login = 0;
+          parsed.must_change_password = 0;
           localStorage.setItem('user', JSON.stringify(parsed));
         } catch (e) {}
       }
@@ -583,6 +588,18 @@ export default function TeacherAccount() {
                 </p>
               </div>
             </div>
+
+            {(user?.must_change_password || (location.state as any)?.mustChangePassword) && (
+              <div className="mb-6 p-4 bg-rose-50 border border-rose-200 rounded-2xl flex items-start gap-3 animate-pulse">
+                <AlertCircle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-xs font-black text-rose-800 uppercase tracking-tight">Action Obligatoire</p>
+                  <p className="text-[11px] text-rose-700 font-medium leading-relaxed">
+                    Pour des raisons de sécurité, vous devez modifier votre mot de passe initial avant de pouvoir utiliser toutes les fonctionnalités de la plateforme.
+                  </p>
+                </div>
+              </div>
+            )}
 
             <form onSubmit={handleChangePassword} className="space-y-5">
               {/* Current Password */}

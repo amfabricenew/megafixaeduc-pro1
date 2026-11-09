@@ -143,11 +143,10 @@ export const LanguageSelector: React.FC<LanguageSelectorProps> = ({
       <button
         type="button"
         onClick={() => setIsOpen(!isOpen)}
-        className="flex items-center gap-2 px-3 py-1.5 bg-white hover:bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 shadow-2xs transition-all cursor-pointer"
+        className="flex items-center gap-2 px-4 py-2 bg-white hover:bg-slate-50 border border-slate-200 rounded-xl text-xs font-black text-slate-700 shadow-sm transition-all cursor-pointer hover:scale-[1.02] active:scale-[0.98]"
         title="Changer de langue / Switch language"
       >
-        <Globe size={14} className="text-indigo-600 shrink-0" />
-        <span className="font-extrabold">{language === 'en' ? 'Language' : 'Langue'}</span>
+        <span className="font-black uppercase tracking-tight">{language === 'en' ? 'Langue' : 'Language'}</span>
         <ChevronDown size={14} className={`text-slate-400 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
       </button>
 

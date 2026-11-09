@@ -60,6 +60,7 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
   
   // Notice modal state
   const [notifyingRequest, setNotifyingRequest] = useState<any | null>(null);
+  const [noticeMotif, setNoticeMotif] = useState('');
   const [submittingNotice, setSubmittingNotice] = useState(false);
 
   // Approval form state
@@ -137,7 +138,7 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`
         },
-        body: JSON.stringify({ type })
+        body: JSON.stringify({ type, motif: noticeMotif })
       });
 
       const data = await res.json();
@@ -145,6 +146,7 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
 
       toast.success("Notification envoyée avec succès !");
       setNotifyingRequest(null);
+      setNoticeMotif('');
       fetchData();
     } catch (err: any) {
       toast.error(err.message);
@@ -663,6 +665,20 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
                 <p className="text-xs font-bold text-slate-900 group-hover:text-indigo-700">Mise en attente 24H</p>
                 <p className="text-[10px] text-slate-500">Informer que le dossier sera traité prochainement.</p>
               </button>
+
+              <div className="pt-2 space-y-1.5">
+                <label className="text-[10px] font-black uppercase tracking-wider text-slate-400">
+                  Motif ou message personnalisé (optionnel)
+                </label>
+                <textarea
+                  rows={3}
+                  value={noticeMotif}
+                  onChange={(e) => setNoticeMotif(e.target.value)}
+                  placeholder="Saisissez ici un message spécifique si besoin..."
+                  className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
+                />
+                <p className="text-[9px] text-slate-400 italic">Si vide, un message type sera envoyé selon l'action choisie.</p>
+              </div>
             </div>
 
             {submittingNotice && (
