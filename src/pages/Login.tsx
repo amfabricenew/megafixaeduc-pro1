@@ -436,7 +436,7 @@ export default function Login() {
 
       {/* Language Switcher in top-right */}
       <div className="absolute top-6 right-6 z-30 flex items-center gap-2">
-        <LanguageSelector variant="pill" />
+        <LanguageSelector variant="dropdown" />
       </div>
 
       {/* Decorative background glows */}

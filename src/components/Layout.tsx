@@ -368,7 +368,7 @@ export default function Layout() {
         </div>
           <div className="flex items-center gap-1.5 sm:gap-2">
 
-            <LanguageSelector variant="pill" className="scale-90" />
+            <LanguageSelector variant="dropdown" className="scale-95" />
             <PWAInstallButton />
             <NotificationBell />
             <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="p-2 text-slate-600 hover:bg-slate-50 rounded-full transition-colors">
@@ -581,7 +581,7 @@ export default function Layout() {
           <div className="p-4 border-t">
             <div className="mb-3 px-1 flex items-center justify-between">
               <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Langue / Lang</span>
-              <LanguageSelector variant="pill" />
+              <LanguageSelector variant="dropdown" />
             </div>
             <div className="flex items-center gap-3 px-3 py-2 mb-2">
               <div className="w-8 h-8 rounded-full bg-primary-100 text-primary-600 flex items-center justify-center font-bold text-xs relative">
@@ -640,7 +640,7 @@ export default function Layout() {
           </div>
 
 
-          <LanguageSelector variant="pill" />
+          <LanguageSelector variant="dropdown" />
           <PWAInstallButton />
           <NotificationBell />
         </div>

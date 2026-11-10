@@ -245,6 +245,27 @@ try { db.prepare("ALTER TABLE school_creation_requests ADD COLUMN complaint_at D
 try { db.prepare("ALTER TABLE school_creation_requests ADD COLUMN auto_rejected_at DATETIME").run(); } catch(e) {}
 try { db.prepare("ALTER TABLE utilisateurs ADD COLUMN must_change_password INTEGER DEFAULT 0").run(); } catch(e) {}
 
+// School Custom SMTP & SMS Gateway Configuration
+try {
+  db.prepare(`
+    CREATE TABLE IF NOT EXISTS school_smtp_configs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      school_id INTEGER NOT NULL UNIQUE,
+      custom_smtp_enabled INTEGER DEFAULT 0,
+      smtp_host TEXT DEFAULT '',
+      smtp_port TEXT DEFAULT '587',
+      smtp_user TEXT DEFAULT '',
+      smtp_pass TEXT DEFAULT '',
+      smtp_secure TEXT DEFAULT 'false',
+      email_from TEXT DEFAULT '',
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(school_id) REFERENCES school_info(id) ON DELETE CASCADE
+    )
+  `).run();
+} catch (e) {}
+
+try { db.prepare("ALTER TABLE sms_configs ADD COLUMN custom_sms_enabled INTEGER DEFAULT 0").run(); } catch(e) {}
+
 // Robust Data Persistence Layer (Checkpoint System)
 // In cloud environments like Cloud Run, the local filesystem is ephemeral.
 // We use a periodic SQL dump to the workspace which AI Studio persists.
@@ -3406,25 +3427,45 @@ function isValidSmtpHost(host: string): boolean {
   return hostPattern.test(trimmed) || ipPattern.test(trimmed);
 }
 
-async function getSmtpConfig() {
+async function getSmtpConfig(schoolId?: number) {
   let dbHost = '';
   let dbPort = '';
   let dbUser = '';
   let dbPass = '';
   let dbSecure = '';
   let dbFrom = '';
+  let isCustom = false;
 
-  try {
-    const rows = db.prepare("SELECT key, value FROM super_admin_settings WHERE key IN ('smtp_host', 'smtp_port', 'smtp_user', 'smtp_pass', 'smtp_secure', 'email_from')").all() as any[];
-    for (const r of rows) {
-      if (r.key === 'smtp_host' && r.value) dbHost = r.value;
-      if (r.key === 'smtp_port' && r.value) dbPort = r.value;
-      if (r.key === 'smtp_user' && r.value) dbUser = r.value;
-      if (r.key === 'smtp_pass' && r.value) dbPass = r.value;
-      if (r.key === 'smtp_secure' && r.value) dbSecure = r.value;
-      if (r.key === 'email_from' && r.value) dbFrom = r.value;
-    }
-  } catch (err) {}
+  // 1. If schoolId is provided, check if that school has custom SMTP enabled and configured
+  if (schoolId) {
+    try {
+      const schoolSmtp = db.prepare("SELECT * FROM school_smtp_configs WHERE school_id = ?").get(schoolId) as any;
+      if (schoolSmtp && schoolSmtp.custom_smtp_enabled === 1 && schoolSmtp.smtp_host && schoolSmtp.smtp_user) {
+        dbHost = schoolSmtp.smtp_host;
+        dbPort = schoolSmtp.smtp_port;
+        dbUser = schoolSmtp.smtp_user;
+        dbPass = schoolSmtp.smtp_pass;
+        dbSecure = schoolSmtp.smtp_secure;
+        dbFrom = schoolSmtp.email_from;
+        isCustom = true;
+      }
+    } catch (err) {}
+  }
+
+  // 2. Fallback to platform global super_admin_settings if not custom
+  if (!isCustom) {
+    try {
+      const rows = db.prepare("SELECT key, value FROM super_admin_settings WHERE key IN ('smtp_host', 'smtp_port', 'smtp_user', 'smtp_pass', 'smtp_secure', 'email_from')").all() as any[];
+      for (const r of rows) {
+        if (r.key === 'smtp_host' && r.value) dbHost = r.value;
+        if (r.key === 'smtp_port' && r.value) dbPort = r.value;
+        if (r.key === 'smtp_user' && r.value) dbUser = r.value;
+        if (r.key === 'smtp_pass' && r.value) dbPass = r.value;
+        if (r.key === 'smtp_secure' && r.value) dbSecure = r.value;
+        if (r.key === 'email_from' && r.value) dbFrom = r.value;
+      }
+    } catch (err) {}
+  }
 
   const host = (dbHost || process.env.SMTP_HOST || 'smtp.gmail.com').trim();
   const port = parseInt(dbPort || process.env.SMTP_PORT || (host.includes('gmail') ? '465' : '587'), 10);
@@ -3433,7 +3474,7 @@ async function getSmtpConfig() {
   const pass = (dbPass || process.env.SMTP_PASS || 'abeyjblqzjjybsif').trim();
   const from = (dbFrom || process.env.EMAIL_FROM || `"MégafixaEduc Pro" <${user}>`).trim();
 
-  return { host, port, secure, user, pass, from };
+  return { host, port, secure, user, pass, from, isCustom };
 }
 
 async function getGlobalSmsConfig() {
@@ -3455,9 +3496,9 @@ async function getGlobalSmsConfig() {
   return { provider, apiKey, authToken, senderId };
 }
 
-async function createMailTransporter() {
+async function createMailTransporter(schoolId?: number) {
   const nodemailer = await import('nodemailer');
-  const cfg = await getSmtpConfig();
+  const cfg = await getSmtpConfig(schoolId);
 
   if (!cfg.user || !cfg.pass || !isValidSmtpHost(cfg.host)) {
     if (cfg.user && cfg.pass && !isValidSmtpHost(cfg.host)) {
@@ -3488,6 +3529,7 @@ interface SendEmailOptions {
   text: string;
   html?: string;
   otp?: string;
+  schoolId?: number;
   attachments?: Array<{
     filename: string;
     content: Buffer | string;
@@ -3498,6 +3540,7 @@ interface SendEmailOptions {
 interface SendEmailResult {
   success: boolean;
   simulated: boolean;
+  isCustom?: boolean;
   error?: string;
 }
 
@@ -3549,17 +3592,18 @@ async function sendWhatsAppSimulation(options: { to: string, message: string, re
 }
 
 async function sendMailWithFallback(options: SendEmailOptions): Promise<SendEmailResult> {
-  const { to, subject, text, html, otp, attachments } = options;
+  const { to, subject, text, html, otp, schoolId, attachments } = options;
   const recipientStr = Array.isArray(to) ? to.join(", ") : to;
 
   try {
-    const cfg = await getSmtpConfig();
-    const transporter = await createMailTransporter();
+    const cfg = await getSmtpConfig(schoolId);
+    const transporter = await createMailTransporter(schoolId);
 
     if (!transporter) {
       console.log(`
       --------------------------------------------------
       [EMAIL SIMULATION - NO VALID SMTP CREDENTIALS]
+      Mode: ${cfg.isCustom ? 'ECOLE CUSTOM' : 'PLATEFORME GLOBALE'}
       To: ${recipientStr}
       Subject: ${subject}
       ${otp ? `OTP Code: ${otp}` : ''}
@@ -3567,7 +3611,7 @@ async function sendMailWithFallback(options: SendEmailOptions): Promise<SendEmai
       Message: ${text}
       --------------------------------------------------
       `);
-      return { success: true, simulated: true };
+      return { success: true, simulated: true, isCustom: cfg.isCustom };
     }
 
     const formattedHtml = html || `
@@ -3601,8 +3645,8 @@ async function sendMailWithFallback(options: SendEmailOptions): Promise<SendEmai
       attachments: attachments && attachments.length > 0 ? attachments : undefined
     });
 
-    console.log(`[SMTP SUCCESS] Real email successfully sent to ${recipientStr} (ID: ${info.messageId})`);
-    return { success: true, simulated: false };
+    console.log(`[SMTP SUCCESS] Real email successfully sent to ${recipientStr} (ID: ${info.messageId}) [Mode: ${cfg.isCustom ? 'Custom' : 'Platform'}]`);
+    return { success: true, simulated: false, isCustom: cfg.isCustom };
   } catch (error: any) {
     console.warn(`[SMTP Warning] Could not send email via SMTP to ${recipientStr}: ${error.message}`);
     
@@ -23433,24 +23477,55 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
   async function sendSmsService(schoolId: number, senderId: number, recipientPhone: string, recipientName: string, recipientType: string, messageText: string) {
     try {
       const config = db.prepare("SELECT * FROM sms_configs WHERE school_id = ?").get(schoolId) as any;
-      const provider = config?.provider || 'simulation';
-      const senderNumberOrName = config?.sender_number_or_name || 'MEGAFIXA';
+      const globalConfig = await getGlobalSmsConfig();
+
+      let provider = 'simulation';
+      let senderNumberOrName = 'MEGAFIXA';
+      let accountSid = '';
+      let authToken = '';
+      let apiKey = '';
+      let apiUrl = '';
+      let isCustom = false;
+
+      // 1. Check if school has custom SMS credentials enabled
+      if (config && config.custom_sms_enabled === 1 && config.is_active !== 0) {
+        provider = config.provider || 'simulation';
+        senderNumberOrName = config.sender_number_or_name || 'MEGAFIXA';
+        accountSid = config.account_sid || '';
+        authToken = config.auth_token || '';
+        apiKey = config.api_key || '';
+        apiUrl = config.api_url || '';
+        isCustom = true;
+      } else {
+        // 2. Fallback to platform global SMS settings if school has no custom credentials
+        if (globalConfig.provider && globalConfig.provider !== 'simulation' && (globalConfig.apiKey || globalConfig.authToken)) {
+          provider = globalConfig.provider;
+          senderNumberOrName = globalConfig.senderId || 'MEGAFIXA';
+          accountSid = globalConfig.apiKey;
+          authToken = globalConfig.authToken;
+          apiKey = globalConfig.apiKey;
+        } else {
+          provider = config?.provider || 'simulation';
+          senderNumberOrName = config?.sender_number_or_name || globalConfig.senderId || 'MEGAFIXA';
+        }
+      }
       
       // Clean phone number (strip spaces, symbols)
       const cleanPhone = recipientPhone.replace(/[^0-9+]/g, '');
+      const formattedPhone = cleanPhone.startsWith('+') ? cleanPhone : `+${cleanPhone}`;
       const smsCount = Math.max(1, Math.ceil(messageText.length / 160));
       let status = 'sent';
       let costEstimate = smsCount * 25; // 25 FCFA approx par SMS
 
-      if (config?.is_active === 0) {
+      if (isCustom && config?.is_active === 0) {
         status = 'failed';
-      } else if (provider === 'twilio' && config?.account_sid && config?.auth_token) {
+      } else if (provider === 'twilio' && accountSid && authToken) {
         // Twilio integration
         try {
-          const auth = Buffer.from(`${config.account_sid}:${config.auth_token}`).toString('base64');
-          const twilioUrl = `https://api.twilio.com/2010-04-01/Accounts/${config.account_sid}/Messages.json`;
+          const auth = Buffer.from(`${accountSid}:${authToken}`).toString('base64');
+          const twilioUrl = `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`;
           const params = new URLSearchParams();
-          params.append('To', cleanPhone);
+          params.append('To', formattedPhone);
           params.append('From', senderNumberOrName);
           params.append('Body', messageText);
 
@@ -23467,16 +23542,36 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
             status = 'delivered';
           } else {
             const errData = await twilioRes.json();
-            console.error("Twilio error:", errData);
+            console.error("Twilio SMS error:", errData);
             status = 'failed';
           }
         } catch (e: any) {
-          console.error("Twilio exception:", e);
+          console.error("Twilio SMS exception:", e);
+          status = 'failed';
+        }
+      } else if (provider === 'custom_gateway' && apiUrl) {
+        // Custom local HTTP SMS-Gateway integration
+        try {
+          const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+          if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+          const res = await fetch(apiUrl, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              to: formattedPhone,
+              message: messageText,
+              sender: senderNumberOrName
+            })
+          });
+          status = res.ok ? 'delivered' : 'failed';
+        } catch (e: any) {
+          console.error("Custom Gateway error:", e);
           status = 'failed';
         }
       } else {
         // High-fidelity instant simulation with gateway log
         status = 'simulated';
+        console.log(`[SMS SIMULATION ${isCustom ? 'ECOLE' : 'GLOBALE'}] To: ${formattedPhone} | From: ${senderNumberOrName} | Msg: ${messageText}`);
       }
 
       // Deduct credit balance if active
@@ -28188,6 +28283,326 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
     } catch (err: any) {
       console.error("Test SMS error:", err);
       res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // ==========================================
+  // SUPER ADMIN - PER-SCHOOL SMTP & SMS CONFIGURATION
+  // ==========================================
+
+  // List all schools with their messaging status & platform defaults
+  app.get("/api/super-admin/messaging/schools", authenticateToken, requireSuperAdmin, async (req, res) => {
+    try {
+      const schools = db.prepare(`
+        SELECT s.id, s.nom, s.email, s.telephone, s.pays, s.adresse,
+               smtp.custom_smtp_enabled, smtp.smtp_host, smtp.smtp_port, smtp.smtp_user, smtp.smtp_secure, smtp.email_from,
+               CASE WHEN smtp.smtp_pass IS NOT NULL AND smtp.smtp_pass != '' THEN 1 ELSE 0 END as has_smtp_pass,
+               sms.custom_sms_enabled, sms.provider as sms_provider, sms.sender_number_or_name as sms_sender_id,
+               sms.account_sid as sms_account_sid, sms.api_url as sms_api_url, sms.credit_balance as sms_credits, sms.is_active as sms_active,
+               CASE WHEN sms.auth_token IS NOT NULL AND sms.auth_token != '' THEN 1 ELSE 0 END as has_sms_auth_token
+        FROM school_info s
+        LEFT JOIN school_smtp_configs smtp ON smtp.school_id = s.id
+        LEFT JOIN sms_configs sms ON sms.school_id = s.id
+        ORDER BY s.nom ASC
+      `).all() as any[];
+
+      const globalSmtp = await getSmtpConfig();
+      const globalSms = await getGlobalSmsConfig();
+
+      res.json({
+        schools,
+        globalDefaults: {
+          smtp: {
+            host: globalSmtp.host,
+            port: globalSmtp.port,
+            user: globalSmtp.user,
+            from: globalSmtp.from,
+            has_pass: Boolean(globalSmtp.pass)
+          },
+          sms: {
+            provider: globalSms.provider,
+            senderId: globalSms.senderId,
+            has_apiKey: Boolean(globalSms.apiKey),
+            has_authToken: Boolean(globalSms.authToken)
+          }
+        }
+      });
+    } catch (err: any) {
+      console.error("Error fetching schools messaging configs:", err);
+      res.status(500).json({ error: "Erreur lors de la récupération des configurations passerelles." });
+    }
+  });
+
+  // Get single school messaging configuration
+  app.get("/api/super-admin/schools/:id/messaging-config", authenticateToken, requireSuperAdmin, async (req, res) => {
+    try {
+      const schoolId = parseInt(req.params.id, 10);
+      const school = db.prepare("SELECT id, nom, email, telephone FROM school_info WHERE id = ?").get(schoolId) as any;
+      if (!school) return res.status(404).json({ error: "Établissement introuvable." });
+
+      let smtp = db.prepare("SELECT * FROM school_smtp_configs WHERE school_id = ?").get(schoolId) as any;
+      let sms = db.prepare("SELECT * FROM sms_configs WHERE school_id = ?").get(schoolId) as any;
+
+      const globalSmtp = await getSmtpConfig();
+      const globalSms = await getGlobalSmsConfig();
+
+      res.json({
+        school,
+        smtp: smtp || {
+          school_id: schoolId,
+          custom_smtp_enabled: 0,
+          smtp_host: '',
+          smtp_port: '587',
+          smtp_user: '',
+          smtp_pass: '',
+          smtp_secure: 'false',
+          email_from: ''
+        },
+        sms: sms || {
+          school_id: schoolId,
+          custom_sms_enabled: 0,
+          provider: 'simulation',
+          account_sid: '',
+          auth_token: '',
+          sender_number_or_name: 'MEGAFIXA',
+          api_url: '',
+          api_key: '',
+          credit_balance: 1000,
+          is_active: 1
+        },
+        globalDefaults: {
+          smtp: {
+            host: globalSmtp.host,
+            port: globalSmtp.port,
+            user: globalSmtp.user,
+            from: globalSmtp.from,
+            has_pass: Boolean(globalSmtp.pass)
+          },
+          sms: {
+            provider: globalSms.provider,
+            senderId: globalSms.senderId,
+            has_apiKey: Boolean(globalSms.apiKey),
+            has_authToken: Boolean(globalSms.authToken)
+          }
+        }
+      });
+    } catch (err: any) {
+      console.error("Error fetching school messaging config:", err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Save / Update school messaging configuration
+  app.put("/api/super-admin/schools/:id/messaging-config", authenticateToken, requireSuperAdmin, (req: any, res) => {
+    try {
+      const schoolId = parseInt(req.params.id, 10);
+      const school = db.prepare("SELECT id, nom FROM school_info WHERE id = ?").get(schoolId);
+      if (!school) return res.status(404).json({ error: "Établissement introuvable." });
+
+      const { smtp, sms } = req.body;
+
+      db.transaction(() => {
+        // 1. SMTP Config
+        if (smtp) {
+          const existingSmtp = db.prepare("SELECT id, smtp_pass FROM school_smtp_configs WHERE school_id = ?").get(schoolId) as any;
+          const finalPass = (smtp.smtp_pass && smtp.smtp_pass.trim() !== '') 
+            ? smtp.smtp_pass.trim() 
+            : (existingSmtp?.smtp_pass || '');
+
+          if (existingSmtp) {
+            db.prepare(`
+              UPDATE school_smtp_configs
+              SET custom_smtp_enabled = ?,
+                  smtp_host = ?,
+                  smtp_port = ?,
+                  smtp_user = ?,
+                  smtp_pass = ?,
+                  smtp_secure = ?,
+                  email_from = ?,
+                  updated_at = CURRENT_TIMESTAMP
+              WHERE school_id = ?
+            `).run(
+              smtp.custom_smtp_enabled ? 1 : 0,
+              (smtp.smtp_host || '').trim(),
+              (smtp.smtp_port || '587').toString().trim(),
+              (smtp.smtp_user || '').trim(),
+              finalPass,
+              smtp.smtp_secure === 'true' || smtp.smtp_secure === true ? 'true' : 'false',
+              (smtp.email_from || '').trim(),
+              schoolId
+            );
+          } else {
+            db.prepare(`
+              INSERT INTO school_smtp_configs (
+                school_id, custom_smtp_enabled, smtp_host, smtp_port, smtp_user, smtp_pass, smtp_secure, email_from
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            `).run(
+              schoolId,
+              smtp.custom_smtp_enabled ? 1 : 0,
+              (smtp.smtp_host || '').trim(),
+              (smtp.smtp_port || '587').toString().trim(),
+              (smtp.smtp_user || '').trim(),
+              finalPass,
+              smtp.smtp_secure === 'true' || smtp.smtp_secure === true ? 'true' : 'false',
+              (smtp.email_from || '').trim()
+            );
+          }
+        }
+
+        // 2. SMS Config
+        if (sms) {
+          const existingSms = db.prepare("SELECT id, auth_token, api_key FROM sms_configs WHERE school_id = ?").get(schoolId) as any;
+          const finalAuthToken = (sms.auth_token && sms.auth_token.trim() !== '')
+            ? sms.auth_token.trim()
+            : (existingSms?.auth_token || '');
+          const finalApiKey = (sms.api_key && sms.api_key.trim() !== '')
+            ? sms.api_key.trim()
+            : (existingSms?.api_key || '');
+
+          if (existingSms) {
+            db.prepare(`
+              UPDATE sms_configs
+              SET custom_sms_enabled = ?,
+                  provider = ?,
+                  sender_number_or_name = ?,
+                  account_sid = ?,
+                  auth_token = ?,
+                  api_url = ?,
+                  api_key = ?,
+                  credit_balance = ?,
+                  is_active = ?,
+                  updated_at = CURRENT_TIMESTAMP
+              WHERE school_id = ?
+            `).run(
+              sms.custom_sms_enabled ? 1 : 0,
+              sms.provider || 'simulation',
+              (sms.sender_number_or_name || 'MEGAFIXA').trim(),
+              (sms.account_sid || '').trim(),
+              finalAuthToken,
+              (sms.api_url || '').trim(),
+              finalApiKey,
+              parseInt(sms.credit_balance || 1000, 10),
+              sms.is_active !== undefined ? (sms.is_active ? 1 : 0) : 1,
+              schoolId
+            );
+          } else {
+            db.prepare(`
+              INSERT INTO sms_configs (
+                school_id, custom_sms_enabled, provider, sender_number_or_name, account_sid, auth_token, api_url, api_key, credit_balance, is_active
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `).run(
+              schoolId,
+              sms.custom_sms_enabled ? 1 : 0,
+              sms.provider || 'simulation',
+              (sms.sender_number_or_name || 'MEGAFIXA').trim(),
+              (sms.account_sid || '').trim(),
+              finalAuthToken,
+              (sms.api_url || '').trim(),
+              finalApiKey,
+              parseInt(sms.credit_balance || 1000, 10),
+              sms.is_active !== undefined ? (sms.is_active ? 1 : 0) : 1
+            );
+          }
+        }
+      })();
+
+      recordSaasLog(req.userId, "UPDATE_SCHOOL_MESSAGING", { schoolId, hasSmtp: Boolean(smtp), hasSms: Boolean(sms) }, req);
+
+      res.json({ success: true, message: "Configuration des passerelles enregistrée avec succès." });
+    } catch (err: any) {
+      console.error("Error saving school messaging config:", err);
+      res.status(500).json({ error: "Erreur lors de l'enregistrement de la passerelle: " + err.message });
+    }
+  });
+
+  // Test School SMTP
+  app.post("/api/super-admin/schools/:id/test-smtp", authenticateToken, requireSuperAdmin, async (req: any, res) => {
+    try {
+      const schoolId = parseInt(req.params.id, 10);
+      const school = db.prepare("SELECT id, nom, email FROM school_info WHERE id = ?").get(schoolId) as any;
+      if (!school) return res.status(404).json({ error: "Établissement introuvable." });
+
+      const { testEmail } = req.body;
+      const target = testEmail || school.email || req.user?.email || 'admin@megafixa.com';
+
+      const smtpConfig = await getSmtpConfig(schoolId);
+
+      const result = await sendMailWithFallback({
+        to: target,
+        schoolId,
+        subject: `✅ Test Passerelle Email - ${school.nom}`,
+        text: `Bonjour,\n\nCeci est un test de passerelle SMTP pour l'établissement "${school.nom}".\n\nMode utilisé : ${smtpConfig.isCustom ? "Identifiants SMTP personnalisés de l'école" : "Valeurs par défaut globales (Plateforme)"}\nServeur SMTP : ${smtpConfig.host}:${smtpConfig.port}\nExpéditeur : ${smtpConfig.from}\nDate : ${new Date().toLocaleString('fr-FR')}\n\nTout est opérationnel !`,
+        html: `<div style="font-family:sans-serif;padding:24px;border-radius:16px;background:#f8fafc;border:1px solid #e2e8f0;max-width:550px;margin:auto;">
+          <h2 style="color:#0f172a;margin-top:0;">Test Passerelle Email Opérationnel ✅</h2>
+          <p style="color:#334155;font-size:14px;line-height:1.6;">Le test d'envoi d'email pour l'établissement <strong>${school.nom}</strong> a abouti avec succès.</p>
+          <div style="background:#ffffff;border:1px solid #cbd5e1;padding:12px 16px;border-radius:8px;font-size:12px;color:#64748b;margin:16px 0;">
+            <strong>Mode d'envoi :</strong> ${smtpConfig.isCustom ? "⚙️ Identifiants SMTP personnalisés de l'école" : "🌐 Valeurs par défaut globales de la plateforme"}<br/>
+            <strong>Serveur :</strong> ${smtpConfig.host}:${smtpConfig.port}<br/>
+            <strong>Expéditeur :</strong> ${smtpConfig.from}<br/>
+            <strong>Destinataire :</strong> ${target}<br/>
+            <strong>Date :</strong> ${new Date().toLocaleString('fr-FR')}
+          </div>
+          <p style="color:#94a3b8;font-size:11px;margin-bottom:0;">MégafixaEduc Pro - Passerelles Établissements</p>
+        </div>`
+      });
+
+      if (result.simulated) {
+        if (result.error) {
+          return res.status(400).json({ success: false, simulated: true, isCustom: smtpConfig.isCustom, error: result.error });
+        }
+        return res.json({
+          success: true,
+          simulated: true,
+          isCustom: smtpConfig.isCustom,
+          message: `Mode simulation : Aucun serveur SMTP réel actif. [${smtpConfig.isCustom ? 'Personnalisé' : 'Par défaut'}]`
+        });
+      }
+
+      res.json({
+        success: true,
+        simulated: false,
+        isCustom: smtpConfig.isCustom,
+        message: `Email réel délivré avec succès à ${target} ! (${smtpConfig.isCustom ? "Serveur de l'école" : "Serveur par défaut plateforme"})`
+      });
+    } catch (err: any) {
+      console.error("School test SMTP error:", err);
+      res.status(500).json({ error: "Échec du test SMTP : " + err.message });
+    }
+  });
+
+  // Test School SMS
+  app.post("/api/super-admin/schools/:id/test-sms", authenticateToken, requireSuperAdmin, async (req: any, res) => {
+    try {
+      const schoolId = parseInt(req.params.id, 10);
+      const school = db.prepare("SELECT id, nom, telephone FROM school_info WHERE id = ?").get(schoolId) as any;
+      if (!school) return res.status(404).json({ error: "Établissement introuvable." });
+
+      const { testPhone } = req.body;
+      const target = testPhone || school.telephone;
+      if (!target) return res.status(400).json({ error: "Numéro de téléphone requis." });
+
+      const result = await sendSmsService(
+        schoolId,
+        req.userId,
+        target,
+        school.nom,
+        'administration',
+        `Test passerelle SMS pour ${school.nom}. Vos alertes SMS / WhatsApp sont opérationnelles.`
+      );
+
+      res.json({
+        success: result.success,
+        status: result.status,
+        provider: result.provider,
+        message: result.status === 'delivered' 
+          ? `SMS délivré avec succès à ${target} via ${result.provider} !`
+          : result.status === 'simulated'
+          ? `SMS simulé avec succès dans le journal pour ${target} (fournisseur: ${result.provider}).`
+          : `Échec d'envoi du SMS via ${result.provider}.`
+      });
+    } catch (err: any) {
+      console.error("School test SMS error:", err);
+      res.status(500).json({ error: "Échec du test SMS : " + err.message });
     }
   });
 

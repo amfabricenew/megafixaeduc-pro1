@@ -642,7 +642,7 @@ export default function SubscriptionPayment() {
             >
               {t("Déjà un compte ? Se connecter")}
             </Link>
-            <LanguageSelector variant="pill" />
+            <LanguageSelector variant="dropdown" />
           </div>
         </div>
       </header>

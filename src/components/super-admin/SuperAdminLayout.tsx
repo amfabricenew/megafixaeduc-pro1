@@ -38,6 +38,7 @@ import toast from 'react-hot-toast';
 import { useAuth } from '../../contexts/AuthContext';
 import { toggleAIAssistant } from '../AIAssistantWidget';
 import logo from '../../LOGO_MEGFIXAEDEUC_PRO.png';
+import { LanguageSelector } from '../LanguageSelector';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -522,6 +523,8 @@ export default function SuperAdminLayout() {
                 )}
               </AnimatePresence>
             </div>
+            <div className="h-8 w-px bg-slate-200 mx-1"></div>
+            <LanguageSelector variant="dropdown" />
             <div className="h-8 w-px bg-slate-200 mx-1"></div>
             <Link to="/super-admin/profile" className="flex items-center gap-3 pl-2 group cursor-pointer">
               <div className="text-right hidden sm:block">

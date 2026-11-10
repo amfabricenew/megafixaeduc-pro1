@@ -295,13 +295,13 @@ export default function LandingPage() {
 
               {/* Language Switcher */}
               <div className="pl-1 border-l border-slate-200">
-                <LanguageSelector variant="pill" />
+                <LanguageSelector variant="dropdown" />
               </div>
             </div>
 
             {/* Mobile Hamburger Button */}
             <div className="flex md:hidden items-center gap-2">
-              <LanguageSelector variant="pill" className="scale-90" />
+              <LanguageSelector variant="dropdown" />
               {user ? (
                 <Link
                   to={user.role === 'super_admin' ? "/super-admin" : "/accueil"}

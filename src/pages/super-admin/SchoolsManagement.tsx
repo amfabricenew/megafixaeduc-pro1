@@ -27,12 +27,15 @@ import {
   Lock,
   Sparkles,
   BookOpen,
-  GraduationCap
+  GraduationCap,
+  Smartphone,
+  SlidersHorizontal
 } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import toast from 'react-hot-toast';
 import SchoolRequestsManagement from '../../components/super-admin/SchoolRequestsManagement';
+import SchoolMessagingModal from '../../components/super-admin/SchoolMessagingModal';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -88,6 +91,10 @@ export default function SchoolsManagement() {
     features_locked: 0,
     features_locked_motif: ''
   });
+
+  // School Messaging Configuration Modal State
+  const [selectedSchoolForMessaging, setSelectedSchoolForMessaging] = useState<any | null>(null);
+  const [isMessagingModalOpen, setIsMessagingModalOpen] = useState(false);
 
   // Copy state
   const [copiedField, setCopiedField] = useState<string | null>(null);
@@ -800,6 +807,18 @@ export default function SchoolsManagement() {
                           title="Activer ou verrouiller les espaces scolaires (Maternelle & Primaire / Secondaire)"
                         >
                           <Lock size={15} />
+                        </button>
+
+                        {/* 1c. School Messaging Gateways (SMTP & SMS) */}
+                        <button
+                          onClick={() => {
+                            setSelectedSchoolForMessaging(s);
+                            setIsMessagingModalOpen(true);
+                          }}
+                          className="p-1.5 text-slate-500 hover:text-emerald-600 bg-slate-50 hover:bg-emerald-50 rounded-lg border border-slate-200 hover:border-emerald-200 transition-colors cursor-pointer"
+                          title="Passerelles SMTP & SMS de cet établissement"
+                        >
+                          <Smartphone size={15} />
                         </button>
 
                         {/* 2. Edit */}
@@ -2170,6 +2189,17 @@ export default function SchoolsManagement() {
           </div>
         </div>
       )}
+
+      {/* School Messaging Configuration Modal */}
+      <SchoolMessagingModal
+        schoolId={selectedSchoolForMessaging?.id || null}
+        isOpen={isMessagingModalOpen}
+        onClose={() => {
+          setIsMessagingModalOpen(false);
+          setSelectedSchoolForMessaging(null);
+        }}
+        onUpdated={fetchData}
+      />
     </div>
   );
 }

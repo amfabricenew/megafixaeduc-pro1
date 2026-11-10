@@ -21,8 +21,16 @@ import {
   Copy,
   ExternalLink,
   X,
-  Check
+  Check,
+  School,
+  Search,
+  Filter,
+  Server,
+  RefreshCw,
+  SlidersHorizontal,
+  Sparkles
 } from 'lucide-react';
+import SchoolMessagingModal from '../../components/super-admin/SchoolMessagingModal';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import toast from 'react-hot-toast';
@@ -152,6 +160,33 @@ export default function SuperAdminSettings() {
   const [isPaymentModalOpen, setIsPaymentModalOpen] = React.useState(false);
   const [editingPayment, setEditingPayment] = React.useState<any>(null);
 
+  // School Messaging Configuration State
+  const [schoolsMessagingList, setSchoolsMessagingList] = React.useState<any[]>([]);
+  const [messagingGlobalDefaults, setMessagingGlobalDefaults] = React.useState<any>(null);
+  const [loadingSchoolsMessaging, setLoadingSchoolsMessaging] = React.useState(false);
+  const [schoolMessagingSearch, setSchoolMessagingSearch] = React.useState('');
+  const [schoolMessagingFilter, setSchoolMessagingFilter] = React.useState<'all' | 'custom' | 'default'>('all');
+  const [selectedSchoolIdForMessaging, setSelectedSchoolIdForMessaging] = React.useState<number | null>(null);
+  const [isMessagingModalOpen, setIsMessagingModalOpen] = React.useState(false);
+
+  const fetchSchoolsMessaging = async () => {
+    try {
+      setLoadingSchoolsMessaging(true);
+      const res = await fetch('/api/super-admin/messaging/schools', {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setSchoolsMessagingList(data.schools || []);
+        setMessagingGlobalDefaults(data.globalDefaults || null);
+      }
+    } catch (e) {
+      console.error("Error fetching schools messaging:", e);
+    } finally {
+      setLoadingSchoolsMessaging(false);
+    }
+  };
+
   React.useEffect(() => {
     if (tab === 'payments' || tab === 'payment') {
       setActiveTab('payment');
@@ -224,6 +259,12 @@ export default function SuperAdminSettings() {
     fetchSettings();
     fetchPlans();
   }, []);
+
+  React.useEffect(() => {
+    if (activeTab === 'schools_messaging') {
+      fetchSchoolsMessaging();
+    }
+  }, [activeTab]);
 
   const handleSave = async (customSettings?: any, customMethods?: any[], customLinks?: any) => {
     setSaving(true);
@@ -406,6 +447,7 @@ export default function SuperAdminSettings() {
     { id: 'general', label: 'Général', icon: Settings },
     { id: 'payment', label: 'Moyens de Paiement', icon: CreditCard },
     { id: 'email', label: 'Emails & Notifications', icon: Mail },
+    { id: 'schools_messaging', label: 'Passerelles Écoles (SMTP & SMS)', icon: Smartphone },
     { id: 'security', label: 'Sécurité & API', icon: Shield },
     { id: 'maintenance', label: 'Maintenance', icon: Database },
   ];
@@ -1005,6 +1047,29 @@ export default function SuperAdminSettings() {
 
           {activeTab === 'email' && (
             <div className="p-8 space-y-8">
+              {/* Bridge banner to per-school gateways */}
+              <div className="p-4 rounded-2xl bg-gradient-to-r from-indigo-50 via-purple-50 to-emerald-50 border border-indigo-100 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-indigo-600 text-white flex items-center justify-center shrink-0 shadow-sm">
+                    <School size={20} />
+                  </div>
+                  <div>
+                    <h4 className="text-xs font-bold text-indigo-950">Passerelles Dédiées par Établissement</h4>
+                    <p className="text-[11px] text-indigo-700/80 mt-0.5">
+                      Besoin qu'une école envoie ses emails ou SMS avec ses propres identifiants ? Vous pouvez configurer des passerelles spécifiques école par école avec repli automatique sur ces paramètres globaux.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('schools_messaging')}
+                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl shadow-xs shrink-0 flex items-center gap-1.5 transition-all cursor-pointer"
+                >
+                  <span>Passerelles par école</span>
+                  <ExternalLink size={14} />
+                </button>
+              </div>
+
               <section className="space-y-4">
                 <div className="flex items-center justify-between">
                   <h3 className="text-sm font-bold text-slate-900 uppercase tracking-widest">Configuration SMTP (Google Mail / Pro)</h3>
@@ -1126,7 +1191,7 @@ export default function SuperAdminSettings() {
                     <select 
                       value={settings.sms_provider || 'simulation'} 
                       onChange={(e) => handleChange('sms_provider', e.target.value)}
-                      className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 font-medium"
+                      className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 font-medium" 
                     >
                       <option value="simulation">Simulation (Log console uniquement)</option>
                       <option value="twilio">Twilio (International)</option>
@@ -1209,6 +1274,272 @@ export default function SuperAdminSettings() {
                   </div>
                 </div>
               </section>
+            </div>
+          )}
+
+          {/* TAB: PASSERELLES PAR ETABLISSEMENT (SMTP & SMS) */}
+          {activeTab === 'schools_messaging' && (
+            <div className="p-8 space-y-8">
+              {/* Header */}
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div>
+                  <h3 className="text-base font-bold text-slate-900 uppercase tracking-widest flex items-center gap-2">
+                    <Smartphone className="text-indigo-600" size={20} />
+                    <span>Passerelles SMTP & SMS par Établissement</span>
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-1 max-w-2xl leading-relaxed">
+                    Permettez à chaque école de configurer son propre serveur SMTP (ex: son propre compte Gmail professionnel ou serveur de messagerie) et sa passerelle SMS (Twilio, SMS-Gateway local), tout en garantissant un repli automatique et transparent sur les valeurs globales pour les écoles sans configuration.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={fetchSchoolsMessaging}
+                  disabled={loadingSchoolsMessaging}
+                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl flex items-center gap-2 shrink-0 transition-colors cursor-pointer self-start md:self-auto"
+                >
+                  <RefreshCw size={14} className={loadingSchoolsMessaging ? 'animate-spin' : ''} />
+                  <span>Actualiser</span>
+                </button>
+              </div>
+
+              {/* Global Defaults Informational Cards */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Global SMTP */}
+                <div className="p-4 rounded-2xl bg-indigo-50/60 border border-indigo-100 flex items-start gap-3.5">
+                  <div className="w-9 h-9 rounded-xl bg-indigo-600 text-white flex items-center justify-center shrink-0">
+                    <Mail size={18} />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[10px] font-black uppercase tracking-wider text-indigo-700">
+                        Serveur SMTP Global (Repli)
+                      </span>
+                      <span className="text-[10px] bg-indigo-200/70 text-indigo-900 font-extrabold px-2 py-0.5 rounded-md">
+                        Système
+                      </span>
+                    </div>
+                    <p className="text-xs font-bold text-slate-800 mt-1 truncate">
+                      {messagingGlobalDefaults?.smtp?.host || 'smtp.gmail.com'}:{messagingGlobalDefaults?.smtp?.port || '587'}
+                    </p>
+                    <p className="text-[11px] text-slate-500 truncate mt-0.5">
+                      Expéditeur : {messagingGlobalDefaults?.smtp?.from || messagingGlobalDefaults?.smtp?.user || 'Non configuré'}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Global SMS */}
+                <div className="p-4 rounded-2xl bg-emerald-50/60 border border-emerald-100 flex items-start gap-3.5">
+                  <div className="w-9 h-9 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0">
+                    <Smartphone size={18} />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[10px] font-black uppercase tracking-wider text-emerald-700">
+                        Passerelle SMS Globale (Repli)
+                      </span>
+                      <span className="text-[10px] bg-emerald-200/70 text-emerald-900 font-extrabold px-2 py-0.5 rounded-md">
+                        Système
+                      </span>
+                    </div>
+                    <p className="text-xs font-bold text-slate-800 mt-1 truncate uppercase">
+                      Fournisseur : {messagingGlobalDefaults?.sms?.provider || 'Simulation'}
+                    </p>
+                    <p className="text-[11px] text-slate-500 truncate mt-0.5">
+                      Sender ID : {messagingGlobalDefaults?.sms?.senderId || 'MEGAFIXA'}
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Search & Filters */}
+              <div className="flex flex-col sm:flex-row gap-3 items-stretch sm:items-center justify-between pt-2">
+                <div className="relative flex-1 max-w-md">
+                  <Search size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type="text"
+                    placeholder="Rechercher une école par nom, ville, email..."
+                    value={schoolMessagingSearch}
+                    onChange={(e) => setSchoolMessagingSearch(e.target.value)}
+                    className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium focus:ring-2 focus:ring-indigo-500/20 focus:bg-white outline-none"
+                  />
+                  {schoolMessagingSearch && (
+                    <button
+                      onClick={() => setSchoolMessagingSearch('')}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                    >
+                      <X size={14} />
+                    </button>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0">
+                  <button
+                    type="button"
+                    onClick={() => setSchoolMessagingFilter('all')}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 cursor-pointer ${
+                      schoolMessagingFilter === 'all'
+                        ? 'bg-slate-900 text-white shadow-xs'
+                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                    }`}
+                  >
+                    Toutes ({schoolsMessagingList.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSchoolMessagingFilter('custom')}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 cursor-pointer ${
+                      schoolMessagingFilter === 'custom'
+                        ? 'bg-indigo-600 text-white shadow-xs'
+                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                    }`}
+                  >
+                    Personnalisées ({schoolsMessagingList.filter((s: any) => s.custom_smtp_enabled || s.custom_sms_enabled).length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSchoolMessagingFilter('default')}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 cursor-pointer ${
+                      schoolMessagingFilter === 'default'
+                        ? 'bg-slate-600 text-white shadow-xs'
+                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                    }`}
+                  >
+                    Par défaut ({schoolsMessagingList.filter((s: any) => !s.custom_smtp_enabled && !s.custom_sms_enabled).length})
+                  </button>
+                </div>
+              </div>
+
+              {/* Schools Messaging List */}
+              {loadingSchoolsMessaging ? (
+                <div className="py-20 text-center text-slate-400 space-y-3">
+                  <RefreshCw size={28} className="animate-spin mx-auto text-indigo-600" />
+                  <p className="text-xs font-semibold">Chargement des établissements...</p>
+                </div>
+              ) : schoolsMessagingList.length === 0 ? (
+                <div className="p-12 text-center bg-slate-50 rounded-2xl border border-dashed border-slate-300">
+                  <School size={36} className="mx-auto text-slate-400 mb-2" />
+                  <p className="text-xs font-bold text-slate-700">Aucun établissement enregistré</p>
+                  <p className="text-[11px] text-slate-400 mt-1">Créez des écoles pour configurer leurs passerelles.</p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {schoolsMessagingList
+                    .filter((s: any) => {
+                      const matchesSearch = 
+                        (s.nom || '').toLowerCase().includes(schoolMessagingSearch.toLowerCase()) ||
+                        (s.email || '').toLowerCase().includes(schoolMessagingSearch.toLowerCase()) ||
+                        (s.adresse || '').toLowerCase().includes(schoolMessagingSearch.toLowerCase());
+                      
+                      if (!matchesSearch) return false;
+                      if (schoolMessagingFilter === 'custom') {
+                        return Boolean(s.custom_smtp_enabled || s.custom_sms_enabled);
+                      }
+                      if (schoolMessagingFilter === 'default') {
+                        return !s.custom_smtp_enabled && !s.custom_sms_enabled;
+                      }
+                      return true;
+                    })
+                    .map((school: any) => {
+                      const hasCustomSmtp = Boolean(school.custom_smtp_enabled);
+                      const hasCustomSms = Boolean(school.custom_sms_enabled);
+
+                      return (
+                        <div
+                          key={school.id}
+                          className="p-4 sm:p-5 rounded-2xl bg-white border border-slate-200 hover:border-indigo-300 hover:shadow-md transition-all flex flex-col lg:flex-row lg:items-center justify-between gap-4"
+                        >
+                          {/* School Identity */}
+                          <div className="flex items-start gap-3.5 min-w-[240px]">
+                            <div className="w-10 h-10 rounded-2xl bg-indigo-50 border border-indigo-100 text-indigo-700 flex items-center justify-center font-bold text-sm shrink-0">
+                              {school.nom?.charAt(0)?.toUpperCase() || 'E'}
+                            </div>
+                            <div className="min-w-0">
+                              <h4 className="text-sm font-bold text-slate-900 truncate">
+                                {school.nom}
+                              </h4>
+                              <p className="text-xs text-slate-500 truncate mt-0.5">
+                                {school.email || 'Aucun email'} {school.telephone ? `• ${school.telephone}` : ''}
+                              </p>
+                              <div className="flex items-center gap-1.5 mt-1 text-[10px] text-slate-400">
+                                <span>{school.adresse ? `${school.adresse}, ` : ''}{school.pays || 'Bénin'}</span>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Gateway Badges */}
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 flex-1 lg:max-w-xl">
+                            {/* SMTP Status */}
+                            <div className={`p-3 rounded-xl border text-xs flex flex-col justify-between ${
+                              hasCustomSmtp
+                                ? 'bg-indigo-50/60 border-indigo-200 text-indigo-900'
+                                : 'bg-slate-50 border-slate-200 text-slate-700'
+                            }`}>
+                              <div className="flex items-center justify-between gap-1 mb-1">
+                                <span className="text-[10px] uppercase font-bold text-slate-500 flex items-center gap-1">
+                                  <Mail size={12} />
+                                  <span>Serveur SMTP</span>
+                                </span>
+                                <span className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full ${
+                                  hasCustomSmtp
+                                    ? 'bg-indigo-600 text-white'
+                                    : 'bg-slate-200 text-slate-600'
+                                }`}>
+                                  {hasCustomSmtp ? 'Personnalisé' : 'Par défaut'}
+                                </span>
+                              </div>
+                              <p className="text-[11px] font-medium truncate">
+                                {hasCustomSmtp 
+                                  ? `${school.smtp_host || 'Non spécifié'} (${school.smtp_user || ''})`
+                                  : `Repli : ${messagingGlobalDefaults?.smtp?.host || 'smtp.gmail.com'}`}
+                              </p>
+                            </div>
+
+                            {/* SMS Status */}
+                            <div className={`p-3 rounded-xl border text-xs flex flex-col justify-between ${
+                              hasCustomSms
+                                ? 'bg-emerald-50/60 border-emerald-200 text-emerald-900'
+                                : 'bg-slate-50 border-slate-200 text-slate-700'
+                            }`}>
+                              <div className="flex items-center justify-between gap-1 mb-1">
+                                <span className="text-[10px] uppercase font-bold text-slate-500 flex items-center gap-1">
+                                  <Smartphone size={12} />
+                                  <span>Passerelle SMS</span>
+                                </span>
+                                <span className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full ${
+                                  hasCustomSms
+                                    ? 'bg-emerald-600 text-white'
+                                    : 'bg-slate-200 text-slate-600'
+                                }`}>
+                                  {hasCustomSms ? 'Personnalisé' : 'Par défaut'}
+                                </span>
+                              </div>
+                              <p className="text-[11px] font-medium truncate">
+                                {hasCustomSms 
+                                  ? `${school.sms_provider?.toUpperCase()} • Sender: ${school.sms_sender_id || 'MEGAFIXA'}`
+                                  : `Repli : ${messagingGlobalDefaults?.sms?.provider?.toUpperCase() || 'Simulation'}`}
+                              </p>
+                            </div>
+                          </div>
+
+                          {/* Configure Button */}
+                          <div className="shrink-0 flex items-center justify-end">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedSchoolIdForMessaging(school.id);
+                                setIsMessagingModalOpen(true);
+                              }}
+                              className="w-full sm:w-auto px-4 py-2.5 bg-slate-900 hover:bg-indigo-600 text-white rounded-xl text-xs font-bold transition-all shadow-xs flex items-center justify-center gap-2 cursor-pointer"
+                            >
+                              <SlidersHorizontal size={14} />
+                              <span>Configurer</span>
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                </div>
+              )}
             </div>
           )}
 
@@ -1487,6 +1818,17 @@ export default function SuperAdminSettings() {
           </div>
         </div>
       )}
+
+      {/* School Messaging Configuration Modal */}
+      <SchoolMessagingModal
+        schoolId={selectedSchoolIdForMessaging}
+        isOpen={isMessagingModalOpen}
+        onClose={() => {
+          setIsMessagingModalOpen(false);
+          setSelectedSchoolIdForMessaging(null);
+        }}
+        onUpdated={fetchSchoolsMessaging}
+      />
     </div>
   );
 }

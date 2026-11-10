@@ -8,7 +8,7 @@ interface LanguageSelectorProps {
 }
 
 export const LanguageSelector: React.FC<LanguageSelectorProps> = ({ 
-  variant = 'pill',
+  variant = 'dropdown',
   className = '' 
 }) => {
   const { language, setLanguage } = useTranslation();
@@ -110,44 +110,25 @@ export const LanguageSelector: React.FC<LanguageSelectorProps> = ({
     );
   }
 
-  // Variant: Pill Switcher (One-click toggle between FR & EN)
+  // Variant: Pill Switcher (Map to dropdown as requested for unified UX)
   if (variant === 'pill') {
-    return (
-      <div className={`inline-flex items-center p-1 bg-slate-100/90 hover:bg-slate-200/90 border border-slate-200/80 rounded-xl transition-all shadow-2xs ${className}`}>
-        {languages.map(lang => {
-          const isSelected = language === lang.code;
-          return (
-            <button
-              key={lang.code}
-              type="button"
-              onClick={() => setLanguage(lang.code)}
-              className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
-                isSelected
-                  ? 'bg-white text-slate-900 shadow-xs scale-100'
-                  : 'text-slate-500 hover:text-slate-800'
-              }`}
-              title={lang.code === 'en' ? 'Switch application to English' : 'Passer l\'application en français'}
-            >
-              <span className="text-sm leading-none">{lang.flag}</span>
-              <span className="text-[11px] font-black">{lang.label}</span>
-            </button>
-          );
-        })}
-      </div>
-    );
+    // Falls through to dropdown below
   }
 
-  // Variant: Dropdown
+  // Variant: Dropdown (Single button showing "Language" when French is selected, and "Langue" when English is selected)
   return (
     <div className={`relative inline-block text-left ${className}`} ref={dropdownRef}>
       <button
         type="button"
         onClick={() => setIsOpen(!isOpen)}
-        className="flex items-center gap-2 px-4 py-2 bg-white hover:bg-slate-50 border border-slate-200 rounded-xl text-xs font-black text-slate-700 shadow-sm transition-all cursor-pointer hover:scale-[1.02] active:scale-[0.98]"
+        className="flex items-center gap-2 px-3 py-1.5 sm:px-3.5 sm:py-2 bg-white hover:bg-slate-50 border border-slate-200 rounded-xl text-xs font-black text-slate-700 shadow-sm transition-all cursor-pointer hover:border-slate-300 hover:shadow-md"
         title="Changer de langue / Switch language"
       >
-        <span className="font-black uppercase tracking-tight">{language === 'en' ? 'Langue' : 'Language'}</span>
-        <ChevronDown size={14} className={`text-slate-400 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
+        <Globe size={15} className="text-indigo-600 shrink-0" />
+        <span className="font-bold text-xs sm:text-sm text-slate-800">
+          {language === 'en' ? 'Langue' : 'Language'}
+        </span>
+        <ChevronDown size={14} className={`text-slate-400 transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`} />
       </button>
 
       {isOpen && (
