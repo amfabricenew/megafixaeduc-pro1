@@ -108,17 +108,33 @@ export default function SchoolCreationRequestModal({
   const [submittingComplaint, setSubmittingComplaint] = useState(false);
   const [viewingStatus, setViewingStatus] = useState<any>(null);
 
+  // Sync mode with initialMode and reset states on open
+  useEffect(() => {
+    if (isOpen) {
+      setMode(initialMode || 'creation');
+      if (initialMode === 'tracking') {
+        setStep(1);
+        setTrackingRef('');
+      } else {
+        // Reset to first step if coming back to creation
+        if (!createdRequest) {
+          setStep(1);
+        }
+      }
+    }
+  }, [isOpen, initialMode]);
+
   // Load config on mount or open
   useEffect(() => {
     if (isOpen) {
       // Check for ref in URL to show status/complaint
       const params = new URLSearchParams(window.location.search);
-      const ref = params.get('ref');
+      const urlRef = params.get('ref');
       const action = params.get('action');
 
-      if (ref) {
+      if (urlRef) {
         setLoading(true);
-        fetch(`/api/public/school-requests/${ref}/status`)
+        fetch(`/api/public/school-requests/${urlRef}/status`)
           .then(res => res.json())
           .then(data => {
             if (data && data.reference) {
@@ -289,8 +305,23 @@ export default function SchoolCreationRequestModal({
 
       setViewingStatus(data);
       setCreatedRequest(data);
-      setMode('creation');
-      setStep(3);
+      // Removed setMode('creation') to keep context if desired, or let UI handle it
+      
+      // Smart routing based on status
+      if (data.statut === 'payment_pending') {
+        setStep(2);
+        // Sync form with data for step 2 usage
+        setForm(prev => ({
+          ...prev,
+          nom_ecole: data.nom_ecole || prev.nom_ecole,
+          demandeur_telephone: data.demandeur_telephone || prev.demandeur_telephone,
+          plan_souhaite: data.plan_souhaite || prev.plan_souhaite
+        }));
+      } else {
+        setStep(3);
+      }
+      
+      toast.success("Dossier retrouvé avec succès.");
     } catch (err: any) {
       toast.error(err.message);
     } finally {
@@ -344,7 +375,7 @@ export default function SchoolCreationRequestModal({
           {/* ============================================================== */}
           {/* TRACKING MODE UI */}
           {/* ============================================================== */}
-          {mode === 'tracking' && (
+          {mode === 'tracking' && step === 1 && (
             <div className="space-y-6">
               <div className="text-center space-y-2">
                 <div className="w-16 h-16 mx-auto rounded-2xl bg-indigo-500/10 flex items-center justify-center text-indigo-400 border border-indigo-500/20">
@@ -364,7 +395,7 @@ export default function SchoolCreationRequestModal({
                     required
                     value={trackingRef}
                     onChange={(e) => setTrackingRef(e.target.value.toUpperCase())}
-                    placeholder="ex: REQ-XXXXXX"
+                    placeholder={`ex: DEM-${new Date().getFullYear()}-ABCDE`}
                     className="w-full px-5 py-3 bg-slate-800 border border-slate-700 rounded-2xl text-base font-mono font-bold text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   />
                 </div>
@@ -661,7 +692,7 @@ export default function SchoolCreationRequestModal({
           {/* ============================================================== */}
           {/* STEP 2: PAIEMENT MOBILE MONEY (CONFIGURÉ PAR LE SUPER ADMIN) */}
           {/* ============================================================== */}
-          {mode === 'creation' && step === 2 && createdRequest && (
+          {(mode === 'creation' || mode === 'tracking') && step === 2 && createdRequest && (
             <div className="space-y-6">
               
               {/* Request Success Banner */}
@@ -855,7 +886,7 @@ export default function SchoolCreationRequestModal({
           {/* ============================================================== */}
           {/* STEP 3: MESSAGE D'ATTENTE 24H AVEC CONTACTS DE L'ÉQUIPE */}
           {/* ============================================================== */}
-          {mode === 'creation' && step === 3 && createdRequest && (
+          {(mode === 'creation' || mode === 'tracking') && step === 3 && createdRequest && (
             <div className="space-y-6 py-4">
               
               {createdRequest.statut === 'rejected' ? (
@@ -905,21 +936,57 @@ export default function SchoolCreationRequestModal({
                     </button>
                   </div>
                 </div>
+              ) : createdRequest.statut === 'approved' ? (
+                <div className="space-y-6">
+                  <div className="w-20 h-20 mx-auto rounded-3xl bg-emerald-500/20 border-2 border-emerald-500/40 flex items-center justify-center text-emerald-400 shadow-xl shadow-emerald-500/20">
+                    <CheckCircle2 size={40} />
+                  </div>
+
+                  <div className="text-center space-y-2">
+                    <span className="text-xs font-black uppercase tracking-widest text-emerald-400 bg-emerald-500/10 px-3 py-1 rounded-full border border-emerald-500/30">
+                      Demande Validée
+                    </span>
+                    <h3 className="text-xl sm:text-2xl font-black text-white">
+                      Votre établissement est prêt !
+                    </h3>
+                    <p className="text-xs sm:text-sm text-slate-300 max-w-lg mx-auto leading-relaxed">
+                      Félicitations ! L'adhésion de <strong className="text-white">{createdRequest.nom_ecole}</strong> a été validée. Un email contenant vos accès a été envoyé à <strong className="text-emerald-400">{createdRequest.demandeur_email}</strong>.
+                    </p>
+                  </div>
+
+                  <div className="p-5 bg-emerald-500/10 border border-emerald-500/20 rounded-3xl flex flex-col items-center gap-3">
+                    <p className="text-xs text-emerald-300 font-bold text-center">Vous pouvez maintenant vous connecter à votre portail école.</p>
+                    <button
+                      onClick={() => {
+                        onClose();
+                        window.location.href = '/login';
+                      }}
+                      className="inline-flex items-center gap-2 px-8 py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-black text-sm rounded-2xl shadow-lg transition-all"
+                    >
+                      <span>Se connecter</span>
+                      <ArrowRight size={18} />
+                    </button>
+                  </div>
+                </div>
               ) : (
                 <div className="text-center space-y-6">
-                  <div className="w-20 h-20 mx-auto rounded-3xl bg-emerald-500/20 border-2 border-emerald-500/40 flex items-center justify-center text-emerald-400 shadow-xl shadow-emerald-500/20 animate-pulse">
+                  <div className="w-20 h-20 mx-auto rounded-3xl bg-indigo-500/20 border-2 border-indigo-500/40 flex items-center justify-center text-indigo-400 shadow-xl shadow-indigo-500/20 animate-pulse">
                     <Clock size={40} />
                   </div>
 
                   <div className="space-y-2">
-                    <span className="text-xs font-black uppercase tracking-widest text-emerald-400 bg-emerald-500/10 px-3 py-1 rounded-full border border-emerald-500/30">
-                      Dossier en cours de traitement
+                    <span className="text-xs font-black uppercase tracking-widest text-indigo-400 bg-indigo-500/10 px-3 py-1 rounded-full border border-indigo-500/30">
+                      {createdRequest.statut === 'payment_confirmed' ? 'Paiement en vérification' : 'Dossier en cours de traitement'}
                     </span>
                     <h3 className="text-xl sm:text-2xl font-black text-white">
-                      Demande transmise avec succès !
+                      {createdRequest.statut === 'payment_confirmed' ? 'Paiement signalé !' : 'Demande en cours...'}
                     </h3>
                     <p className="text-xs sm:text-sm text-slate-300 max-w-lg mx-auto leading-relaxed">
-                      Nos équipes procèdent aux vérifications. Votre compte sera configuré <strong className="text-emerald-400">dans les 24 heures</strong>.
+                      {createdRequest.statut === 'payment_confirmed' 
+                        ? `Nous vérifions la réception de votre versement pour ${createdRequest.nom_ecole}.`
+                        : 'Nos équipes procèdent aux vérifications de votre dossier.'}
+                      <br/>
+                      Activation prévue <strong className="text-indigo-400">dans les 24 heures</strong>.
                     </p>
                   </div>
                 </div>
