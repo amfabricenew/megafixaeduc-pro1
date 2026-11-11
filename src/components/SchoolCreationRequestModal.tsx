@@ -108,18 +108,20 @@ export default function SchoolCreationRequestModal({
   const [submittingComplaint, setSubmittingComplaint] = useState(false);
   const [viewingStatus, setViewingStatus] = useState<any>(null);
 
-  // Sync mode with initialMode and reset states on open
+  // Reset states on open based on mode
   useEffect(() => {
     if (isOpen) {
-      setMode(initialMode || 'creation');
       if (initialMode === 'tracking') {
+        setMode('tracking');
         setStep(1);
         setTrackingRef('');
+        setCreatedRequest(null); 
+        setViewingStatus(null);
       } else {
-        // Reset to first step if coming back to creation
-        if (!createdRequest) {
-          setStep(1);
-        }
+        setMode('creation');
+        setStep(1);
+        setCreatedRequest(null);
+        setViewingStatus(null);
       }
     }
   }, [isOpen, initialMode]);

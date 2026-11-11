@@ -925,7 +925,10 @@ export default function Login() {
               Vous représentez un nouvel établissement ?{' '}
               <button
                 type="button"
-                onClick={() => setShowSchoolRequestModal(true)}
+                onClick={() => {
+                  setSchoolRequestInitialMode('creation');
+                  setShowSchoolRequestModal(true);
+                }}
                 className="font-black text-emerald-400 hover:text-emerald-300 transition-colors underline cursor-pointer"
               >
                 Faire une demande de création de compte
