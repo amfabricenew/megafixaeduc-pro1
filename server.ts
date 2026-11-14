@@ -15,6 +15,7 @@ import Database from "better-sqlite3";
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
+import zlib from "zlib";
 import { fileURLToPath } from "url";
 import bcrypt from "bcryptjs";
 import XLSX from "xlsx";
@@ -194,6 +195,11 @@ db.exec(`
 const flushAndCloseDb = () => {
   try {
     if (db && db.open) {
+      try {
+        saveLocalCheckpointSync();
+      } catch (cpErr) {
+        console.warn('[Persistence] Shutdown local checkpoint notice:', cpErr);
+      }
       db.pragma('wal_checkpoint(TRUNCATE)');
       db.close();
       console.log('[SQLite] Checkpoint completed and database closed.');
@@ -269,70 +275,537 @@ try { db.prepare("ALTER TABLE school_smtp_configs ADD COLUMN email_provider TEXT
 try { db.prepare("ALTER TABLE school_smtp_configs ADD COLUMN brevo_api_key TEXT DEFAULT ''").run(); } catch(e) {}
 
 // Robust Data Persistence Layer (Checkpoint System)
-// In cloud environments like Cloud Run, the local filesystem is ephemeral.
-// We use a periodic SQL dump to the workspace which AI Studio persists.
+// Preserves all existing schools, accounts, students, grades, financials, and settings across updates & redeployments.
 const BACKUPS_DIR = path.join(process.cwd(), 'backups');
 if (!fs.existsSync(BACKUPS_DIR)) fs.mkdirSync(BACKUPS_DIR, { recursive: true });
 
 const AUTO_BACKUP_PATH = path.join(BACKUPS_DIR, 'auto_persistence_checkpoint.sql');
+const FIRESTORE_PLAIN_LIMIT = 700000;
+const FIRESTORE_CHUNK_SIZE = 650000;
+
+let checkpointTimer: NodeJS.Timeout | null = null;
+let isSavingCheckpoint = false;
+let pendingCheckpointAfterCurrent = false;
+
+function tableExists(tableName: string): boolean {
+  const row = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = ?").get(tableName) as any;
+  return Boolean(row?.name);
+}
+
+function safeCount(sql: string, ...params: any[]): number {
+  try {
+    const row = db.prepare(sql).get(...params) as any;
+    return Number(row?.count ?? row?.c ?? 0);
+  } catch {
+    return 0;
+  }
+}
+
+interface DatabaseStats {
+  schoolCount: number;
+  nonDefaultSchoolCount: number;
+  userCount: number;
+  nonTestUserCount: number;
+  studentCount: number;
+  classCount: number;
+  teacherCount: number;
+  paymentCount: number;
+  gradeCount: number;
+  requestCount: number;
+  licenseCount: number;
+  smtpConfigCount: number;
+  hasRealData: boolean;
+  totalScore: number;
+}
+
+function getDatabaseStats(): DatabaseStats {
+  const schoolCount = tableExists('school_info') ? safeCount("SELECT COUNT(*) as count FROM school_info") : 0;
+  const nonDefaultSchoolCount = tableExists('school_info')
+    ? safeCount("SELECT COUNT(*) as count FROM school_info WHERE id > 1 OR TRIM(nom) != 'École par Défaut' OR email IS NOT NULL OR telephone IS NOT NULL OR subscription_key IS NOT NULL")
+    : 0;
+  const userCount = tableExists('utilisateurs') ? safeCount("SELECT COUNT(*) as count FROM utilisateurs") : 0;
+  const nonTestUserCount = tableExists('utilisateurs') ? safeCount("SELECT COUNT(*) as count FROM utilisateurs WHERE COALESCE(is_test_account, 0) = 0") : 0;
+  const studentCount = tableExists('eleves') ? safeCount("SELECT COUNT(*) as count FROM eleves") : 0;
+  const classCount = tableExists('classes') ? safeCount("SELECT COUNT(*) as count FROM classes") : 0;
+  const teacherCount = tableExists('enseignants') ? safeCount("SELECT COUNT(*) as count FROM enseignants") : 0;
+  const paymentCount = tableExists('paiements') ? safeCount("SELECT COUNT(*) as count FROM paiements") : 0;
+  const gradeCount = tableExists('notes') ? safeCount("SELECT COUNT(*) as count FROM notes") : 0;
+  const requestCount = tableExists('school_creation_requests') ? safeCount("SELECT COUNT(*) as count FROM school_creation_requests") : 0;
+  const licenseCount = tableExists('subscription_licenses') ? safeCount("SELECT COUNT(*) as count FROM subscription_licenses") : 0;
+  const smtpConfigCount = tableExists('school_smtp_configs') ? safeCount("SELECT COUNT(*) as count FROM school_smtp_configs") : 0;
+
+  const hasRealData = (
+    schoolCount > 1 ||
+    nonDefaultSchoolCount > 0 ||
+    nonTestUserCount > 0 ||
+    studentCount > 0 ||
+    classCount > 0 ||
+    teacherCount > 0 ||
+    paymentCount > 0 ||
+    gradeCount > 0 ||
+    requestCount > 0 ||
+    licenseCount > 0 ||
+    smtpConfigCount > 0
+  );
+
+  const totalScore =
+    nonDefaultSchoolCount * 100 +
+    nonTestUserCount * 20 +
+    studentCount * 10 +
+    classCount * 10 +
+    teacherCount * 10 +
+    paymentCount * 5 +
+    gradeCount * 2 +
+    requestCount * 15 +
+    licenseCount * 15 +
+    smtpConfigCount * 10 +
+    schoolCount;
+
+  return {
+    schoolCount,
+    nonDefaultSchoolCount,
+    userCount,
+    nonTestUserCount,
+    studentCount,
+    classCount,
+    teacherCount,
+    paymentCount,
+    gradeCount,
+    requestCount,
+    licenseCount,
+    smtpConfigCount,
+    hasRealData,
+    totalScore
+  };
+}
+
+function inspectSqlDumpStats(sql: string): { hasRealData: boolean; score: number } {
+  if (!sql || sql.trim().length === 0) return { hasRealData: false, score: 0 };
+  const lines = sql.split('\n');
+  let schoolInserts = 0;
+  let nonDefaultSchool = false;
+  let userInserts = 0;
+  let studentInserts = 0;
+  let classInserts = 0;
+  let teacherInserts = 0;
+  let paymentInserts = 0;
+  let gradeInserts = 0;
+  let requestInserts = 0;
+  let licenseInserts = 0;
+
+  for (const line of lines) {
+    if (line.includes('INTO school_info ')) {
+      schoolInserts++;
+      if (!line.includes("'École par Défaut'") || schoolInserts > 1) {
+        nonDefaultSchool = true;
+      }
+    } else if (line.includes('INTO utilisateurs ')) {
+      userInserts++;
+    } else if (line.includes('INTO eleves ')) {
+      studentInserts++;
+    } else if (line.includes('INTO classes ')) {
+      classInserts++;
+    } else if (line.includes('INTO enseignants ')) {
+      teacherInserts++;
+    } else if (line.includes('INTO paiements ')) {
+      paymentInserts++;
+    } else if (line.includes('INTO notes ')) {
+      gradeInserts++;
+    } else if (line.includes('INTO school_creation_requests ')) {
+      requestInserts++;
+    } else if (line.includes('INTO subscription_licenses ')) {
+      licenseInserts++;
+    }
+  }
+
+  const hasRealData = (
+    schoolInserts > 1 ||
+    nonDefaultSchool ||
+    userInserts > 11 ||
+    studentInserts > 0 ||
+    classInserts > 0 ||
+    teacherInserts > 0 ||
+    paymentInserts > 0 ||
+    gradeInserts > 0 ||
+    requestInserts > 0 ||
+    licenseInserts > 0
+  );
+
+  const score =
+    (nonDefaultSchool ? 100 : 0) +
+    schoolInserts * 50 +
+    Math.max(0, userInserts - 11) * 20 +
+    studentInserts * 10 +
+    classInserts * 10 +
+    teacherInserts * 10 +
+    paymentInserts * 5 +
+    gradeInserts * 2 +
+    requestInserts * 15 +
+    licenseInserts * 15;
+
+  return { hasRealData, score };
+}
+
+function serializeSqlValue(v: any): string {
+  if (v === null || v === undefined) return "NULL";
+  if (Buffer.isBuffer(v) || v instanceof Uint8Array) {
+    return `X'${Buffer.from(v).toString('hex')}'`;
+  }
+  if (typeof v === 'boolean') return v ? '1' : '0';
+  if (typeof v === 'number') return Number.isFinite(v) ? String(v) : "NULL";
+  if (typeof v === 'string') return `'${v.replace(/'/g, "''")}'`;
+  return `'${JSON.stringify(v).replace(/'/g, "''")}'`;
+}
+
+function generateFullSqlDump(): string {
+  const allTables = (db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all() as any[]).map(t => t.name);
+  const sqlChunks: string[] = ["PRAGMA foreign_keys=OFF;\nBEGIN TRANSACTION;\n"];
+
+  for (const table of allTables) {
+    if (table === 'backup_snapshots') continue;
+    const rows = db.prepare(`SELECT * FROM "${table}"`).all() as any[];
+    if (rows.length > 0) {
+      for (const row of rows) {
+        const cols = Object.keys(row);
+        const vals = cols.map(c => serializeSqlValue(row[c]));
+        sqlChunks.push(`INSERT OR REPLACE INTO "${table}" (${cols.map(c => `"${c}"`).join(", ")}) VALUES (${vals.join(", ")});\n`);
+      }
+    }
+  }
+  sqlChunks.push("COMMIT;\nPRAGMA foreign_keys=ON;\n");
+  return sqlChunks.join('');
+}
+
+function createSafetyBackup(prefix = 'pre_update'): string | null {
+  try {
+    if (!db || !db.open) return null;
+    const stats = getDatabaseStats();
+    if (!stats.hasRealData && stats.schoolCount === 0) return null;
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const backupFile = path.join(BACKUPS_DIR, `${prefix}_${stamp}.sql`);
+    const dump = generateFullSqlDump();
+    fs.writeFileSync(backupFile, dump, 'utf8');
+
+    // Prune old safety backups of same prefix (keep latest 5)
+    try {
+      const files = fs.readdirSync(BACKUPS_DIR)
+        .filter(f => f.startsWith(`${prefix}_`) && f.endsWith('.sql'))
+        .sort()
+        .reverse();
+      for (const oldFile of files.slice(5)) {
+        fs.unlinkSync(path.join(BACKUPS_DIR, oldFile));
+      }
+    } catch {}
+    return backupFile;
+  } catch (err) {
+    console.warn(`[Persistence] Safety backup (${prefix}) notice:`, err);
+    return null;
+  }
+}
+
+function splitSqlStatements(sql: string): string[] {
+  const statements: string[] = [];
+  let current = '';
+  let inSingleQuote = false;
+  let inLineComment = false;
+
+  for (let i = 0; i < sql.length; i++) {
+    const ch = sql[i];
+    const next = sql[i + 1];
+
+    if (inLineComment) {
+      if (ch === '\n') inLineComment = false;
+      continue;
+    }
+
+    if (!inSingleQuote && ch === '-' && next === '-') {
+      inLineComment = true;
+      i++;
+      continue;
+    }
+
+    if (ch === "'") {
+      current += ch;
+      if (inSingleQuote && next === "'") {
+        current += next;
+        i++;
+      } else {
+        inSingleQuote = !inSingleQuote;
+      }
+      continue;
+    }
+
+    if (ch === ';' && !inSingleQuote) {
+      const trimmed = current.trim();
+      if (trimmed.length > 0) statements.push(trimmed);
+      current = '';
+      continue;
+    }
+
+    current += ch;
+  }
+
+  const tail = current.trim();
+  if (tail.length > 0) statements.push(tail);
+  return statements;
+}
+
+function splitSqlTuple(tupleStr: string): string[] {
+  const parts: string[] = [];
+  let current = '';
+  let inSingleQuote = false;
+
+  for (let i = 0; i < tupleStr.length; i++) {
+    const ch = tupleStr[i];
+    const next = tupleStr[i + 1];
+
+    if (ch === "'") {
+      current += ch;
+      if (inSingleQuote && next === "'") {
+        current += next;
+        i++;
+      } else {
+        inSingleQuote = !inSingleQuote;
+      }
+      continue;
+    }
+
+    if (ch === ',' && !inSingleQuote) {
+      parts.push(current.trim());
+      current = '';
+      continue;
+    }
+
+    current += ch;
+  }
+
+  const last = current.trim();
+  if (last.length > 0) parts.push(last);
+  return parts;
+}
+
+function executeResilientSqlRestore(sqlDump: string): { applied: number; adapted: number; skipped: number } {
+  const statements = splitSqlStatements(sqlDump);
+  let applied = 0;
+  let adapted = 0;
+  let skipped = 0;
+
+  if (db.inTransaction) {
+    try { db.exec("ROLLBACK;"); } catch {}
+  }
+
+  const tableColumnsCache = new Map<string, Set<string>>();
+  const getTableCols = (tableName: string): Set<string> => {
+    const key = tableName.toLowerCase();
+    if (!tableColumnsCache.has(key)) {
+      const cols = (db.prepare(`PRAGMA table_info("${tableName}")`).all() as any[]).map(c => c.name);
+      tableColumnsCache.set(key, new Set(cols));
+    }
+    return tableColumnsCache.get(key)!;
+  };
+
+  // Must disable foreign keys OUTSIDE transaction in SQLite
+  db.pragma('foreign_keys = OFF');
+  try {
+    const tx = db.transaction(() => {
+      // Clear any seed-only data cleanly before restoring checkpoint
+      if (!getDatabaseStats().hasRealData) {
+        const allTables = (db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all() as any[]).map(t => t.name);
+        for (const tbl of allTables) {
+          if (tbl === 'backup_snapshots') continue;
+          try { db.prepare(`DELETE FROM "${tbl}"`).run(); } catch {}
+        }
+      }
+
+      for (const rawStmt of statements) {
+        const stmt = rawStmt.trim();
+        const upper = stmt.toUpperCase();
+        if (
+          !stmt ||
+          upper.startsWith('PRAGMA') ||
+          upper === 'BEGIN' ||
+          upper === 'BEGIN TRANSACTION' ||
+          upper === 'COMMIT' ||
+          upper === 'END TRANSACTION'
+        ) {
+          continue;
+        }
+
+        try {
+          db.exec('SAVEPOINT sp_restore_stmt');
+          db.exec(stmt);
+          db.exec('RELEASE SAVEPOINT sp_restore_stmt');
+          applied++;
+        } catch (stmtErr: any) {
+          try { db.exec('ROLLBACK TO SAVEPOINT sp_restore_stmt'); } catch {}
+          try { db.exec('RELEASE SAVEPOINT sp_restore_stmt'); } catch {}
+
+          // Handle schema evolution: filter INSERT columns to live columns if a column was removed/renamed
+          const insertMatch = stmt.match(/^INSERT(?:\s+OR\s+(?:REPLACE|IGNORE))?\s+INTO\s+["`]?([a-zA-Z0-9_]+)["`]?\s*\(([^)]+)\)\s*VALUES\s*\(([\s\S]+)\)$/i);
+          if (insertMatch) {
+            const tblName = insertMatch[1];
+            const liveCols = getTableCols(tblName);
+            if (liveCols.size > 0) {
+              const cols = insertMatch[2].split(',').map(c => c.trim().replace(/^["`]|["`]$/g, ''));
+              const vals = splitSqlTuple(insertMatch[3]);
+              if (cols.length === vals.length) {
+                const keptCols: string[] = [];
+                const keptVals: string[] = [];
+                for (let i = 0; i < cols.length; i++) {
+                  if (liveCols.has(cols[i])) {
+                    keptCols.push(`"${cols[i]}"`);
+                    keptVals.push(vals[i]);
+                  }
+                }
+                if (keptCols.length > 0) {
+                  try {
+                    const verb = /^INSERT\s+OR\s+IGNORE/i.test(stmt) ? 'INSERT OR IGNORE' : 'INSERT OR REPLACE';
+                    db.exec('SAVEPOINT sp_restore_retry');
+                    db.exec(`${verb} INTO "${tblName}" (${keptCols.join(', ')}) VALUES (${keptVals.join(', ')})`);
+                    db.exec('RELEASE SAVEPOINT sp_restore_retry');
+                    adapted++;
+                    continue;
+                  } catch (retryErr: any) {
+                    try { db.exec('ROLLBACK TO SAVEPOINT sp_restore_retry'); } catch {}
+                    try { db.exec('RELEASE SAVEPOINT sp_restore_retry'); } catch {}
+                  }
+                }
+              }
+            }
+          }
+
+          skipped++;
+          console.warn(`[Persistence] Skipped incompatible statement during restore: ${stmtErr?.message || stmtErr}`);
+        }
+      }
+
+      // Sync sqlite_sequence so future AUTOINCREMENT ids never collide
+      if (tableExists('sqlite_sequence')) {
+        const allTables = (db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all() as any[]).map(t => t.name);
+        for (const tbl of allTables) {
+          const cols = getTableCols(tbl);
+          if (cols.has('id')) {
+            try {
+              const maxRow = db.prepare(`SELECT COALESCE(MAX(id), 0) as maxId FROM "${tbl}"`).get() as any;
+              const maxId = Number(maxRow?.maxId || 0);
+              if (maxId > 0) {
+                db.prepare("DELETE FROM sqlite_sequence WHERE name = ?").run(tbl);
+                db.prepare("INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)").run(tbl, maxId);
+              }
+            } catch {}
+          }
+        }
+      }
+    });
+
+    tx();
+  } finally {
+    try { db.pragma('foreign_keys = ON'); } catch {}
+  }
+
+  return { applied, adapted, skipped };
+}
+
+async function fetchCloudCheckpointSql(): Promise<{ sql: string; lastUpdated?: string; hasRealData: boolean; score: number } | null> {
+  if (OFFLINE_MODE) return null;
+  try {
+    const cloudDocSnap = await adminDb.collection('backups').doc('global_checkpoint').get();
+    if (!cloudDocSnap.exists) return null;
+    const data = cloudDocSnap.data();
+    if (!data) return null;
+
+    let sql = '';
+    if (data.encoding === 'gzip-base64-chunked' && Number(data.chunk_count) > 0) {
+      const chunkCount = Number(data.chunk_count);
+      const b64Parts: string[] = [];
+      for (let i = 0; i < chunkCount; i++) {
+        const chunkSnap = await adminDb.collection('backups').doc(`global_checkpoint_chunk_${i}`).get();
+        if (!chunkSnap.exists || !chunkSnap.data()?.data) {
+          throw new Error(`Missing cloud checkpoint chunk ${i}/${chunkCount}`);
+        }
+        b64Parts.push(chunkSnap.data().data);
+      }
+      const compressedBuf = Buffer.from(b64Parts.join(''), 'base64');
+      sql = zlib.gunzipSync(compressedBuf).toString('utf8');
+    } else if (typeof data.sql_dump === 'string' && data.sql_dump.length > 0) {
+      sql = data.sql_dump;
+    }
+
+    if (!sql) return null;
+    if (data.checksum) {
+      const actualChecksum = crypto.createHash('sha256').update(sql, 'utf8').digest('hex');
+      if (actualChecksum !== data.checksum) {
+        console.warn('[Persistence] Cloud checkpoint checksum mismatch, skipping corrupted snapshot.');
+        return null;
+      }
+    }
+
+    const parsedStats = inspectSqlDumpStats(sql);
+    return {
+      sql,
+      lastUpdated: data.last_updated,
+      hasRealData: Boolean(data.has_real_data) || parsedStats.hasRealData,
+      score: parsedStats.score
+    };
+  } catch (err) {
+    console.error("[Persistence] Cloud recovery check failed:", err);
+    return null;
+  }
+}
 
 async function restoreFromCheckpoint() {
   try {
-    const tableExists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='school_info'").get();
-    if (tableExists) {
-      const schoolCount = db.prepare("SELECT COUNT(*) as count FROM school_info").get() as any;
-      if (schoolCount && schoolCount.count > 0) {
-        // Database already has data, don't overwrite
-        return;
-      }
+    const stats = getDatabaseStats();
+    // Never overwrite an active database that already holds real schools/users/students/data
+    if (stats.hasRealData) {
+      return;
     }
 
-    console.log("[Persistence] Database appears empty. Checking for recovery options...");
+    console.log("[Persistence] Database has no custom data yet. Checking Cloud and Local backups for recovery...");
 
-    // 1. Try Cloud Recovery First (Firestore) - Only if not in offline mode
-    if (!OFFLINE_MODE) {
-      try {
-        console.log("[Persistence] Checking Cloud Checkpoint (Firestore)...");
-        const cloudDocSnap = await adminDb.collection('backups').doc('global_checkpoint').get();
-        if (cloudDocSnap.exists) {
-          const data = cloudDocSnap.data();
-          if (data?.sql_dump) {
-            console.log("[Persistence] Found Cloud Checkpoint. Restoring...");
-            try {
-              if (db.inTransaction) {
-                try { db.exec("ROLLBACK;"); } catch(e) {}
-              }
-              db.exec(data.sql_dump);
-              console.log("[Persistence] Cloud auto-restore completed successfully.");
-              return;
-            } catch (sqlErr) {
-              if (db.inTransaction) {
-                try { db.exec("ROLLBACK;"); } catch(e) {}
-              }
-              console.warn("[Persistence] Cloud auto-restore SQL error:", sqlErr);
-            }
-          }
-        }
-      } catch (err) {
-        console.error("[Persistence] Cloud recovery check failed:", err);
-      }
-    }
+    const cloudCandidate = await fetchCloudCheckpointSql();
+    let localCandidate: { sql: string; hasRealData: boolean; score: number } | null = null;
 
-    // 2. Fallback to Local Checkpoint
     if (fs.existsSync(AUTO_BACKUP_PATH)) {
-      console.log("[Persistence] Attempting auto-restore from local checkpoint...");
       try {
-        if (db.inTransaction) {
-          try { db.exec("ROLLBACK;"); } catch(e) {}
-        }
-        const sql = fs.readFileSync(AUTO_BACKUP_PATH, 'utf8');
-        db.exec(sql);
-        console.log("[Persistence] Local auto-restore completed successfully.");
+        const localSql = fs.readFileSync(AUTO_BACKUP_PATH, 'utf8');
+        const localStats = inspectSqlDumpStats(localSql);
+        localCandidate = { sql: localSql, hasRealData: localStats.hasRealData, score: localStats.score };
+      } catch (e) {
+        console.warn("[Persistence] Could not read local checkpoint:", e);
+      }
+    }
+
+    // Choose the best non-empty backup (prioritize real data, then higher data score, then cloud)
+    const candidates: Array<{ source: string; sql: string; hasRealData: boolean; score: number }> = [];
+    if (cloudCandidate) candidates.push({ source: 'cloud', ...cloudCandidate });
+    if (localCandidate) candidates.push({ source: 'local', ...localCandidate });
+
+    if (candidates.length === 0) {
+      console.log("[Persistence] No existing backup found. Proceeding with clean initial setup.");
+      return;
+    }
+
+    // Sort: real data first, then highest score; on tie prefer cloud
+    candidates.sort((a, b) => {
+      if (a.hasRealData !== b.hasRealData) return a.hasRealData ? -1 : 1;
+      if (a.score !== b.score) return b.score - a.score;
+      return a.source === 'cloud' ? -1 : 1;
+    });
+
+    // If current DB already has default school_info (count > 0) and candidates have NO real data, don't churn
+    if (stats.schoolCount > 0 && !candidates[0].hasRealData) {
+      return;
+    }
+
+    for (const candidate of candidates) {
+      try {
+        console.log(`[Persistence] Restoring from ${candidate.source} checkpoint (realData=${candidate.hasRealData}, score=${candidate.score})...`);
+        const result = executeResilientSqlRestore(candidate.sql);
+        console.log(`[Persistence] Auto-restore (${candidate.source}) completed: ${result.applied} applied, ${result.adapted} schema-adapted, ${result.skipped} skipped.`);
+        return;
       } catch (err) {
-        if (db.inTransaction) {
-          try { db.exec("ROLLBACK;"); } catch(e) {}
-        }
-        console.error("[Persistence] Local auto-restore failed:", err);
+        console.error(`[Persistence] ${candidate.source} auto-restore failed:`, err);
       }
     }
   } catch (err) {
@@ -340,66 +813,142 @@ async function restoreFromCheckpoint() {
   }
 }
 
-async function saveCheckpoint() {
+function saveLocalCheckpointSync(): boolean {
   try {
-    const allTables = (db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all() as any[]).map(t => t.name);
-    const sqlChunks: string[] = ["PRAGMA foreign_keys=OFF;\nBEGIN TRANSACTION;\n"];
-    
-    for (const table of allTables) {
-      if (table === 'backup_snapshots') continue;
-      const rows = db.prepare(`SELECT * FROM ${table}`).all() as any[];
-      if (rows.length > 0) {
-        for (const row of rows) {
-          const cols = Object.keys(row);
-          const vals = cols.map(c => {
-            const v = row[c];
-            if (v === null || v === undefined) return "NULL";
-            if (typeof v === 'string') return `'${v.replace(/'/g, "''")}'`;
-            return v;
-          });
-          sqlChunks.push(`INSERT OR REPLACE INTO ${table} (${cols.join(", ")}) VALUES (${vals.join(", ")});\n`);
-        }
-      }
-    }
-    sqlChunks.push("COMMIT;\nPRAGMA foreign_keys=ON;\n");
-    
-    const sqlDump = sqlChunks.join('');
-    
-    // Save to local persistence
-    fs.writeFileSync(AUTO_BACKUP_PATH, sqlDump, 'utf8');
-    console.log("[Persistence] Local checkpoint saved.");
-
-    // Save to Cloud Persistence (Firestore) - Only if not in offline mode
-    if (!OFFLINE_MODE) {
-      // Check Firestore 1MB document limit (approx 1,000,000 characters for string)
-      if (sqlDump.length > 1000000) {
-        console.warn("[Persistence] SQL dump too large for Firestore ( > 1MB). Skipping cloud checkpoint.");
-        return;
-      }
-      
+    if (!db || !db.open || !tableExists('school_info')) return false;
+    const stats = getDatabaseStats();
+    if (!stats.hasRealData && fs.existsSync(AUTO_BACKUP_PATH)) {
       try {
-        await adminDb.collection('backups').doc('global_checkpoint').set({
-          sql_dump: sqlDump,
+        const existingSql = fs.readFileSync(AUTO_BACKUP_PATH, 'utf8');
+        if (inspectSqlDumpStats(existingSql).hasRealData) {
+          console.warn("[Persistence] Refusing to overwrite real local checkpoint with seed-only DB.");
+          return false;
+        }
+      } catch {}
+    }
+    const sqlDump = generateFullSqlDump();
+    const tmpPath = `${AUTO_BACKUP_PATH}.tmp`;
+    fs.writeFileSync(tmpPath, sqlDump, 'utf8');
+    fs.renameSync(tmpPath, AUTO_BACKUP_PATH);
+    return true;
+  } catch (err: any) {
+    console.warn("[Persistence] Local checkpoint save notice:", err?.message || err);
+    return false;
+  }
+}
+
+async function saveCheckpoint(reason = 'manual') {
+  if (isSavingCheckpoint) {
+    pendingCheckpointAfterCurrent = true;
+    return;
+  }
+  isSavingCheckpoint = true;
+  try {
+    if (!db || !db.open || !tableExists('school_info')) return;
+    const stats = getDatabaseStats();
+
+    // Prevent overwriting an existing real local checkpoint with an empty/seed-only DB
+    if (!stats.hasRealData && fs.existsSync(AUTO_BACKUP_PATH)) {
+      try {
+        const existingLocalSql = fs.readFileSync(AUTO_BACKUP_PATH, 'utf8');
+        if (inspectSqlDumpStats(existingLocalSql).hasRealData) {
+          console.warn(`[Persistence] (${reason}) Skipped checkpoint overwrite: local backup holds real data while current DB is seed-only.`);
+          return;
+        }
+      } catch {}
+    }
+
+    const sqlDump = generateFullSqlDump();
+    const checksum = crypto.createHash('sha256').update(sqlDump, 'utf8').digest('hex');
+
+    // 1. Atomic local checkpoint write
+    const tmpPath = `${AUTO_BACKUP_PATH}.tmp`;
+    fs.writeFileSync(tmpPath, sqlDump, 'utf8');
+    fs.renameSync(tmpPath, AUTO_BACKUP_PATH);
+
+    // 2. Cloud Persistence (Firestore) with gzip+chunking & empty-seed overwrite guard
+    if (!OFFLINE_MODE) {
+      try {
+        if (!stats.hasRealData) {
+          const existingCloud = await adminDb.collection('backups').doc('global_checkpoint').get().catch(() => null);
+          if (existingCloud?.exists) {
+            const cData = existingCloud.data();
+            const cloudHasReal = Boolean(cData?.has_real_data) ||
+              Number(cData?.school_count || 0) > 1 ||
+              Number(cData?.student_count || 0) > 0 ||
+              Number(cData?.request_count || 0) > 0 ||
+              (typeof cData?.sql_dump === 'string' && inspectSqlDumpStats(cData.sql_dump).hasRealData);
+            if (cloudHasReal) {
+              console.warn(`[Persistence] (${reason}) Protected Cloud checkpoint: Firestore holds real data while current DB is seed-only.`);
+              return;
+            }
+          }
+        }
+
+        const byteLen = Buffer.byteLength(sqlDump, 'utf8');
+        const commonMeta = {
           last_updated: new Date().toISOString(),
-          version: 1
-        });
-        console.log("[Persistence] Cloud checkpoint saved to Firestore.");
+          version: 2,
+          has_real_data: stats.hasRealData,
+          school_count: stats.schoolCount,
+          user_count: stats.userCount,
+          student_count: stats.studentCount,
+          request_count: stats.requestCount,
+          checksum
+        };
+
+        if (byteLen <= FIRESTORE_PLAIN_LIMIT) {
+          await adminDb.collection('backups').doc('global_checkpoint').set({
+            ...commonMeta,
+            encoding: 'plain',
+            chunk_count: 0,
+            sql_dump: sqlDump
+          });
+        } else {
+          const compressedB64 = zlib.gzipSync(Buffer.from(sqlDump, 'utf8')).toString('base64');
+          const chunks: string[] = [];
+          for (let offset = 0; offset < compressedB64.length; offset += FIRESTORE_CHUNK_SIZE) {
+            chunks.push(compressedB64.slice(offset, offset + FIRESTORE_CHUNK_SIZE));
+          }
+          for (let i = 0; i < chunks.length; i++) {
+            await adminDb.collection('backups').doc(`global_checkpoint_chunk_${i}`).set({
+              index: i,
+              total: chunks.length,
+              checksum,
+              data: chunks[i],
+              last_updated: commonMeta.last_updated
+            });
+          }
+          await adminDb.collection('backups').doc('global_checkpoint').set({
+            ...commonMeta,
+            encoding: 'gzip-base64-chunked',
+            chunk_count: chunks.length,
+            sql_dump: ''
+          });
+        }
+        console.log(`[Persistence] Cloud checkpoint saved (${reason}, schools=${stats.schoolCount}, users=${stats.userCount}, students=${stats.studentCount}).`);
       } catch (error: any) {
         console.warn("[Persistence] Cloud checkpoint notice (local persistence is active):", error?.message || error);
       }
     }
   } catch (err: any) {
     console.warn("[Persistence] Notice saving checkpoint:", err?.message || err);
+  } finally {
+    isSavingCheckpoint = false;
+    if (pendingCheckpointAfterCurrent) {
+      pendingCheckpointAfterCurrent = false;
+      setTimeout(() => { saveCheckpoint('coalesced').catch(() => {}); }, 500);
+    }
   }
 }
 
-// Initial restore check
-restoreFromCheckpoint().catch((err) => {
-  console.warn("[Persistence] Startup restore check notice:", err);
-});
-
-// Run an initial checkpoint shortly after startup to ensure cloud persistence is initialized
-setTimeout(saveCheckpoint, 3000);
+function scheduleCheckpoint(reason = 'mutation', delayMs = 2000) {
+  if (checkpointTimer) clearTimeout(checkpointTimer);
+  checkpointTimer = setTimeout(() => {
+    checkpointTimer = null;
+    saveCheckpoint(reason).catch(() => {});
+  }, delayMs);
+}
 
 // Auto-reject school requests older than 24h with no action
 async function processAutoRejection() {
@@ -2305,44 +2854,60 @@ try { db.prepare("UPDATE epreuves SET created_at = date_soumission WHERE created
 try {
   const ensTable = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='enseignants'").get() as any;
   if (ensTable?.sql && (ensTable.sql.includes("UNIQUE(email") || ensTable.sql.includes("UNIQUE (email"))) {
+    createSafetyBackup('pre_migration_enseignants');
+    const oldCols = (db.prepare("PRAGMA table_info(enseignants)").all() as any[]).map(c => c.name);
+    const oldCount = (db.prepare("SELECT COUNT(*) as count FROM enseignants").get() as any)?.count || 0;
     db.pragma("foreign_keys = OFF");
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS enseignants_migrated (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        nom TEXT NOT NULL,
-        prenom TEXT NOT NULL,
-        telephone TEXT,
-        email TEXT,
-        adresse TEXT,
-        school_id INTEGER,
-        cycle TEXT DEFAULT 'secondaire',
-        salaire_fixe REAL DEFAULT 0,
-        taux_horaire REAL DEFAULT 0,
-        statut TEXT DEFAULT 'Permanent',
-        sexe TEXT,
-        date_naissance TEXT,
-        niveau_etudes TEXT,
-        diplome_pro TEXT,
-        autorisation_enseigner TEXT,
-        annees_experience INTEGER DEFAULT 0,
-        statut_dossier TEXT DEFAULT 'non_soumis',
-        remarque_dossier TEXT,
-        identifiant_compte TEXT,
-        mot_de_passe_initial TEXT,
-        user_id INTEGER,
-        matiere_principale_id INTEGER,
-        photo TEXT,
-        matricule TEXT,
-        lieu_naissance TEXT,
-        FOREIGN KEY(school_id) REFERENCES school_info(id)
-      );
-      INSERT INTO enseignants_migrated SELECT * FROM enseignants;
-      DROP TABLE enseignants;
-      ALTER TABLE enseignants_migrated RENAME TO enseignants;
-    `);
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS enseignants_migrated (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          nom TEXT NOT NULL,
+          prenom TEXT NOT NULL,
+          telephone TEXT,
+          email TEXT,
+          adresse TEXT,
+          school_id INTEGER,
+          cycle TEXT DEFAULT 'secondaire',
+          salaire_fixe REAL DEFAULT 0,
+          taux_horaire REAL DEFAULT 0,
+          statut TEXT DEFAULT 'Permanent',
+          sexe TEXT,
+          date_naissance TEXT,
+          niveau_etudes TEXT,
+          diplome_pro TEXT,
+          autorisation_enseigner TEXT,
+          annees_experience INTEGER DEFAULT 0,
+          statut_dossier TEXT DEFAULT 'non_soumis',
+          remarque_dossier TEXT,
+          identifiant_compte TEXT,
+          mot_de_passe_initial TEXT,
+          user_id INTEGER,
+          matiere_principale_id INTEGER,
+          photo TEXT,
+          matricule TEXT,
+          lieu_naissance TEXT,
+          date_embauche TEXT,
+          FOREIGN KEY(school_id) REFERENCES school_info(id)
+        );
+      `);
+      const targetCols = (db.prepare("PRAGMA table_info(enseignants_migrated)").all() as any[]).map(c => c.name);
+      const commonCols = oldCols.filter(c => targetCols.includes(c));
+      if (commonCols.length > 0) {
+        const colsStr = commonCols.map(c => `"${c}"`).join(', ');
+        db.exec(`INSERT INTO enseignants_migrated (${colsStr}) SELECT ${colsStr} FROM enseignants;`);
+      }
+      const newCount = (db.prepare("SELECT COUNT(*) as count FROM enseignants_migrated").get() as any)?.count || 0;
+      if (newCount === oldCount) {
+        db.exec(`DROP TABLE enseignants; ALTER TABLE enseignants_migrated RENAME TO enseignants;`);
+      } else {
+        throw new Error(`Row count mismatch during enseignants migration (${newCount} != ${oldCount})`);
+      }
+    })();
     db.pragma("foreign_keys = ON");
   }
 } catch(e) {
+  try { db.pragma("foreign_keys = ON"); } catch {}
   console.warn("Migration enseignants remove UNIQUE(email) error:", e);
 }
 
@@ -2940,7 +3505,27 @@ if (RESET_DB) {
   `);
 }
 
-// Ensure database integrity by clearing orphan foreign keys
+// Ensure newer schema extensions also exist on fresh databases before checkpoint restore
+try { db.prepare("ALTER TABLE sms_configs ADD COLUMN custom_sms_enabled INTEGER DEFAULT 0").run(); } catch(e){}
+try { db.prepare("ALTER TABLE school_smtp_configs ADD COLUMN email_provider TEXT DEFAULT 'smtp'").run(); } catch(e){}
+try { db.prepare("ALTER TABLE school_smtp_configs ADD COLUMN brevo_api_key TEXT DEFAULT ''").run(); } catch(e){}
+try { db.prepare("ALTER TABLE school_info ADD COLUMN features_locked INTEGER DEFAULT 0").run(); } catch(e){}
+try { db.prepare("ALTER TABLE school_info ADD COLUMN features_locked_motif TEXT").run(); } catch(e){}
+try { db.prepare("ALTER TABLE utilisateurs ADD COLUMN must_change_password INTEGER DEFAULT 0").run(); } catch(e){}
+try { db.prepare("ALTER TABLE paiements ADD COLUMN tranche_numero INTEGER").run(); } catch(e){}
+try { db.exec("ALTER TABLE messages_internes ADD COLUMN audio_url TEXT"); } catch(e){}
+try { db.prepare("ALTER TABLE school_info ADD COLUMN ai_provider TEXT DEFAULT 'gemini'").run(); } catch(e){}
+try { db.prepare("ALTER TABLE school_info ADD COLUMN ai_email TEXT").run(); } catch(e){}
+try { db.prepare("ALTER TABLE school_info ADD COLUMN frais_adhesion_bibliotheque REAL DEFAULT 1000").run(); } catch(e){}
+
+// Attempt restoring from checkpoint BEFORE orphan cleanup or default seeding
+try {
+  await restoreFromCheckpoint();
+} catch (e) {
+  console.warn("[Persistence] Checkpoint restore notice:", e);
+}
+
+// Ensure database integrity by clearing orphan foreign key references (never deletes valid records)
 try {
   db.prepare("UPDATE utilisateurs SET eleve_id = NULL WHERE eleve_id IS NOT NULL AND eleve_id NOT IN (SELECT id FROM eleves)").run();
   db.prepare("UPDATE utilisateurs SET enseignant_id = NULL WHERE enseignant_id IS NOT NULL AND enseignant_id NOT IN (SELECT id FROM enseignants)").run();
@@ -2964,22 +3549,16 @@ try {
   console.error("Backfill history error:", e);
 }
 
-// Ensure existing admins are approved and have all permissions
+// Ensure existing admins are approved and only backfill permissions if missing (never overwrite custom permissions)
 try {
   const allPermissions = JSON.stringify([
     '/', '/classes', '/eleves', '/promotions', '/enseignants', 
     '/matieres', '/notes', '/paiements', '/emploi-du-temps', 
     '/ecole', '/parametres'
   ]);
-  db.prepare("UPDATE utilisateurs SET approuve = 1, is_first_login = 0, permissions = ? WHERE role = 'admin'").run(allPermissions);
+  db.prepare("UPDATE utilisateurs SET approuve = 1 WHERE role = 'admin' AND COALESCE(approuve, 0) = 0").run();
+  db.prepare("UPDATE utilisateurs SET permissions = ? WHERE role = 'admin' AND (permissions IS NULL OR TRIM(permissions) = '')").run(allPermissions);
 } catch (e) {}
-
-// Attempt restoring from checkpoint if database is empty
-try {
-  await restoreFromCheckpoint();
-} catch (e) {
-  console.warn("[Persistence] Checkpoint restore notice:", e);
-}
 
 // Seed default school if none exists
 const schoolExists = db.prepare("SELECT * FROM school_info").get();
@@ -3025,7 +3604,7 @@ try {
   const firstTeacher = db.prepare("SELECT id FROM enseignants ORDER BY id ASC LIMIT 1").get() as any;
 
   for (const u of demoUsers) {
-    const existing = db.prepare("SELECT id, role FROM utilisateurs WHERE LOWER(TRIM(email)) = ?").get(u.email) as any;
+    const existing = db.prepare("SELECT id, role, identifiant, approuve, enseignant_id, eleve_id FROM utilisateurs WHERE LOWER(TRIM(email)) = ?").get(u.email) as any;
     const ensId = u.role === 'enseignant' ? (firstTeacher?.id || null) : null;
     const elId = (u.role === 'parent' || u.role === 'eleve') ? (firstStudent?.id || null) : null;
 
@@ -3033,9 +3612,16 @@ try {
       db.prepare("INSERT INTO utilisateurs (nom, email, identifiant, mot_de_passe, mot_de_passe_initial, role, approuve, is_first_login, permissions, can_write, school_id, is_test_account, enseignant_id, eleve_id) VALUES (?, ?, ?, ?, ?, ?, 1, 0, ?, 1, ?, 1, ?, ?)")
         .run(u.nom, u.email, (u as any).identifiant || null, u.pass, (u as any).initialPass || null, u.role, u.perms, u.role === 'super_admin' ? null : schoolId, ensId, elId);
     } else {
-      // Force update role, password and links for demo accounts
-      db.prepare("UPDATE utilisateurs SET nom = ?, identifiant = COALESCE(?, identifiant), role = ?, mot_de_passe = ?, mot_de_passe_initial = COALESCE(?, mot_de_passe_initial), approuve = 1, is_first_login = 0, school_id = ?, is_test_account = 1, enseignant_id = COALESCE(enseignant_id, ?), eleve_id = COALESCE(eleve_id, ?) WHERE id = ?")
-        .run(u.nom, (u as any).identifiant || null, u.role, u.pass, (u as any).initialPass || null, u.role === 'super_admin' ? null : (existing.school_id || schoolId), ensId, elId, existing.id);
+      // Preserve existing user password, name, role, school_id, and permissions across app updates;
+      // only backfill missing identifiant or link if null, and keep super_admin approved.
+      db.prepare(`
+        UPDATE utilisateurs SET
+          identifiant = COALESCE(identifiant, ?),
+          approuve = CASE WHEN role = 'super_admin' THEN 1 ELSE approuve END,
+          enseignant_id = COALESCE(enseignant_id, ?),
+          eleve_id = COALESCE(eleve_id, ?)
+        WHERE id = ?
+      `).run((u as any).identifiant || null, ensId, elId, existing.id);
     }
   }
 } catch (e) {
@@ -3196,7 +3782,7 @@ if (!devoirExists) {
   });
 }
 
-// Migration for utilisateurs roles constraint, personnel_id and eleve_id column
+// Migration for utilisateurs roles constraint, personnel_id and eleve_id column (lossless: preserves all columns & verifies row count)
 try {
   const tableSql = (db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='utilisateurs'").get() as any)?.sql || "";
   const tableInfo = db.prepare("PRAGMA table_info(utilisateurs)").all();
@@ -3206,11 +3792,14 @@ try {
 
   if (!hasDirectionRole || !hasEleveId || !hasPersonnelId) {
     console.log("Updating utilisateurs table schema for staff roles, personnel_id and eleve_id...");
+    createSafetyBackup('pre_migration_utilisateurs');
+    const oldCount = (db.prepare("SELECT COUNT(*) as count FROM utilisateurs").get() as any)?.count || 0;
     
     db.exec("PRAGMA foreign_keys = OFF;");
     
     db.transaction(() => {
-      // 1. Create a new table with the correct schema
+      db.prepare("DROP TABLE IF EXISTS utilisateurs_new").run();
+      // 1. Create a new table preserving ALL columns
       db.prepare(`
         CREATE TABLE utilisateurs_new (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3223,6 +3812,11 @@ try {
           otp_code TEXT,
           otp_expiry TEXT,
           is_first_login INTEGER DEFAULT 1,
+          identifiant TEXT,
+          mot_de_passe_initial TEXT,
+          telephone TEXT,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          is_test_account INTEGER DEFAULT 0,
           enseignant_id INTEGER,
           personnel_id INTEGER,
           eleve_id INTEGER,
@@ -3230,7 +3824,10 @@ try {
           parent_admin_id INTEGER,
           can_write INTEGER DEFAULT 1,
           last_seen TEXT,
+          question_secrete TEXT,
+          reponse_secrete TEXT,
           school_id INTEGER,
+          must_change_password INTEGER DEFAULT 0,
           FOREIGN KEY(parent_admin_id) REFERENCES utilisateurs(id),
           FOREIGN KEY(school_id) REFERENCES school_info(id),
           FOREIGN KEY(enseignant_id) REFERENCES enseignants(id),
@@ -3239,13 +3836,18 @@ try {
         )
       `).run();
 
-      // 2. Copy data from the old table
+      // 2. Copy data from the old table dynamically intersecting all existing columns
       const columns = db.prepare("PRAGMA table_info(utilisateurs)").all().map((c: any) => c.name);
-      const newTableColumns = ["id", "nom", "email", "mot_de_passe", "role", "approuve", "permissions", "otp_code", "otp_expiry", "is_first_login", "enseignant_id", "personnel_id", "eleve_id", "google_id", "parent_admin_id", "can_write", "last_seen", "school_id"];
+      const newTableColumns = db.prepare("PRAGMA table_info(utilisateurs_new)").all().map((c: any) => c.name);
       const commonColumns = columns.filter((col: any) => newTableColumns.includes(col));
       
-      const colsStr = commonColumns.join(', ');
+      const colsStr = commonColumns.map((c: string) => `"${c}"`).join(', ');
       db.prepare(`INSERT INTO utilisateurs_new (${colsStr}) SELECT ${colsStr} FROM utilisateurs`).run();
+
+      const newCount = (db.prepare("SELECT COUNT(*) as count FROM utilisateurs_new").get() as any)?.count || 0;
+      if (newCount !== oldCount) {
+        throw new Error(`Utilisateurs migration row count mismatch (${newCount} != ${oldCount})`);
+      }
 
       // 3. Swap tables
       db.prepare("DROP TABLE utilisateurs").run();
@@ -3257,7 +3859,7 @@ try {
   }
 } catch (e) { 
   console.error("Migration for staff roles and personnel_id failed:", e);
-  db.exec("PRAGMA foreign_keys = ON;");
+  try { db.exec("PRAGMA foreign_keys = ON;"); } catch {}
 }
 
 // Handle table upgrades
@@ -3477,6 +4079,7 @@ try {
 }
 
   console.log("Database initialization completed.");
+  scheduleCheckpoint('startup', 3000);
 }
 
 // SMTP Transporter Helper
@@ -4305,6 +4908,28 @@ async function startServer() {
   
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ limit: '50mb', extended: true }));
+
+  // Auto-persist mutations (school creation, users, students, grades, payments, settings)
+  app.use('/api', (req: any, res: any, next: any) => {
+    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
+      const url = req.originalUrl || '';
+      const skipPaths = ['/api/auth/login', '/api/auth/verify', '/api/auth/google', '/api/backups/cloud-sync-test'];
+      if (!skipPaths.some(p => url.startsWith(p))) {
+        res.on('finish', () => {
+          if (res.statusCode >= 200 && res.statusCode < 400) {
+            const isCritical =
+              url.includes('/schools') ||
+              url.includes('/school-requests') ||
+              url.includes('/super-admin/') ||
+              url.includes('/utilisateurs') ||
+              url.includes('/backups/restore');
+            scheduleCheckpoint(`api:${req.method}:${url.split('?')[0]}`, isCritical ? 400 : 2500);
+          }
+        });
+      }
+    }
+    next();
+  });
 
   // Static uploads directory (for voice messages and documents)
   const uploadsStaticDir = path.join(process.cwd(), 'public', 'uploads');
