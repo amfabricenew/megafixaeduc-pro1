@@ -234,10 +234,14 @@ export default function App() {
                   <Route path="/public/inscription/:token" element={<PublicEnrollment />} />
                   <Route path="/public/suivi-candidature" element={<PublicTracking />} />
                   <Route path="/public/suivi-inscription" element={<PublicTracking />} />
+                  <Route path="/formulaire-enseignant" element={<PublicTeacherForm />} />
                   <Route path="/formulaire-enseignant/:token" element={<PublicTeacherForm />} />
+                  <Route path="/public/formulaire-enseignant" element={<PublicTeacherForm />} />
                   <Route path="/public/formulaire-enseignant/:token" element={<PublicTeacherForm />} />
+                  <Route path="/public/collecte-enseignant" element={<PublicTeacherForm />} />
                   <Route path="/public/collecte-enseignant/:token" element={<PublicTeacherForm />} />
                   <Route path="/public/collecte-enseignants/:token" element={<PublicTeacherForm />} />
+                  <Route path="/collecte-enseignant" element={<PublicTeacherForm />} />
                   <Route path="/collecte-enseignant/:token" element={<PublicTeacherForm />} />
                   <Route path="/f/:token" element={<PublicTeacherForm />} />
 

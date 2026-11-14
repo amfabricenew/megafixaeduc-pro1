@@ -7,6 +7,7 @@ import {
   Search, X, CheckSquare, Square
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
+import { apiFetch } from '../utils/api';
 import { jsPDF } from '../utils/compressedPdf';
 import autoTable from 'jspdf-autotable';
 
@@ -162,33 +163,53 @@ export default function PublicTeacherForm() {
 
   // Fetch form data & verify blocking status
   useEffect(() => {
-    if (!token) return;
-
-    // Check if this respondent device was flagged as blocked
-    const isTokenBlocked = localStorage.getItem(`blocked_collecte_${token}`);
-    const isUserBlocked = localStorage.getItem('megafixa_blocked_respondent');
-    if (isTokenBlocked || isUserBlocked) {
-      setIsBlocked(true);
+    const cleanToken = decodeURIComponent(String(token || '')).trim();
+    if (!cleanToken) {
+      setLoadError("Le lien du formulaire est incomplet ou invalide (jeton manquant).");
       setLoading(false);
       return;
     }
 
+    // Check if this respondent device was flagged as blocked
+    try {
+      const isTokenBlocked = localStorage.getItem(`blocked_collecte_${cleanToken}`);
+      const isUserBlocked = localStorage.getItem('megafixa_blocked_respondent');
+      if (isTokenBlocked || isUserBlocked) {
+        setIsBlocked(true);
+        setLoading(false);
+        return;
+      }
+    } catch {
+      // ignore restricted storage
+    }
+
     setLoading(true);
-    fetch(`/api/public/collecte-enseignant/${token}`)
+    setLoadError(null);
+    apiFetch(`/api/public/collecte-enseignant/${encodeURIComponent(cleanToken)}`)
       .then(async (res) => {
-        const data = await res.json();
+        const rawText = await res.text();
+        let data: any = {};
+        try {
+          data = rawText ? JSON.parse(rawText) : {};
+        } catch {
+          throw new Error("Impossible de lire la réponse du serveur pour ce formulaire.");
+        }
         if (!res.ok) {
           if (data.isBlocked) {
-            localStorage.setItem(`blocked_collecte_${token}`, 'true');
-            localStorage.setItem('megafixa_blocked_respondent', 'true');
+            try {
+              localStorage.setItem(`blocked_collecte_${cleanToken}`, 'true');
+              localStorage.setItem('megafixa_blocked_respondent', 'true');
+            } catch {}
             setIsBlocked(true);
             return;
           }
           throw new Error(data.error || "Impossible de charger le formulaire");
         }
         if (data.isBlocked) {
-          localStorage.setItem(`blocked_collecte_${token}`, 'true');
-          localStorage.setItem('megafixa_blocked_respondent', 'true');
+          try {
+            localStorage.setItem(`blocked_collecte_${cleanToken}`, 'true');
+            localStorage.setItem('megafixa_blocked_respondent', 'true');
+          } catch {}
           setIsBlocked(true);
           return;
         }
@@ -196,7 +217,7 @@ export default function PublicTeacherForm() {
       })
       .catch((err) => {
         console.error(err);
-        setLoadError(err.message);
+        setLoadError(err?.message || "Ce formulaire est introuvable ou temporairement indisponible.");
       })
       .finally(() => setLoading(false));
   }, [token]);
@@ -327,7 +348,8 @@ export default function PublicTeacherForm() {
 
     setIsSubmitting(true);
     try {
-      const res = await fetch(`/api/public/collecte-enseignant/${token}/soumettre`, {
+      const cleanToken = decodeURIComponent(String(token || '')).trim();
+      const res = await apiFetch(`/api/public/collecte-enseignant/${encodeURIComponent(cleanToken)}/soumettre`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -345,8 +367,10 @@ export default function PublicTeacherForm() {
       const data = await res.json();
       if (!res.ok) {
         if (data.isBlocked) {
-          localStorage.setItem(`blocked_collecte_${token}`, 'true');
-          localStorage.setItem('megafixa_blocked_respondent', 'true');
+          try {
+            localStorage.setItem(`blocked_collecte_${cleanToken}`, 'true');
+            localStorage.setItem('megafixa_blocked_respondent', 'true');
+          } catch {}
           setIsBlocked(true);
           return;
         }

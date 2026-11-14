@@ -6478,13 +6478,13 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
   // Public: Get Form info by public token
   app.get("/api/public/collecte-enseignant/:token", (req, res) => {
     try {
-      const { token } = req.params;
+      const token = decodeURIComponent(String(req.params.token || '')).trim();
       const form = db.prepare(`
-        SELECT f.*, si.nom as school_nom, si.logo as school_logo, si.adresse as school_adresse, 
-               si.telephone as school_telephone, si.devise as school_devise
+        SELECT f.*, COALESCE(si.nom, 'Établissement Scolaire') as school_nom, si.logo as school_logo, si.adresse as school_adresse, 
+               si.telephone as school_telephone, COALESCE(si.devise, 'FCFA') as school_devise
         FROM collecte_enseignants_formulaires f
-        JOIN school_info si ON f.school_id = si.id
-        WHERE f.token = ?
+        LEFT JOIN school_info si ON f.school_id = si.id
+        WHERE TRIM(f.token) = ?
       `).get(token) as any;
 
       if (!form) {
@@ -6527,7 +6527,7 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
         classesList = db.prepare(`
           SELECT id, nom, niveau, cycle 
           FROM classes 
-          WHERE id IN (${placeholders}) AND school_id = ?
+          WHERE id IN (${placeholders}) AND (school_id = ? OR school_id IS NULL)
           ORDER BY nom ASC
         `).all(...classIds, form.school_id);
       } else {
@@ -6535,8 +6535,8 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
         classesList = db.prepare(`
           SELECT id, nom, niveau, cycle 
           FROM classes 
-          WHERE school_id = ? 
-            AND (LOWER(cycle) = 'secondaire' OR LOWER(niveau) NOT LIKE '%maternelle%' AND LOWER(niveau) NOT LIKE '%primaire%')
+          WHERE (school_id = ? OR school_id IS NULL)
+            AND (LOWER(cycle) = 'secondaire' OR (LOWER(niveau) NOT LIKE '%maternelle%' AND LOWER(niveau) NOT LIKE '%primaire%'))
           ORDER BY nom ASC
         `).all(form.school_id);
       }
@@ -31813,6 +31813,9 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       app.get("*", (req, res) => {
         if (req.path.startsWith('/api/')) {
           return res.status(404).json({ error: 'Route API introuvable' });
+        }
+        if (req.path.includes('/assets/') || /\.(js|mjs|css|map|png|jpg|jpeg|svg|ico|woff|woff2|webmanifest)$/i.test(req.path)) {
+          return res.status(404).send('Ressource introuvable');
         }
         const indexPath = path.join(distPath, "index.html");
         res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
