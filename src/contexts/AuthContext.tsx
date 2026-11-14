@@ -174,36 +174,43 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
   }, []);
 
-  // Polling for updates and listening for permission sync events
+  // Polling for updates and listening for permission & cross-level sync events
+  const lastSyncRef = React.useRef<number>(0);
+
   useEffect(() => {
     if (!user) return;
+
+    const handlePermissionSync = () => {
+      const now = Date.now();
+      if (now - lastSyncRef.current < 2500) return;
+      lastSyncRef.current = now;
+      refreshUser();
+      refreshPlan();
+      fetchYears();
+    };
 
     const interval = setInterval(() => {
       refreshUser();
       refreshPlan();
       fetchYears();
-    }, 60000); // 60 seconds interval to reduce server load and browser re-renders
-
-    const handlePermissionSync = () => {
-      refreshUser();
-      refreshPlan();
-      fetchYears();
-    };
+    }, 30000);
 
     const handleStorage = (e: StorageEvent) => {
-      if (e.key === 'school_permissions_version' || e.key === 'user') {
-        refreshUser();
+      if (e.key === 'school_permissions_version' || e.key === 'user' || e.key === 'megafixa_last_update') {
+        handlePermissionSync();
       }
     };
 
     window.addEventListener('focus', handlePermissionSync);
     window.addEventListener('school_permissions_updated', handlePermissionSync);
+    window.addEventListener('app:data-updated', handlePermissionSync);
     window.addEventListener('storage', handleStorage);
 
     return () => {
       clearInterval(interval);
       window.removeEventListener('focus', handlePermissionSync);
       window.removeEventListener('school_permissions_updated', handlePermissionSync);
+      window.removeEventListener('app:data-updated', handlePermissionSync);
       window.removeEventListener('storage', handleStorage);
     };
   }, [user]);

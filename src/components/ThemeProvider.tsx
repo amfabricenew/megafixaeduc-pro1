@@ -31,14 +31,19 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
   };
 
-  const fetchTheme = () => {
+  const lastThemeFetchRef = React.useRef<number>(0);
+
+  const fetchTheme = (force = false) => {
+    const now = Date.now();
+    if (!force && now - lastThemeFetchRef.current < 3000) return;
+    lastThemeFetchRef.current = now;
     const token = localStorage.getItem('token');
     apiFetch('/api/school-info', {
       headers: token ? { 'Authorization': `Bearer ${token}` } : {}
     })
       .then(res => res.json())
       .then(data => {
-        if (data) {
+        if (data && !data.error) {
           setSchoolInfo(data);
           updateTheme(data);
         }
@@ -47,14 +52,19 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   };
 
   React.useEffect(() => {
-    fetchTheme();
+    fetchTheme(true);
 
-    const handleThemeChange = () => {
-      fetchTheme();
-    };
+    const handleThemeChange = () => fetchTheme(true);
+    const handleSync = () => fetchTheme(false);
 
     window.addEventListener('schoolInfoChanged', handleThemeChange);
-    return () => window.removeEventListener('schoolInfoChanged', handleThemeChange);
+    window.addEventListener('app:data-updated', handleSync);
+    window.addEventListener('focus', handleSync);
+    return () => {
+      window.removeEventListener('schoolInfoChanged', handleThemeChange);
+      window.removeEventListener('app:data-updated', handleSync);
+      window.removeEventListener('focus', handleSync);
+    };
   }, []);
 
   return <>{children}</>;

@@ -86,28 +86,55 @@ export default function Layout() {
   const [isSidebarOpen, setIsSidebarOpen] = React.useState(false);
   const activeYear = years.find((y: any) => y.id === selectedYearId) || years.find((y: any) => y.est_active === 1) || years[0];
   const [schoolInfo, setSchoolInfo] = React.useState<any>(null);
-  const [localUser, setLocalUser] = React.useState<any>(null);
+  const [fallbackLocalUser, setFallbackLocalUser] = React.useState<any>(() => {
+    try {
+      const savedUser = localStorage.getItem('user');
+      return savedUser ? JSON.parse(savedUser) : null;
+    } catch {
+      return null;
+    }
+  });
+  const localUser = user || fallbackLocalUser;
 
   const location = useLocation();
   const navigate = useNavigate();
 
-  const fetchSchoolInfo = React.useCallback(() => {
+  const lastSchoolFetchRef = React.useRef<number>(0);
+  const fetchSchoolInfo = React.useCallback((force = false) => {
+    const now = Date.now();
+    if (!force && now - lastSchoolFetchRef.current < 2500) return;
+    lastSchoolFetchRef.current = now;
     apiFetch('/api/school-info')
       .then(res => res.json())
-      .then(data => setSchoolInfo(data));
+      .then(data => setSchoolInfo(data))
+      .catch(() => {});
   }, []);
 
   React.useEffect(() => {
-    const savedUser = localStorage.getItem('user');
-    if (savedUser) {
-      setLocalUser(JSON.parse(savedUser));
+    if (user) {
+      setFallbackLocalUser(user);
+    } else {
+      try {
+        const savedUser = localStorage.getItem('user');
+        if (savedUser) setFallbackLocalUser(JSON.parse(savedUser));
+      } catch {}
     }
-    fetchSchoolInfo();
-    
-    // Listen for custom events
-    window.addEventListener('schoolInfoChanged', fetchSchoolInfo);
+  }, [user]);
+
+  React.useEffect(() => {
+    fetchSchoolInfo(true);
+    const handleSync = () => fetchSchoolInfo(false);
+    const handleForcedSync = () => fetchSchoolInfo(true);
+
+    window.addEventListener('schoolInfoChanged', handleForcedSync);
+    window.addEventListener('school_permissions_updated', handleSync);
+    window.addEventListener('app:data-updated', handleSync);
+    window.addEventListener('focus', handleSync);
     return () => {
-      window.removeEventListener('schoolInfoChanged', fetchSchoolInfo);
+      window.removeEventListener('schoolInfoChanged', handleForcedSync);
+      window.removeEventListener('school_permissions_updated', handleSync);
+      window.removeEventListener('app:data-updated', handleSync);
+      window.removeEventListener('focus', handleSync);
     };
   }, [fetchSchoolInfo]);
 

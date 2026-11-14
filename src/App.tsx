@@ -19,6 +19,7 @@ import FloatingNotificationOverlay from './components/FloatingNotificationOverla
 import AIAssistantWidget from './components/AIAssistantWidget';
 import Login from './pages/Login';
 import SuperAdminLayout from './components/super-admin/SuperAdminLayout';
+import { clearAppCachesAndUpdateSW } from './utils/appUpdater';
 
 // Component that renders system overlays ONLY on non-isolated pages
 function GlobalOverlays() {
@@ -43,7 +44,7 @@ function GlobalOverlays() {
   );
 }
 
-// Resilient lazy load helper with smooth retry
+// Resilient lazy load helper with smooth retry & stale-chunk auto-recovery
 const lazyWithRetry = <T extends React.ComponentType<any>>(
   componentImport: () => Promise<{ default: T }>
 ) =>
@@ -53,10 +54,30 @@ const lazyWithRetry = <T extends React.ComponentType<any>>(
     while (attempts < maxAttempts) {
       try {
         return await componentImport();
-      } catch (error) {
+      } catch (error: any) {
         attempts++;
         console.warn(`[MégafixaEduc] Chargement du module (tentative ${attempts}/${maxAttempts})...`, error);
         if (attempts >= maxAttempts) {
+          const msg = String(error?.message || error || '');
+          const isChunkError =
+            error?.name === 'ChunkLoadError' ||
+            msg.includes('Failed to fetch dynamically imported module') ||
+            msg.includes('Importing a module script failed') ||
+            msg.includes('error loading dynamically imported module');
+
+          if (isChunkError && typeof window !== 'undefined') {
+            try {
+              const lastReload = parseInt(sessionStorage.getItem('last_chunk_reload') || '0', 10);
+              if (Date.now() - lastReload > 20000) {
+                sessionStorage.setItem('last_chunk_reload', Date.now().toString());
+                await clearAppCachesAndUpdateSW();
+                window.location.reload();
+                return new Promise<{ default: T }>(() => {});
+              }
+            } catch {
+              // ignore storage error
+            }
+          }
           throw error;
         }
         await new Promise((resolve) => setTimeout(resolve, attempts * 500));

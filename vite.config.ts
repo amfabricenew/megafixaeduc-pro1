@@ -15,6 +15,11 @@ export default defineConfig(({mode}) => {
         registerType: 'autoUpdate',
         includeAssets: ['logo_megafixa.png', 'logo_pwa.svg'],
         workbox: {
+          skipWaiting: true,
+          clientsClaim: true,
+          cleanupOutdatedCaches: true,
+          navigateFallback: '/index.html',
+          navigateFallbackDenylist: [/^\/api\//, /^\/uploads\//],
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2,jpg}'],
           runtimeCaching: [
             {

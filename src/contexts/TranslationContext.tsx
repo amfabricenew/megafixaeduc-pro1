@@ -83,6 +83,8 @@ export const TranslationProvider: React.FC<{ children: React.ReactNode }> = ({ c
     } catch {}
   }, [language]);
 
+  const lastSyncedSchoolLangRef = React.useRef<string | null>(null);
+
   // Sync initial language from school info on mount
   useEffect(() => {
     const token = localStorage.getItem('token');
@@ -93,6 +95,7 @@ export const TranslationProvider: React.FC<{ children: React.ReactNode }> = ({ c
         .then(res => res.json())
         .then(data => {
           if (data && data.langue && (data.langue === 'en' || data.langue === 'fr')) {
+            lastSyncedSchoolLangRef.current = data.langue;
             const localLang = localStorage.getItem('app_language');
             if (!localLang) {
               setLanguageState(data.langue as Language);
@@ -113,9 +116,13 @@ export const TranslationProvider: React.FC<{ children: React.ReactNode }> = ({ c
           .then(res => res.json())
           .then(data => {
             if (data && data.langue && (data.langue === 'en' || data.langue === 'fr')) {
-              setLanguageState(data.langue as Language);
-              languageRef.current = data.langue as Language;
-              localStorage.setItem('app_language', data.langue);
+              const previousSchoolLang = lastSyncedSchoolLangRef.current;
+              lastSyncedSchoolLangRef.current = data.langue;
+              if (previousSchoolLang && data.langue !== previousSchoolLang) {
+                setLanguageState(data.langue as Language);
+                languageRef.current = data.langue as Language;
+                localStorage.setItem('app_language', data.langue);
+              }
             }
           })
           .catch(() => {});

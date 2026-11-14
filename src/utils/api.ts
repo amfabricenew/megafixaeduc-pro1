@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { handleStaticApiFallback } from './cloudFallback';
+import { observeServerHeaders } from './appUpdater';
 
 let appSyncChannel: BroadcastChannel | null = null;
 if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
@@ -106,6 +107,9 @@ export const apiFetch = async (input: RequestInfo | URL, init?: RequestInit, ret
       await new Promise(resolve => setTimeout(resolve, delay));
       return apiFetch(input, init, retryCount + 1);
     }
+
+    // Detect server deployment / global data version changes on every API response
+    observeServerHeaders(res.headers);
 
     if (res.status === 404) {
       const fallback = await handleStaticApiFallback(url, init);

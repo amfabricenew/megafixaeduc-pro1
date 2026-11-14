@@ -93,6 +93,56 @@ const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || (firebaseConfig as any)
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
 const APP_URL = process.env.APP_URL || 'http://localhost:3000';
 
+// Automatic build & data version tracking for cross-level auto-updates
+function computeAppBuildId(): string {
+  try {
+    const hash = crypto.createHash('sha256');
+    const gitSha =
+      process.env.RENDER_GIT_COMMIT ||
+      process.env.RAILWAY_GIT_COMMIT_SHA ||
+      process.env.VERCEL_GIT_COMMIT_SHA ||
+      process.env.GITHUB_SHA ||
+      process.env.SOURCE_VERSION ||
+      '';
+    if (gitSha) hash.update(`git:${gitSha}`);
+
+    if (process.env.NODE_ENV === 'production') {
+      const candidates = [
+        path.join(currentDirname, 'index.html'),
+        path.join(process.cwd(), 'dist', 'index.html'),
+        path.join(process.cwd(), 'build', 'index.html'),
+        path.join(currentDirname, 'dist', 'index.html'),
+        path.join(process.cwd(), 'dist', 'server.cjs'),
+        path.join(currentDirname, 'server.cjs'),
+      ];
+      let foundArtifact = false;
+      for (const filePath of candidates) {
+        if (fs.existsSync(filePath)) {
+          hash.update(fs.readFileSync(filePath));
+          foundArtifact = true;
+        }
+      }
+      if (!foundArtifact && !gitSha) {
+        hash.update(`boot:${Date.now()}`);
+      }
+    } else {
+      // Dev mode: unique build signature per server boot/restart so connected tabs auto-refresh
+      hash.update(`dev-boot:${Date.now()}`);
+    }
+
+    return hash.digest('hex').slice(0, 16);
+  } catch {
+    return `b${Date.now().toString(36)}`;
+  }
+}
+
+const APP_BUILD_ID = computeAppBuildId();
+let serverDataVersion = Date.now();
+function bumpServerDataVersion(): void {
+  const now = Date.now();
+  serverDataVersion = now > serverDataVersion ? now : serverDataVersion + 1;
+}
+
 let googleClient: OAuth2Client | null = null;
 if (GOOGLE_CLIENT_ID) {
   googleClient = new OAuth2Client(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET);
@@ -1843,6 +1893,11 @@ async function initializeDatabase() {
     salle_id INTEGER,
     cycle TEXT DEFAULT 'secondaire',
     school_id INTEGER,
+    plafond_conduite REAL DEFAULT 20,
+    plafond_conduite_t1 REAL DEFAULT 20,
+    plafond_conduite_t2 REAL DEFAULT 20,
+    plafond_conduite_t3 REAL DEFAULT 20,
+    frais_annexes REAL DEFAULT 0,
     FOREIGN KEY(annee_id) REFERENCES annees_scolaires(id),
     FOREIGN KEY(enseignant_id) REFERENCES enseignants(id),
     FOREIGN KEY(school_id) REFERENCES school_info(id)
@@ -3889,6 +3944,27 @@ try {
   if (!classCols.includes('professeur_principal_id')) {
     db.prepare("ALTER TABLE classes ADD COLUMN professeur_principal_id INTEGER REFERENCES enseignants(id)").run();
   }
+  if (!classCols.includes('salle_id')) {
+    db.prepare("ALTER TABLE classes ADD COLUMN salle_id INTEGER").run();
+  }
+  if (!classCols.includes('cycle')) {
+    db.prepare("ALTER TABLE classes ADD COLUMN cycle TEXT DEFAULT 'secondaire'").run();
+  }
+  if (!classCols.includes('plafond_conduite')) {
+    db.prepare("ALTER TABLE classes ADD COLUMN plafond_conduite REAL DEFAULT 20").run();
+  }
+  if (!classCols.includes('plafond_conduite_t1')) {
+    db.prepare("ALTER TABLE classes ADD COLUMN plafond_conduite_t1 REAL DEFAULT 20").run();
+  }
+  if (!classCols.includes('plafond_conduite_t2')) {
+    db.prepare("ALTER TABLE classes ADD COLUMN plafond_conduite_t2 REAL DEFAULT 20").run();
+  }
+  if (!classCols.includes('plafond_conduite_t3')) {
+    db.prepare("ALTER TABLE classes ADD COLUMN plafond_conduite_t3 REAL DEFAULT 20").run();
+  }
+  if (!classCols.includes('frais_annexes')) {
+    db.prepare("ALTER TABLE classes ADD COLUMN frais_annexes REAL DEFAULT 0").run();
+  }
 } catch (e) {
   console.error("Error migrating classes columns:", e);
 }
@@ -4903,20 +4979,27 @@ async function startServer() {
     contentSecurityPolicy: false, // Disabled to allow Vite HMR and dynamic scripts in development
     crossOriginEmbedderPolicy: false
   }));
-  app.use(cors());
+  app.use(cors({
+    exposedHeaders: ['X-App-Build-Version', 'X-App-Data-Version']
+  }));
   app.use(compression());
   
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-  // Auto-persist mutations (school creation, users, students, grades, payments, settings)
+  // Auto-persist mutations & propagate build/data version headers to all connected levels
   app.use('/api', (req: any, res: any, next: any) => {
+    res.setHeader('X-App-Build-Version', APP_BUILD_ID);
+    res.setHeader('X-App-Data-Version', String(serverDataVersion));
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+
     if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
       const url = req.originalUrl || '';
       const skipPaths = ['/api/auth/login', '/api/auth/verify', '/api/auth/google', '/api/backups/cloud-sync-test'];
       if (!skipPaths.some(p => url.startsWith(p))) {
         res.on('finish', () => {
           if (res.statusCode >= 200 && res.statusCode < 400) {
+            bumpServerDataVersion();
             const isCritical =
               url.includes('/schools') ||
               url.includes('/school-requests') ||
@@ -5145,8 +5228,26 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
     });
   });
 
+  app.get("/api/app-version", (req, res) => {
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
+    res.json({
+      buildId: APP_BUILD_ID,
+      dataVersion: String(serverDataVersion),
+      timestamp: new Date().toISOString()
+    });
+  });
+
   app.get("/api/health", (req, res) => {
-    res.json({ status: "ok", offline_strict: true, timestamp: new Date().toISOString() });
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.json({
+      status: "ok",
+      offline_strict: true,
+      buildId: APP_BUILD_ID,
+      dataVersion: String(serverDataVersion),
+      timestamp: new Date().toISOString()
+    });
   });
 
   // AI Providers and configuration (Moved here for better visibility and to fix 404)
@@ -7535,7 +7636,7 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
       if (!yearId) {
         return res.status(400).json({ error: "Aucune année scolaire active trouvée. Veuillez en créer une dans les paramètres." });
       }
-      const { nom, niveau, frais_scolarite, frais_inscription, plafond_conduite, plafond_conduite_t1, plafond_conduite_t2, plafond_conduite_t3, devise, tranche1_montant, tranche1_date_limite, tranche2_montant, tranche2_date_limite, tranche3_montant, tranche3_date_limite, enseignant_id, professeur_principal_id, salle_id, force } = req.body;
+      const { nom, niveau, frais_scolarite, frais_inscription, devise, tranche1_montant, tranche1_date_limite, tranche2_montant, tranche2_date_limite, tranche3_montant, tranche3_date_limite, enseignant_id, professeur_principal_id, salle_id, cycle, force } = req.body;
       const cleanNom = String(nom || '').trim();
       if (!cleanNom) {
         return res.status(400).json({ error: "Le nom de la classe est obligatoire." });
@@ -7562,30 +7663,31 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
         }
       }
 
-      const pBase = parseFloat(plafond_conduite) || 20;
-      const pT1 = parseFloat(plafond_conduite_t1) || pBase;
-      const pT2 = parseFloat(plafond_conduite_t2) || pBase;
-      const pT3 = parseFloat(plafond_conduite_t3) || pBase;
+      const isPrimaryOrMaternelle = ["Maternelle", "Maternelle I", "Maternelle II", "Primaire", "CI", "CP", "CE1", "CE2", "CM1", "CM2", "Petite Section", "Moyenne Section", "Grande Section"].some(
+        lvl => (niveau || '').toLowerCase().includes(lvl.toLowerCase()) || cleanNom.toLowerCase().includes(lvl.toLowerCase())
+      );
+      const computedCycle = cycle || (isPrimaryOrMaternelle ? 'primaire' : 'secondaire');
 
+      // Aucune insertion de plafond de conduite à la création des classes (géré uniquement au secondaire dans Notes & Bulletins)
       const result = db.prepare(`
         INSERT INTO classes (
-          nom, niveau, frais_scolarite, frais_inscription, plafond_conduite, plafond_conduite_t1, plafond_conduite_t2, plafond_conduite_t3, devise, annee_id,
-          tranche1_montant, tranche1_date_limite, tranche2_montant, tranche2_date_limite, tranche3_montant, tranche3_date_limite, enseignant_id, professeur_principal_id, salle_id, school_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          nom, niveau, frais_scolarite, frais_inscription, devise, annee_id,
+          tranche1_montant, tranche1_date_limite, tranche2_montant, tranche2_date_limite, tranche3_montant, tranche3_date_limite, enseignant_id, professeur_principal_id, salle_id, cycle, school_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
-        nom, niveau, frais_scolarite || 0, frais_inscription || 0, pBase, pT1, pT2, pT3, devise || 'FCFA', yearId,
+        cleanNom, niveau, frais_scolarite || 0, frais_inscription || 0, devise || 'FCFA', yearId,
         tranche1_montant || 0, tranche1_date_limite || null,
         tranche2_montant || 0, tranche2_date_limite || null,
         tranche3_montant || 0, tranche3_date_limite || null,
         teacherId,
         ppId,
         salleId,
+        computedCycle,
         req.schoolId
       );
       const classeId = result.lastInsertRowid;
 
       // Auto-assign default Primary subjects if it's a primary or maternelle class
-      const isPrimaryOrMaternelle = ["Maternelle", "Maternelle I", "Maternelle II", "Primaire", "CI", "CP", "CE1", "CE2", "CM1", "CM2"].some(lvl => (niveau || '').toLowerCase().includes(lvl.toLowerCase()));
       if (isPrimaryOrMaternelle) {
         const primaryMatieres = db.prepare("SELECT id, coefficient FROM matieres WHERE school_id = ? AND (categorie = 'Primaire & Maternelle' OR categorie = 'Primaire')").all(req.schoolId) as any[];
         if (primaryMatieres.length > 0) {
@@ -7596,7 +7698,7 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
         }
       }
 
-      logActivity(req.userId, 'CREATE', 'CLASSE', classeId as number, { nom, niveau, salle_id: salleId }, req.schoolId);
+      logActivity(req.userId, 'CREATE', 'CLASSE', classeId as number, { nom: cleanNom, niveau, salle_id: salleId }, req.schoolId);
       res.json({ id: classeId });
     } catch (error: any) {
       console.error("Error creating class:", error);
@@ -7628,14 +7730,13 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
         }
       }
 
-      const pBase = plafond_conduite !== undefined ? parseFloat(plafond_conduite) : existing.plafond_conduite;
-      const pT1 = plafond_conduite_t1 !== undefined ? parseFloat(plafond_conduite_t1) : existing.plafond_conduite_t1;
-      const pT2 = plafond_conduite_t2 !== undefined ? parseFloat(plafond_conduite_t2) : existing.plafond_conduite_t2;
-      const pT3 = plafond_conduite_t3 !== undefined ? parseFloat(plafond_conduite_t3) : existing.plafond_conduite_t3;
+      const isPrimaryOrMaternelle = ["Maternelle", "Maternelle I", "Maternelle II", "Primaire", "CI", "CP", "CE1", "CE2", "CM1", "CM2", "Petite Section", "Moyenne Section", "Grande Section"].some(
+        lvl => (finalNiveau || '').toLowerCase().includes(lvl.toLowerCase()) || (finalNom || '').toLowerCase().includes(lvl.toLowerCase())
+      );
 
       db.prepare(`
         UPDATE classes SET 
-          nom = ?, niveau = ?, frais_scolarite = ?, frais_inscription = ?, plafond_conduite = ?, plafond_conduite_t1 = ?, plafond_conduite_t2 = ?, plafond_conduite_t3 = ?, devise = ?,
+          nom = ?, niveau = ?, frais_scolarite = ?, frais_inscription = ?, devise = ?,
           tranche1_montant = ?, tranche1_date_limite = ?,
           tranche2_montant = ?, tranche2_date_limite = ?,
           tranche3_montant = ?, tranche3_date_limite = ?,
@@ -7647,7 +7748,6 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
         finalNom, finalNiveau, 
         frais_scolarite !== undefined ? (frais_scolarite || 0) : existing.frais_scolarite, 
         frais_inscription !== undefined ? (frais_inscription || 0) : existing.frais_inscription, 
-        pBase, pT1, pT2, pT3, 
         devise !== undefined ? (devise || 'FCFA') : existing.devise,
         tranche1_montant !== undefined ? (tranche1_montant || 0) : existing.tranche1_montant, 
         tranche1_date_limite !== undefined ? (tranche1_date_limite || null) : existing.tranche1_date_limite,
@@ -7661,6 +7761,42 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
         id,
         req.schoolId
       );
+
+      // Le plafond de conduite concerne uniquement le secondaire (modifié dans Notes & Bulletins)
+      if (!isPrimaryOrMaternelle && (
+        plafond_conduite !== undefined ||
+        plafond_conduite_t1 !== undefined ||
+        plafond_conduite_t2 !== undefined ||
+        plafond_conduite_t3 !== undefined
+      )) {
+        const classCols = (db.prepare("PRAGMA table_info(classes)").all() as { name: string }[]).map(c => c.name);
+        if (!classCols.includes('plafond_conduite')) {
+          try { db.prepare("ALTER TABLE classes ADD COLUMN plafond_conduite REAL DEFAULT 20").run(); } catch {}
+        }
+        if (!classCols.includes('plafond_conduite_t1')) {
+          try { db.prepare("ALTER TABLE classes ADD COLUMN plafond_conduite_t1 REAL DEFAULT 20").run(); } catch {}
+        }
+        if (!classCols.includes('plafond_conduite_t2')) {
+          try { db.prepare("ALTER TABLE classes ADD COLUMN plafond_conduite_t2 REAL DEFAULT 20").run(); } catch {}
+        }
+        if (!classCols.includes('plafond_conduite_t3')) {
+          try { db.prepare("ALTER TABLE classes ADD COLUMN plafond_conduite_t3 REAL DEFAULT 20").run(); } catch {}
+        }
+
+        const pBase = plafond_conduite !== undefined && plafond_conduite !== null ? (parseFloat(plafond_conduite) || 20) : (existing.plafond_conduite ?? 20);
+        const pT1 = plafond_conduite_t1 !== undefined && plafond_conduite_t1 !== null ? (parseFloat(plafond_conduite_t1) || pBase) : (existing.plafond_conduite_t1 ?? pBase);
+        const pT2 = plafond_conduite_t2 !== undefined && plafond_conduite_t2 !== null ? (parseFloat(plafond_conduite_t2) || pBase) : (existing.plafond_conduite_t2 ?? pBase);
+        const pT3 = plafond_conduite_t3 !== undefined && plafond_conduite_t3 !== null ? (parseFloat(plafond_conduite_t3) || pBase) : (existing.plafond_conduite_t3 ?? pBase);
+
+        db.prepare(`
+          UPDATE classes SET
+            plafond_conduite = ?,
+            plafond_conduite_t1 = ?,
+            plafond_conduite_t2 = ?,
+            plafond_conduite_t3 = ?
+          WHERE id = ? AND school_id = ?
+        `).run(pBase, pT1, pT2, pT3, id, req.schoolId);
+      }
 
       // If it's a primary class and teacherId changed, sync teacherId on classe_matieres
       if (teacherId) {
@@ -31656,9 +31792,32 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       const distPath = candidatePaths.find(p => fs.existsSync(path.join(p, "index.html"))) || path.join(process.cwd(), "dist");
       console.log(`[Production Static] Serving static files from: ${distPath}`);
       
-      app.use(express.static(distPath));
+      app.use(express.static(distPath, {
+        setHeaders: (res, filePath) => {
+          const base = path.basename(filePath);
+          if (
+            filePath.endsWith('.html') ||
+            base === 'sw.js' ||
+            base === 'registerSW.js' ||
+            base === 'manifest.webmanifest' ||
+            (base.startsWith('workbox-') && base.endsWith('.js'))
+          ) {
+            res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+            res.setHeader('Pragma', 'no-cache');
+            res.setHeader('Expires', '0');
+          } else if (filePath.includes(`${path.sep}assets${path.sep}`)) {
+            res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+          }
+        }
+      }));
       app.get("*", (req, res) => {
+        if (req.path.startsWith('/api/')) {
+          return res.status(404).json({ error: 'Route API introuvable' });
+        }
         const indexPath = path.join(distPath, "index.html");
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
         if (fs.existsSync(indexPath)) {
           res.sendFile(indexPath);
         } else {
