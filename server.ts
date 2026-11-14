@@ -330,12 +330,40 @@ const BACKUPS_DIR = path.join(process.cwd(), 'backups');
 if (!fs.existsSync(BACKUPS_DIR)) fs.mkdirSync(BACKUPS_DIR, { recursive: true });
 
 const AUTO_BACKUP_PATH = path.join(BACKUPS_DIR, 'auto_persistence_checkpoint.sql');
+const SCHOOL_VAULT_PATH = path.join(BACKUPS_DIR, 'school_accounts_registry.json');
+const LAST_BUILD_FILE = path.join(BACKUPS_DIR, '.last_build_id');
 const FIRESTORE_PLAIN_LIMIT = 700000;
 const FIRESTORE_CHUNK_SIZE = 650000;
+const EXPLICIT_DELETION_WINDOW_MS = 20000;
+
+const SCHOOL_VAULT_TABLES = [
+  'school_info',
+  'utilisateurs',
+  'subscription_licenses',
+  'subscription_transactions',
+  'school_creation_requests',
+  'school_smtp_configs',
+  'sms_configs',
+  'whatsapp_configs',
+  'role_permissions',
+  'annees_scolaires',
+  'plans',
+  'saas_settings',
+  'super_admin_settings'
+] as const;
 
 let checkpointTimer: NodeJS.Timeout | null = null;
 let isSavingCheckpoint = false;
 let pendingCheckpointAfterCurrent = false;
+let lastExplicitDeletionAt = 0;
+
+function markExplicitDeletion(): void {
+  lastExplicitDeletionAt = Date.now();
+}
+
+function isWithinExplicitDeletionWindow(): boolean {
+  return lastExplicitDeletionAt > 0 && (Date.now() - lastExplicitDeletionAt) < EXPLICIT_DELETION_WINDOW_MS;
+}
 
 function tableExists(tableName: string): boolean {
   const row = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = ?").get(tableName) as any;
@@ -429,11 +457,35 @@ function getDatabaseStats(): DatabaseStats {
   };
 }
 
-function inspectSqlDumpStats(sql: string): { hasRealData: boolean; score: number } {
-  if (!sql || sql.trim().length === 0) return { hasRealData: false, score: 0 };
+interface SqlDumpStats {
+  schoolCount: number;
+  nonDefaultSchoolCount: number;
+  userCount: number;
+  nonTestUserCount: number;
+  studentCount: number;
+  requestCount: number;
+  licenseCount: number;
+  hasRealData: boolean;
+  score: number;
+}
+
+function inspectSqlDumpStats(sql: string): SqlDumpStats {
+  if (!sql || sql.trim().length === 0) {
+    return {
+      schoolCount: 0,
+      nonDefaultSchoolCount: 0,
+      userCount: 0,
+      nonTestUserCount: 0,
+      studentCount: 0,
+      requestCount: 0,
+      licenseCount: 0,
+      hasRealData: false,
+      score: 0
+    };
+  }
   const lines = sql.split('\n');
   let schoolInserts = 0;
-  let nonDefaultSchool = false;
+  let nonDefaultSchoolCount = 0;
   let userInserts = 0;
   let studentInserts = 0;
   let classInserts = 0;
@@ -444,34 +496,36 @@ function inspectSqlDumpStats(sql: string): { hasRealData: boolean; score: number
   let licenseInserts = 0;
 
   for (const line of lines) {
-    if (line.includes('INTO school_info ')) {
+    if (line.includes('INTO "school_info" ') || line.includes('INTO school_info ')) {
       schoolInserts++;
       if (!line.includes("'École par Défaut'") || schoolInserts > 1) {
-        nonDefaultSchool = true;
+        nonDefaultSchoolCount++;
       }
-    } else if (line.includes('INTO utilisateurs ')) {
+    } else if (line.includes('INTO "utilisateurs" ') || line.includes('INTO utilisateurs ')) {
       userInserts++;
-    } else if (line.includes('INTO eleves ')) {
+    } else if (line.includes('INTO "eleves" ') || line.includes('INTO eleves ')) {
       studentInserts++;
-    } else if (line.includes('INTO classes ')) {
+    } else if (line.includes('INTO "classes" ') || line.includes('INTO classes ')) {
       classInserts++;
-    } else if (line.includes('INTO enseignants ')) {
+    } else if (line.includes('INTO "enseignants" ') || line.includes('INTO enseignants ')) {
       teacherInserts++;
-    } else if (line.includes('INTO paiements ')) {
+    } else if (line.includes('INTO "paiements" ') || line.includes('INTO paiements ')) {
       paymentInserts++;
-    } else if (line.includes('INTO notes ')) {
+    } else if (line.includes('INTO "notes" ') || line.includes('INTO notes ')) {
       gradeInserts++;
-    } else if (line.includes('INTO school_creation_requests ')) {
+    } else if (line.includes('INTO "school_creation_requests" ') || line.includes('INTO school_creation_requests ')) {
       requestInserts++;
-    } else if (line.includes('INTO subscription_licenses ')) {
+    } else if (line.includes('INTO "subscription_licenses" ') || line.includes('INTO subscription_licenses ')) {
       licenseInserts++;
     }
   }
 
+  const nonTestUserCount = Math.max(0, userInserts - 11);
+  const nonDefaultSchool = nonDefaultSchoolCount > 0;
   const hasRealData = (
     schoolInserts > 1 ||
     nonDefaultSchool ||
-    userInserts > 11 ||
+    nonTestUserCount > 0 ||
     studentInserts > 0 ||
     classInserts > 0 ||
     teacherInserts > 0 ||
@@ -482,9 +536,9 @@ function inspectSqlDumpStats(sql: string): { hasRealData: boolean; score: number
   );
 
   const score =
-    (nonDefaultSchool ? 100 : 0) +
+    nonDefaultSchoolCount * 100 +
     schoolInserts * 50 +
-    Math.max(0, userInserts - 11) * 20 +
+    nonTestUserCount * 20 +
     studentInserts * 10 +
     classInserts * 10 +
     teacherInserts * 10 +
@@ -493,7 +547,17 @@ function inspectSqlDumpStats(sql: string): { hasRealData: boolean; score: number
     requestInserts * 15 +
     licenseInserts * 15;
 
-  return { hasRealData, score };
+  return {
+    schoolCount: schoolInserts,
+    nonDefaultSchoolCount,
+    userCount: userInserts,
+    nonTestUserCount,
+    studentCount: studentInserts,
+    requestCount: requestInserts,
+    licenseCount: licenseInserts,
+    hasRealData,
+    score
+  };
 }
 
 function serializeSqlValue(v: any): string {
@@ -634,7 +698,11 @@ function splitSqlTuple(tupleStr: string): string[] {
   return parts;
 }
 
-function executeResilientSqlRestore(sqlDump: string): { applied: number; adapted: number; skipped: number } {
+function executeResilientSqlRestore(
+  sqlDump: string,
+  options: { mergeOnly?: boolean } = {}
+): { applied: number; adapted: number; skipped: number } {
+  const { mergeOnly = false } = options;
   const statements = splitSqlStatements(sqlDump);
   let applied = 0;
   let adapted = 0;
@@ -658,8 +726,8 @@ function executeResilientSqlRestore(sqlDump: string): { applied: number; adapted
   db.pragma('foreign_keys = OFF');
   try {
     const tx = db.transaction(() => {
-      // Clear any seed-only data cleanly before restoring checkpoint
-      if (!getDatabaseStats().hasRealData) {
+      // Clear any seed-only data cleanly ONLY on full restore (never in mergeOnly mode)
+      if (!mergeOnly && !getDatabaseStats().hasRealData) {
         const allTables = (db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all() as any[]).map(t => t.name);
         for (const tbl of allTables) {
           if (tbl === 'backup_snapshots') continue;
@@ -668,7 +736,7 @@ function executeResilientSqlRestore(sqlDump: string): { applied: number; adapted
       }
 
       for (const rawStmt of statements) {
-        const stmt = rawStmt.trim();
+        let stmt = rawStmt.trim();
         const upper = stmt.toUpperCase();
         if (
           !stmt ||
@@ -679,6 +747,10 @@ function executeResilientSqlRestore(sqlDump: string): { applied: number; adapted
           upper === 'END TRANSACTION'
         ) {
           continue;
+        }
+
+        if (mergeOnly) {
+          stmt = stmt.replace(/^INSERT(?:\s+OR\s+REPLACE)?\s+INTO\s+/i, 'INSERT OR IGNORE INTO ');
         }
 
         try {
@@ -709,7 +781,7 @@ function executeResilientSqlRestore(sqlDump: string): { applied: number; adapted
                 }
                 if (keptCols.length > 0) {
                   try {
-                    const verb = /^INSERT\s+OR\s+IGNORE/i.test(stmt) ? 'INSERT OR IGNORE' : 'INSERT OR REPLACE';
+                    const verb = mergeOnly || /^INSERT\s+OR\s+IGNORE/i.test(stmt) ? 'INSERT OR IGNORE' : 'INSERT OR REPLACE';
                     db.exec('SAVEPOINT sp_restore_retry');
                     db.exec(`${verb} INTO "${tblName}" (${keptCols.join(', ')}) VALUES (${keptVals.join(', ')})`);
                     db.exec('RELEASE SAVEPOINT sp_restore_retry');
@@ -756,7 +828,126 @@ function executeResilientSqlRestore(sqlDump: string): { applied: number; adapted
   return { applied, adapted, skipped };
 }
 
-async function fetchCloudCheckpointSql(): Promise<{ sql: string; lastUpdated?: string; hasRealData: boolean; score: number } | null> {
+interface SchoolAccountsVault {
+  version: number;
+  updated_at: string;
+  school_count: number;
+  non_default_school_count: number;
+  non_test_user_count: number;
+  tables: Record<string, any[]>;
+}
+
+function buildSchoolAccountsVault(): SchoolAccountsVault {
+  const stats = getDatabaseStats();
+  const tables: Record<string, any[]> = {};
+  for (const tbl of SCHOOL_VAULT_TABLES) {
+    if (!tableExists(tbl)) continue;
+    try {
+      tables[tbl] = db.prepare(`SELECT * FROM "${tbl}"`).all() as any[];
+    } catch {
+      tables[tbl] = [];
+    }
+  }
+  return {
+    version: 1,
+    updated_at: new Date().toISOString(),
+    school_count: stats.schoolCount,
+    non_default_school_count: stats.nonDefaultSchoolCount,
+    non_test_user_count: stats.nonTestUserCount,
+    tables
+  };
+}
+
+function reconcileMissingSchoolAccountsFromVault(vault: SchoolAccountsVault | null | undefined): number {
+  if (!vault || !vault.tables || typeof vault.tables !== 'object') return 0;
+  let insertedCount = 0;
+
+  db.pragma('foreign_keys = OFF');
+  try {
+    const tx = db.transaction(() => {
+      for (const tbl of SCHOOL_VAULT_TABLES) {
+        const rows = vault.tables[tbl];
+        if (!Array.isArray(rows) || rows.length === 0 || !tableExists(tbl)) continue;
+
+        const liveCols = new Set((db.prepare(`PRAGMA table_info("${tbl}")`).all() as any[]).map(c => c.name));
+        if (liveCols.size === 0) continue;
+
+        for (const row of rows) {
+          if (!row || typeof row !== 'object') continue;
+
+          // Extra deduplication guards by natural key so we never overwrite or conflict with existing records
+          if (tbl === 'utilisateurs' && row.email) {
+            const existsByEmail = db.prepare("SELECT id FROM utilisateurs WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))").get(String(row.email));
+            if (existsByEmail) continue;
+          }
+          if (tbl === 'school_info' && row.id != null) {
+            const existsById = db.prepare("SELECT id FROM school_info WHERE id = ?").get(row.id);
+            if (existsById) continue;
+          }
+          if (tbl === 'subscription_licenses' && row.license_key) {
+            const existsByKey = db.prepare("SELECT id FROM subscription_licenses WHERE license_key = ?").get(String(row.license_key));
+            if (existsByKey) continue;
+          }
+          if (tbl === 'school_creation_requests' && row.reference) {
+            const existsByRef = db.prepare("SELECT id FROM school_creation_requests WHERE reference = ?").get(String(row.reference));
+            if (existsByRef) continue;
+          }
+
+          const cols = Object.keys(row).filter(c => liveCols.has(c));
+          if (cols.length === 0) continue;
+          const quotedCols = cols.map(c => `"${c}"`).join(', ');
+          const placeholders = cols.map(() => '?').join(', ');
+          const values = cols.map(c => row[c] === undefined ? null : row[c]);
+
+          try {
+            const info = db.prepare(`INSERT OR IGNORE INTO "${tbl}" (${quotedCols}) VALUES (${placeholders})`).run(...values);
+            if (info.changes > 0) insertedCount += info.changes;
+          } catch {}
+        }
+      }
+
+      if (insertedCount > 0 && tableExists('sqlite_sequence')) {
+        for (const tbl of SCHOOL_VAULT_TABLES) {
+          if (!tableExists(tbl)) continue;
+          const cols = (db.prepare(`PRAGMA table_info("${tbl}")`).all() as any[]).map(c => c.name);
+          if (cols.includes('id')) {
+            try {
+              const maxRow = db.prepare(`SELECT COALESCE(MAX(id), 0) as maxId FROM "${tbl}"`).get() as any;
+              const maxId = Number(maxRow?.maxId || 0);
+              if (maxId > 0) {
+                db.prepare("DELETE FROM sqlite_sequence WHERE name = ?").run(tbl);
+                db.prepare("INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)").run(tbl, maxId);
+              }
+            } catch {}
+          }
+        }
+      }
+    });
+    tx();
+  } finally {
+    try { db.pragma('foreign_keys = ON'); } catch {}
+  }
+
+  return insertedCount;
+}
+
+async function fetchCloudSchoolVault(): Promise<SchoolAccountsVault | null> {
+  if (OFFLINE_MODE) return null;
+  try {
+    const snap = await adminDb.collection('backups').doc('school_accounts_registry').get();
+    if (!snap.exists) return null;
+    const data = snap.data();
+    if (!data?.vault_json || typeof data.vault_json !== 'string') return null;
+    const parsed = JSON.parse(data.vault_json) as SchoolAccountsVault;
+    if (!parsed || !parsed.tables) return null;
+    return parsed;
+  } catch (err) {
+    console.warn("[Persistence] Cloud school vault read notice:", err);
+    return null;
+  }
+}
+
+async function fetchCloudCheckpointSql(): Promise<(SqlDumpStats & { sql: string; lastUpdated?: string }) | null> {
   if (OFFLINE_MODE) return null;
   try {
     const cloudDocSnap = await adminDb.collection('backups').doc('global_checkpoint').get();
@@ -792,10 +983,12 @@ async function fetchCloudCheckpointSql(): Promise<{ sql: string; lastUpdated?: s
 
     const parsedStats = inspectSqlDumpStats(sql);
     return {
+      ...parsedStats,
       sql,
       lastUpdated: data.last_updated,
       hasRealData: Boolean(data.has_real_data) || parsedStats.hasRealData,
-      score: parsedStats.score
+      schoolCount: Math.max(parsedStats.schoolCount, Number(data.school_count || 0)),
+      nonTestUserCount: Math.max(parsedStats.nonTestUserCount, Number(data.non_test_user_count || 0))
     };
   } catch (err) {
     console.error("[Persistence] Cloud recovery check failed:", err);
@@ -806,72 +999,107 @@ async function fetchCloudCheckpointSql(): Promise<{ sql: string; lastUpdated?: s
 async function restoreFromCheckpoint() {
   try {
     const stats = getDatabaseStats();
-    // Never overwrite an active database that already holds real schools/users/students/data
-    if (stats.hasRealData) {
-      return;
-    }
+    const [cloudCandidate, cloudVault] = await Promise.all([
+      fetchCloudCheckpointSql(),
+      fetchCloudSchoolVault()
+    ]);
 
-    console.log("[Persistence] Database has no custom data yet. Checking Cloud and Local backups for recovery...");
-
-    const cloudCandidate = await fetchCloudCheckpointSql();
-    let localCandidate: { sql: string; hasRealData: boolean; score: number } | null = null;
-
+    let localCandidate: (SqlDumpStats & { sql: string }) | null = null;
     if (fs.existsSync(AUTO_BACKUP_PATH)) {
       try {
         const localSql = fs.readFileSync(AUTO_BACKUP_PATH, 'utf8');
         const localStats = inspectSqlDumpStats(localSql);
-        localCandidate = { sql: localSql, hasRealData: localStats.hasRealData, score: localStats.score };
+        localCandidate = { ...localStats, sql: localSql };
       } catch (e) {
         console.warn("[Persistence] Could not read local checkpoint:", e);
       }
     }
 
-    // Choose the best non-empty backup (prioritize real data, then higher data score, then cloud)
-    const candidates: Array<{ source: string; sql: string; hasRealData: boolean; score: number }> = [];
+    let localVault: SchoolAccountsVault | null = null;
+    if (fs.existsSync(SCHOOL_VAULT_PATH)) {
+      try {
+        localVault = JSON.parse(fs.readFileSync(SCHOOL_VAULT_PATH, 'utf8')) as SchoolAccountsVault;
+      } catch {}
+    }
+
+    const candidates: Array<SqlDumpStats & { source: string; sql: string }> = [];
     if (cloudCandidate) candidates.push({ source: 'cloud', ...cloudCandidate });
     if (localCandidate) candidates.push({ source: 'local', ...localCandidate });
 
-    if (candidates.length === 0) {
-      console.log("[Persistence] No existing backup found. Proceeding with clean initial setup.");
-      return;
-    }
-
-    // Sort: real data first, then highest score; on tie prefer cloud
+    // Sort: real data first, then more non-default schools, then highest score; on tie prefer cloud
     candidates.sort((a, b) => {
       if (a.hasRealData !== b.hasRealData) return a.hasRealData ? -1 : 1;
+      if (a.nonDefaultSchoolCount !== b.nonDefaultSchoolCount) return b.nonDefaultSchoolCount - a.nonDefaultSchoolCount;
       if (a.score !== b.score) return b.score - a.score;
       return a.source === 'cloud' ? -1 : 1;
     });
 
-    // If current DB already has default school_info (count > 0) and candidates have NO real data, don't churn
-    if (stats.schoolCount > 0 && !candidates[0].hasRealData) {
-      return;
+    if (!stats.hasRealData) {
+      if (candidates.length > 0 && (candidates[0].hasRealData || stats.schoolCount === 0)) {
+        for (const candidate of candidates) {
+          try {
+            console.log(`[Persistence] Restoring from ${candidate.source} checkpoint (schools=${candidate.schoolCount}, realData=${candidate.hasRealData}, score=${candidate.score})...`);
+            const result = executeResilientSqlRestore(candidate.sql, { mergeOnly: false });
+            console.log(`[Persistence] Auto-restore (${candidate.source}) completed: ${result.applied} applied, ${result.adapted} schema-adapted, ${result.skipped} skipped.`);
+            break;
+          } catch (err) {
+            console.error(`[Persistence] ${candidate.source} auto-restore failed:`, err);
+          }
+        }
+      }
+    } else if (candidates.length > 0) {
+      // Non-destructive protection: if local DB has fewer schools, users, or students than backup,
+      // merge missing records safely without overwriting or deleting any existing local school data!
+      const best = candidates[0];
+      const backupHasMissingSchools =
+        best.nonDefaultSchoolCount > stats.nonDefaultSchoolCount ||
+        best.schoolCount > stats.schoolCount ||
+        best.nonTestUserCount > stats.nonTestUserCount ||
+        best.studentCount > stats.studentCount;
+
+      if (backupHasMissingSchools) {
+        createSafetyBackup('pre_auto_merge');
+        console.log(`[Persistence] Richer ${best.source} backup detected (backup schools=${best.schoolCount}/users=${best.nonTestUserCount} vs local schools=${stats.schoolCount}/users=${stats.nonTestUserCount}). Merging missing accounts & records losslessly...`);
+        const mergeResult = executeResilientSqlRestore(best.sql, { mergeOnly: true });
+        console.log(`[Persistence] Lossless auto-merge (${best.source}) completed: ${mergeResult.applied} merged, ${mergeResult.adapted} adapted.`);
+      }
     }
 
-    for (const candidate of candidates) {
-      try {
-        console.log(`[Persistence] Restoring from ${candidate.source} checkpoint (realData=${candidate.hasRealData}, score=${candidate.score})...`);
-        const result = executeResilientSqlRestore(candidate.sql);
-        console.log(`[Persistence] Auto-restore (${candidate.source}) completed: ${result.applied} applied, ${result.adapted} schema-adapted, ${result.skipped} skipped.`);
-        return;
-      } catch (err) {
-        console.error(`[Persistence] ${candidate.source} auto-restore failed:`, err);
-      }
+    // Always reconcile missing school accounts from Cloud & Local school vaults (never overwrites existing records)
+    let reconciled = 0;
+    if (cloudVault) reconciled += reconcileMissingSchoolAccountsFromVault(cloudVault);
+    if (localVault) reconciled += reconcileMissingSchoolAccountsFromVault(localVault);
+    if (reconciled > 0) {
+      console.log(`[Persistence] School Accounts Vault restored ${reconciled} missing account/tenant record(s) without modifying existing data.`);
     }
   } catch (err) {
     console.warn("[Persistence] Checkpoint recovery notice:", err);
   }
 }
 
+function wouldShrinkExistingStats(
+  current: DatabaseStats,
+  existing: { schoolCount: number; nonDefaultSchoolCount: number; nonTestUserCount: number; studentCount?: number; hasRealData: boolean }
+): boolean {
+  if (isWithinExplicitDeletionWindow()) return false;
+  if (!current.hasRealData && existing.hasRealData) return true;
+  if (existing.nonDefaultSchoolCount > current.nonDefaultSchoolCount) return true;
+  if (existing.schoolCount > current.schoolCount) return true;
+  if (existing.nonTestUserCount > current.nonTestUserCount) return true;
+  if (typeof existing.studentCount === 'number' && existing.studentCount > current.studentCount && current.studentCount === 0) return true;
+  return false;
+}
+
 function saveLocalCheckpointSync(): boolean {
   try {
     if (!db || !db.open || !tableExists('school_info')) return false;
     const stats = getDatabaseStats();
-    if (!stats.hasRealData && fs.existsSync(AUTO_BACKUP_PATH)) {
+    if (fs.existsSync(AUTO_BACKUP_PATH)) {
       try {
         const existingSql = fs.readFileSync(AUTO_BACKUP_PATH, 'utf8');
-        if (inspectSqlDumpStats(existingSql).hasRealData) {
-          console.warn("[Persistence] Refusing to overwrite real local checkpoint with seed-only DB.");
+        const existingStats = inspectSqlDumpStats(existingSql);
+        if (wouldShrinkExistingStats(stats, existingStats)) {
+          console.warn(`[Persistence] Refusing to shrink local checkpoint (existing schools=${existingStats.schoolCount}, users=${existingStats.nonTestUserCount} vs current schools=${stats.schoolCount}, users=${stats.nonTestUserCount}).`);
           return false;
         }
       } catch {}
@@ -880,6 +1108,29 @@ function saveLocalCheckpointSync(): boolean {
     const tmpPath = `${AUTO_BACKUP_PATH}.tmp`;
     fs.writeFileSync(tmpPath, sqlDump, 'utf8');
     fs.renameSync(tmpPath, AUTO_BACKUP_PATH);
+
+    // Keep local school accounts vault in sync (with same anti-shrink guard)
+    const vault = buildSchoolAccountsVault();
+    let writeVault = true;
+    if (fs.existsSync(SCHOOL_VAULT_PATH)) {
+      try {
+        const prevVault = JSON.parse(fs.readFileSync(SCHOOL_VAULT_PATH, 'utf8')) as SchoolAccountsVault;
+        if (wouldShrinkExistingStats(stats, {
+          schoolCount: prevVault.school_count || 0,
+          nonDefaultSchoolCount: prevVault.non_default_school_count || 0,
+          nonTestUserCount: prevVault.non_test_user_count || 0,
+          hasRealData: (prevVault.non_default_school_count || 0) > 0 || (prevVault.non_test_user_count || 0) > 0
+        })) {
+          writeVault = false;
+        }
+      } catch {}
+    }
+    if (writeVault) {
+      const vaultTmp = `${SCHOOL_VAULT_PATH}.tmp`;
+      fs.writeFileSync(vaultTmp, JSON.stringify(vault), 'utf8');
+      fs.renameSync(vaultTmp, SCHOOL_VAULT_PATH);
+    }
+
     return true;
   } catch (err: any) {
     console.warn("[Persistence] Local checkpoint save notice:", err?.message || err);
@@ -896,13 +1147,15 @@ async function saveCheckpoint(reason = 'manual') {
   try {
     if (!db || !db.open || !tableExists('school_info')) return;
     const stats = getDatabaseStats();
+    const allowShrink = isWithinExplicitDeletionWindow();
 
-    // Prevent overwriting an existing real local checkpoint with an empty/seed-only DB
-    if (!stats.hasRealData && fs.existsSync(AUTO_BACKUP_PATH)) {
+    // Prevent overwriting an existing richer local checkpoint unless explicit deletion occurred
+    if (fs.existsSync(AUTO_BACKUP_PATH)) {
       try {
         const existingLocalSql = fs.readFileSync(AUTO_BACKUP_PATH, 'utf8');
-        if (inspectSqlDumpStats(existingLocalSql).hasRealData) {
-          console.warn(`[Persistence] (${reason}) Skipped checkpoint overwrite: local backup holds real data while current DB is seed-only.`);
+        const existingLocalStats = inspectSqlDumpStats(existingLocalSql);
+        if (wouldShrinkExistingStats(stats, existingLocalStats)) {
+          console.warn(`[Persistence] (${reason}) Blocked downward local checkpoint overwrite: existing backup holds more school accounts/users.`);
           return;
         }
       } catch {}
@@ -911,37 +1164,59 @@ async function saveCheckpoint(reason = 'manual') {
     const sqlDump = generateFullSqlDump();
     const checksum = crypto.createHash('sha256').update(sqlDump, 'utf8').digest('hex');
 
-    // 1. Atomic local checkpoint write
+    // 1. Atomic local checkpoint write + local vault write
     const tmpPath = `${AUTO_BACKUP_PATH}.tmp`;
     fs.writeFileSync(tmpPath, sqlDump, 'utf8');
     fs.renameSync(tmpPath, AUTO_BACKUP_PATH);
 
-    // 2. Cloud Persistence (Firestore) with gzip+chunking & empty-seed overwrite guard
+    const vault = buildSchoolAccountsVault();
+    const vaultJson = JSON.stringify(vault);
+    const vaultTmp = `${SCHOOL_VAULT_PATH}.tmp`;
+    fs.writeFileSync(vaultTmp, vaultJson, 'utf8');
+    fs.renameSync(vaultTmp, SCHOOL_VAULT_PATH);
+
+    // 2. Cloud Persistence (Firestore) with gzip+chunking & strict anti-regression lock
     if (!OFFLINE_MODE) {
       try {
-        if (!stats.hasRealData) {
-          const existingCloud = await adminDb.collection('backups').doc('global_checkpoint').get().catch(() => null);
-          if (existingCloud?.exists) {
-            const cData = existingCloud.data();
-            const cloudHasReal = Boolean(cData?.has_real_data) ||
-              Number(cData?.school_count || 0) > 1 ||
-              Number(cData?.student_count || 0) > 0 ||
-              Number(cData?.request_count || 0) > 0 ||
-              (typeof cData?.sql_dump === 'string' && inspectSqlDumpStats(cData.sql_dump).hasRealData);
-            if (cloudHasReal) {
-              console.warn(`[Persistence] (${reason}) Protected Cloud checkpoint: Firestore holds real data while current DB is seed-only.`);
-              return;
-            }
+        const existingCloud = await adminDb.collection('backups').doc('global_checkpoint').get().catch(() => null);
+        if (existingCloud?.exists) {
+          const cData = existingCloud.data();
+          const cParsedStats = typeof cData?.sql_dump === 'string' && cData.sql_dump.length > 0
+            ? inspectSqlDumpStats(cData.sql_dump)
+            : null;
+          const cStats = {
+            schoolCount: Math.max(Number(cData?.school_count || 0), cParsedStats?.schoolCount || 0),
+            nonDefaultSchoolCount: Math.max(Number(cData?.non_default_school_count || 0), cParsedStats?.nonDefaultSchoolCount || 0),
+            nonTestUserCount: Math.max(Number(cData?.non_test_user_count || 0), cParsedStats?.nonTestUserCount || 0),
+            studentCount: Math.max(Number(cData?.student_count || 0), cParsedStats?.studentCount || 0),
+            hasRealData: Boolean(cData?.has_real_data) || Boolean(cParsedStats?.hasRealData)
+          };
+
+          if (wouldShrinkExistingStats(stats, cStats)) {
+            console.warn(`[Persistence] (${reason}) Protected Cloud checkpoint against downward overwrite (cloud schools=${cStats.schoolCount}/users=${cStats.nonTestUserCount} vs local schools=${stats.schoolCount}/users=${stats.nonTestUserCount}).`);
+            return;
+          }
+
+          // When an explicit deletion legitimately reduced records, archive the previous plain checkpoint before updating
+          if (allowShrink && cData?.encoding === 'plain' && typeof cData?.sql_dump === 'string' && cData.sql_dump.length > 0) {
+            await adminDb.collection('backups').doc('global_checkpoint_previous').set({
+              ...cData,
+              archived_at: new Date().toISOString(),
+              archive_reason: reason
+            }).catch(() => {});
           }
         }
 
         const byteLen = Buffer.byteLength(sqlDump, 'utf8');
         const commonMeta = {
           last_updated: new Date().toISOString(),
-          version: 2,
+          version: 3,
+          build_id: APP_BUILD_ID,
           has_real_data: stats.hasRealData,
           school_count: stats.schoolCount,
+          non_default_school_count: stats.nonDefaultSchoolCount,
           user_count: stats.userCount,
+          non_test_user_count: stats.nonTestUserCount,
           student_count: stats.studentCount,
           request_count: stats.requestCount,
           checksum
@@ -976,6 +1251,35 @@ async function saveCheckpoint(reason = 'manual') {
             sql_dump: ''
           });
         }
+
+        // Also update the lightweight dedicated School Accounts Registry in Cloud
+        if (Buffer.byteLength(vaultJson, 'utf8') <= FIRESTORE_PLAIN_LIMIT) {
+          const existingVaultSnap = await adminDb.collection('backups').doc('school_accounts_registry').get().catch(() => null);
+          let allowVaultWrite = true;
+          if (existingVaultSnap?.exists) {
+            const vData = existingVaultSnap.data();
+            const vStats = {
+              schoolCount: Number(vData?.school_count || 0),
+              nonDefaultSchoolCount: Number(vData?.non_default_school_count || 0),
+              nonTestUserCount: Number(vData?.non_test_user_count || 0),
+              hasRealData: Boolean(vData?.non_default_school_count > 0 || vData?.non_test_user_count > 0)
+            };
+            if (wouldShrinkExistingStats(stats, vStats)) {
+              allowVaultWrite = false;
+            }
+          }
+          if (allowVaultWrite) {
+            await adminDb.collection('backups').doc('school_accounts_registry').set({
+              last_updated: commonMeta.last_updated,
+              build_id: APP_BUILD_ID,
+              school_count: stats.schoolCount,
+              non_default_school_count: stats.nonDefaultSchoolCount,
+              non_test_user_count: stats.nonTestUserCount,
+              vault_json: vaultJson
+            });
+          }
+        }
+
         console.log(`[Persistence] Cloud checkpoint saved (${reason}, schools=${stats.schoolCount}, users=${stats.userCount}, students=${stats.studentCount}).`);
       } catch (error: any) {
         console.warn("[Persistence] Cloud checkpoint notice (local persistence is active):", error?.message || error);
@@ -3533,9 +3837,20 @@ try { db.prepare("ALTER TABLE paiements ADD COLUMN note TEXT").run(); } catch(e)
 try { db.prepare("ALTER TABLE paiements ADD COLUMN annee_concernee_id INTEGER").run(); } catch(e){}
 try { db.prepare("ALTER TABLE paiements ADD COLUMN annee_concernee_libelle TEXT").run(); } catch(e){}
 
-// Reset database if requested (manual trigger or specific flag)
+// Automatic pre-update safety backup whenever a new build starts with existing school data
+try {
+  const prevBuildId = fs.existsSync(LAST_BUILD_FILE) ? fs.readFileSync(LAST_BUILD_FILE, 'utf8').trim() : '';
+  if (prevBuildId && prevBuildId !== APP_BUILD_ID && getDatabaseStats().hasRealData) {
+    createSafetyBackup('pre_update');
+  }
+  fs.writeFileSync(LAST_BUILD_FILE, APP_BUILD_ID, 'utf8');
+} catch (e) {}
+
+// Reset database if requested (only when RESET_DB=true explicitly in env; always takes a pre_reset backup first)
 const RESET_DB = process.env.RESET_DB === 'true';
 if (RESET_DB) {
+  createSafetyBackup('pre_reset');
+  markExplicitDeletion();
   console.log("Resetting database...");
   db.exec(`
     DELETE FROM timetable_requests;
@@ -3573,20 +3888,22 @@ try { db.prepare("ALTER TABLE school_info ADD COLUMN ai_provider TEXT DEFAULT 'g
 try { db.prepare("ALTER TABLE school_info ADD COLUMN ai_email TEXT").run(); } catch(e){}
 try { db.prepare("ALTER TABLE school_info ADD COLUMN frais_adhesion_bibliotheque REAL DEFAULT 1000").run(); } catch(e){}
 
-// Attempt restoring from checkpoint BEFORE orphan cleanup or default seeding
+// Attempt restoring or losslessly merging missing school accounts from checkpoints BEFORE orphan cleanup or default seeding
 try {
   await restoreFromCheckpoint();
 } catch (e) {
   console.warn("[Persistence] Checkpoint restore notice:", e);
 }
 
-// Ensure database integrity by clearing orphan foreign key references (never deletes valid records)
+// Ensure database integrity by clearing orphan foreign key references (never deletes valid records or wipes empty-eleves data)
 try {
   db.prepare("UPDATE utilisateurs SET eleve_id = NULL WHERE eleve_id IS NOT NULL AND eleve_id NOT IN (SELECT id FROM eleves)").run();
   db.prepare("UPDATE utilisateurs SET enseignant_id = NULL WHERE enseignant_id IS NOT NULL AND enseignant_id NOT IN (SELECT id FROM enseignants)").run();
   db.prepare("UPDATE utilisateurs SET parent_admin_id = NULL WHERE parent_admin_id IS NOT NULL AND parent_admin_id NOT IN (SELECT id FROM utilisateurs)").run();
-  db.prepare("DELETE FROM notes WHERE eleve_id NOT IN (SELECT id FROM eleves)").run();
-  db.prepare("DELETE FROM paiements WHERE eleve_id NOT IN (SELECT id FROM eleves)").run();
+  if (safeCount("SELECT COUNT(*) as count FROM eleves") > 0) {
+    db.prepare("DELETE FROM notes WHERE eleve_id NOT IN (SELECT id FROM eleves)").run();
+    db.prepare("DELETE FROM paiements WHERE eleve_id NOT IN (SELECT id FROM eleves)").run();
+  }
 } catch (e) {
   console.error("Integrity cleanup error:", e);
 }
@@ -13675,6 +13992,7 @@ function executeYearTransition(
       })();
 
       logActivity(req.userId, 'DELETE', 'ELEVE', parseInt(id), { nom: eleve.nom, prenom: eleve.prenom, matricule: eleve.matricule }, req.schoolId);
+      markExplicitDeletion();
       res.json({ success: true });
     } catch (error: any) {
       console.error("Delete student error:", error);
@@ -13700,6 +14018,7 @@ function executeYearTransition(
 
       const count = deleteTransaction(ids);
       logActivity(req.userId, 'BULK_DELETE', 'ELEVE', null, { count, ids }, req.schoolId);
+      markExplicitDeletion();
       res.json({ success: true, count });
     } catch (error: any) {
       console.error("Bulk delete error:", error);
@@ -20133,6 +20452,7 @@ function executeYearTransition(
       })();
 
       logActivity(req.userId, 'DELETE', 'USER', parseInt(id), { email: user ? user.email : 'Inconnu' }, req.schoolId);
+      markExplicitDeletion();
       res.json({ success: true });
     } catch (error: any) {
       console.error("Delete user error:", error);
@@ -28061,6 +28381,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         
         db.prepare("DELETE FROM classes WHERE id = ? AND school_id = ?").run(id, req.schoolId);
       })();
+      markExplicitDeletion();
       res.json({ success: true });
     } catch (error: any) {
       console.error("Delete class error:", error);
@@ -29769,6 +30090,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         recordSaasLog((req as any).user?.id || null, 'DELETE_SCHOOL', { school_id: schoolId, school_name: school.nom }, req);
       } catch (e) {}
 
+      markExplicitDeletion();
       res.json({ success: true, message: `L'établissement ${school.nom} a été supprimé avec succès.` });
     } catch (err: any) {
       // Ensure foreign keys are restored in case of error

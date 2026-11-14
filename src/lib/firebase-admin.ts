@@ -143,6 +143,38 @@ export interface CollectionReference {
   doc: (docId: string) => DocumentReference;
 }
 
+async function fetchWithRetry(
+  url: string,
+  init?: RequestInit,
+  retries = 3,
+  timeoutMs = 12000
+): Promise<Response> {
+  let lastErr: any = null;
+  for (let attempt = 0; attempt < retries; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { ...init, signal: controller.signal });
+      clearTimeout(timer);
+      if (res.status === 429 || res.status >= 500) {
+        if (attempt < retries - 1) {
+          await new Promise(r => setTimeout(r, 350 * (attempt + 1)));
+          continue;
+        }
+      }
+      return res;
+    } catch (err: any) {
+      clearTimeout(timer);
+      lastErr = err;
+      if (attempt < retries - 1) {
+        await new Promise(r => setTimeout(r, 350 * (attempt + 1)));
+        continue;
+      }
+    }
+  }
+  throw lastErr || new Error('Firestore REST request failed after retries');
+}
+
 export const adminDb = {
   collection(collectionName: string): CollectionReference {
     return {
@@ -151,7 +183,7 @@ export const adminDb = {
           async get(): Promise<DocSnapshot> {
             const baseUrl = `https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/${firebaseConfig.firestoreDatabaseId}/documents`;
             const url = `${baseUrl}/${collectionName}/${docId}?key=${firebaseConfig.apiKey}`;
-            const res = await fetch(url);
+            const res = await fetchWithRetry(url);
             if (res.status === 404) {
               return {
                 exists: false,
@@ -172,7 +204,7 @@ export const adminDb = {
           async set(data: Record<string, any>): Promise<void> {
             const baseUrl = `https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/${firebaseConfig.firestoreDatabaseId}/documents`;
             const url = `${baseUrl}/${collectionName}/${docId}?key=${firebaseConfig.apiKey}`;
-            const res = await fetch(url, {
+            const res = await fetchWithRetry(url, {
               method: 'PATCH',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
