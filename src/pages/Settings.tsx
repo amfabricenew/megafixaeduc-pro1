@@ -57,7 +57,8 @@ import {
   BookOpen,
   School,
   Layers,
-  Globe
+  Globe,
+  Zap
 } from 'lucide-react';
 import { LanguageSelector } from '../components/LanguageSelector';
 import { format } from 'date-fns';
@@ -81,6 +82,7 @@ import SmsSettingsTab from '../components/settings/SmsSettingsTab';
 import BackupSettingsTab from '../components/settings/BackupSettingsTab';
 import AISettingsTab from '../components/settings/AISettingsTab';
 import SubscriptionSettingsTab from '../components/settings/SubscriptionSettingsTab';
+import AutomationSettingsPanel from '../components/messaging/AutomationSettingsPanel';
 import { formatAcademicYearLibelle, getDefaultDatesForAcademicYear, getNextAcademicYearLibelle } from '../utils/academicYear';
 
 export default function Settings() {
@@ -116,7 +118,7 @@ export default function Settings() {
   const [logSearch, setLogSearch] = React.useState('');
   const [logFilterAction, setLogFilterAction] = React.useState('');
   const [logFilterEntity, setLogFilterEntity] = React.useState('');
-  const [activeTab, setActiveTab] = React.useState<'general' | 'account' | 'language' | 'roles' | 'payments' | 'sms' | 'ai' | 'backups' | 'data_management' | 'subscription'>('general');
+  const [activeTab, setActiveTab] = React.useState<'general' | 'account' | 'language' | 'roles' | 'payments' | 'sms' | 'automations' | 'ai' | 'backups' | 'data_management' | 'subscription'>('general');
   const [showTransitionModal, setShowTransitionModal] = React.useState(false);
   const [transitionMode, setTransitionMode] = React.useState<'auto' | 'manual'>('auto');
   const [transitionConfig, setTransitionConfig] = React.useState({
@@ -1463,6 +1465,18 @@ export default function Settings() {
               <Smartphone className="w-4 h-4 text-emerald-500" />
               <span>Passerelle SMS</span>
               {activeTab === 'sms' && (
+                <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-emerald-600 rounded-full" />
+              )}
+            </button>
+            <button
+              onClick={() => setActiveTab('automations')}
+              className={`pb-4 px-4 font-bold text-sm transition-colors relative whitespace-nowrap flex items-center gap-1.5 ${
+                activeTab === 'automations' ? 'text-emerald-600' : 'text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              <Zap className="w-4 h-4 text-emerald-500" />
+              <span>Messagerie Automatisée</span>
+              {activeTab === 'automations' && (
                 <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-emerald-600 rounded-full" />
               )}
             </button>
@@ -3688,6 +3702,10 @@ export default function Settings() {
 
       {activeTab === 'sms' && (currentUser?.role === 'admin' || currentUser?.role === 'super_admin' || currentUser?.role === 'fonde' || currentUser?.role === 'fondateur' || currentUser?.role === 'fondé') && (
         <SmsSettingsTab />
+      )}
+
+      {activeTab === 'automations' && (currentUser?.role === 'admin' || currentUser?.role === 'super_admin' || currentUser?.role === 'fonde' || currentUser?.role === 'fondateur' || currentUser?.role === 'fondé') && (
+        <AutomationSettingsPanel />
       )}
 
       {activeTab === 'ai' && (currentUser?.role === 'admin' || currentUser?.role === 'super_admin' || currentUser?.role === 'fonde' || currentUser?.role === 'fondateur' || currentUser?.role === 'fondé') && (

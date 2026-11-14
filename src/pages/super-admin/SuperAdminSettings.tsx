@@ -28,7 +28,8 @@ import {
   Server,
   RefreshCw,
   SlidersHorizontal,
-  Sparkles
+  Sparkles,
+  MessageCircle
 } from 'lucide-react';
 import SchoolMessagingModal from '../../components/super-admin/SchoolMessagingModal';
 import { clsx, type ClassValue } from 'clsx';
@@ -301,6 +302,8 @@ export default function SuperAdminSettings() {
   const [testEmailLoading, setTestEmailLoading] = React.useState(false);
   const [testSmsPhone, setTestSmsPhone] = React.useState('');
   const [testSmsLoading, setTestSmsLoading] = React.useState(false);
+  const [testWhatsappPhone, setTestWhatsappPhone] = React.useState('');
+  const [testWhatsappLoading, setTestWhatsappLoading] = React.useState(false);
 
   const handleTestEmail = async () => {
     setTestEmailLoading(true);
@@ -359,6 +362,38 @@ export default function SuperAdminSettings() {
       toast.error(err.message || "Erreur lors du test d'envoi SMS");
     } finally {
       setTestSmsLoading(false);
+    }
+  };
+
+  const handleTestWhatsapp = async () => {
+    if (!testWhatsappPhone.trim()) {
+      toast.error("Veuillez entrer un numéro WhatsApp");
+      return;
+    }
+    setTestWhatsappLoading(true);
+    try {
+      const response = await fetch('/api/super-admin/test-whatsapp', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('token')}`
+        },
+        body: JSON.stringify({ phone: testWhatsappPhone })
+      });
+      const data = await response.json();
+      if (response.ok && data.success) {
+        if (data.simulated) {
+          toast(data.message, { icon: 'ℹ️' });
+        } else {
+          toast.success(data.message || "Message WhatsApp de test envoyé avec succès !");
+        }
+      } else {
+        toast.error(data.error || "Échec de l'envoi WhatsApp de test");
+      }
+    } catch (err: any) {
+      toast.error(err.message || "Erreur lors du test WhatsApp");
+    } finally {
+      setTestWhatsappLoading(false);
     }
   };
 
@@ -1071,72 +1106,161 @@ export default function SuperAdminSettings() {
               </div>
 
               <section className="space-y-4">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-sm font-bold text-slate-900 uppercase tracking-widest">Configuration SMTP (Google Mail / Pro)</h3>
-                  <span className="text-[11px] font-bold text-indigo-600 bg-indigo-50 px-2.5 py-1 rounded-lg">
-                    Recommandé : Gmail (smtp.gmail.com)
-                  </span>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <h3 className="text-sm font-bold text-slate-900 uppercase tracking-widest">Configuration Email (Brevo / SMTP / Gmail)</h3>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSettings((prev: any) => ({
+                          ...prev,
+                          email_provider: 'smtp',
+                          smtp_host: 'smtp-relay.brevo.com',
+                          smtp_port: '587',
+                          smtp_secure: 'false'
+                        }));
+                        toast.success("Paramètres Relais SMTP Brevo (smtp-relay.brevo.com:587) appliqués !");
+                      }}
+                      className="text-[11px] font-bold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 px-2.5 py-1 rounded-lg transition-colors cursor-pointer"
+                    >
+                      Pré-remplir Relais SMTP Brevo
+                    </button>
+                    <span className="text-[11px] font-bold text-indigo-600 bg-indigo-50 px-2.5 py-1 rounded-lg">
+                      Brevo API / SMTP / Gmail
+                    </span>
+                  </div>
                 </div>
 
-                <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200/60 text-xs text-slate-600 space-y-1">
-                  <p className="font-semibold text-slate-800">💡 Astuce Google Mail (Gmail) :</p>
-                  <p>
-                    Pour utiliser votre adresse Gmail professionnelle ou personnelle, activez la validation en 2 étapes sur votre compte Google, puis générez un <strong>Mot de passe d'application</strong> (16 caractères) dans la sécurité de votre compte Google et saisissez-le dans le champ "Mot de passe SMTP".
-                  </p>
+                {/* Quick Brevo Multi-Channel Card */}
+                <div className="p-4 rounded-2xl bg-emerald-50/70 border border-emerald-200/80 space-y-3">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div>
+                      <h4 className="text-xs font-bold text-emerald-950">Passerelle Tout-en-Un Brevo (Email, SMS & WhatsApp)</h4>
+                      <p className="text-[11px] text-emerald-800/90 mt-0.5 leading-relaxed">
+                        Renseignez votre clé API Brevo (<code className="font-mono bg-white/80 px-1 rounded">xkeysib-...</code>) pour envoyer vos emails via l'API HTTP v3 (sans blocage de port SMTP) et alimenter automatiquement les canaux SMS & WhatsApp.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSettings((prev: any) => ({
+                          ...prev,
+                          email_provider: 'brevo_api',
+                          sms_provider: 'brevo',
+                          whatsapp_provider: 'brevo_whatsapp'
+                        }));
+                        toast.success("Brevo activé pour Email, SMS et WhatsApp ! Enregistrez pour valider.");
+                      }}
+                      className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl shrink-0 transition-colors cursor-pointer"
+                    >
+                      Activer Brevo (3 canaux)
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-bold text-slate-600">Mode d'envoi Email</label>
+                      <select
+                        value={settings.email_provider || 'smtp'}
+                        onChange={(e) => handleChange('email_provider', e.target.value)}
+                        className="w-full px-4 py-2.5 bg-white border border-emerald-200 rounded-xl text-sm focus:ring-2 focus:ring-emerald-500/20 font-medium"
+                      >
+                        <option value="smtp">Serveur SMTP (Brevo SMTP Relay / Gmail / Custom)</option>
+                        <option value="brevo_api">Brevo API Transactionnelle v3 (HTTPS - Recommandé Cloud)</option>
+                      </select>
+                    </div>
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-bold text-slate-600">Clé API Brevo Globale (xkeysib-...)</label>
+                      <input
+                        type="password"
+                        value={settings.brevo_api_key || ''}
+                        onChange={(e) => handleChange('brevo_api_key', e.target.value)}
+                        placeholder="xkeysib-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                        className="w-full px-4 py-2.5 bg-white border border-emerald-200 rounded-xl text-sm font-mono focus:ring-2 focus:ring-emerald-500/20"
+                      />
+                    </div>
+                  </div>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <label className="text-xs font-bold text-slate-500">Serveur SMTP</label>
-                    <input 
-                      type="text" 
-                      value={settings.smtp_host || ''} 
-                      onChange={(e) => handleChange('smtp_host', e.target.value)}
-                      placeholder="smtp.gmail.com"
-                      className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 font-medium" 
-                    />
+                {(settings.email_provider || 'smtp') === 'smtp' ? (
+                  <>
+                    <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200/60 text-xs text-slate-600 space-y-1">
+                      <p className="font-semibold text-slate-800">💡 Astuce Brevo Relais SMTP / Gmail :</p>
+                      <p>
+                        Pour <strong>Brevo SMTP</strong> : Hôte <code className="font-mono">smtp-relay.brevo.com</code>, Port <code className="font-mono">587</code>, Utilisateur = votre login SMTP Brevo, Mot de passe = votre clé SMTP (<code className="font-mono">xsmtpsib-...</code>). Pour <strong>Gmail</strong> : utilisez un mot de passe d'application Google (16 caractères).
+                      </p>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div className="space-y-2">
+                        <label className="text-xs font-bold text-slate-500">Serveur SMTP</label>
+                        <input 
+                          type="text" 
+                          value={settings.smtp_host || ''} 
+                          onChange={(e) => handleChange('smtp_host', e.target.value)}
+                          placeholder="smtp-relay.brevo.com ou smtp.gmail.com"
+                          className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 font-medium" 
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-xs font-bold text-slate-500">Port (587 ou 465 pour SSL)</label>
+                        <input 
+                          type="text" 
+                          value={settings.smtp_port || '587'} 
+                          onChange={(e) => handleChange('smtp_port', e.target.value)}
+                          placeholder="587"
+                          className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 font-medium" 
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-xs font-bold text-slate-500">Utilisateur / Login SMTP</label>
+                        <input 
+                          type="text" 
+                          value={settings.smtp_user || ''} 
+                          onChange={(e) => handleChange('smtp_user', e.target.value)}
+                          placeholder="ex: 8a1b2c@smtp-brevo.com ou direction@ecole.com"
+                          className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 font-medium" 
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-xs font-bold text-slate-500">Mot de passe SMTP / Clé SMTP Brevo</label>
+                        <input 
+                          type="password" 
+                          value={settings.smtp_pass || ''} 
+                          onChange={(e) => handleChange('smtp_pass', e.target.value)}
+                          placeholder="xsmtpsib-... ou mot de passe d'application"
+                          className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 font-medium" 
+                        />
+                      </div>
+                      <div className="space-y-2 md:col-span-2">
+                        <label className="text-xs font-bold text-slate-500">Nom & Adresse Expéditeur (From)</label>
+                        <input 
+                          type="text" 
+                          value={settings.email_from || ''} 
+                          onChange={(e) => handleChange('email_from', e.target.value)}
+                          placeholder='"MégafixaEduc Pro" <direction@ecole.com>'
+                          className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 font-medium" 
+                        />
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <div className="grid grid-cols-1 gap-4">
+                    <div className="space-y-2">
+                      <label className="text-xs font-bold text-slate-500">Nom & Adresse Email Expéditeur vérifiée dans Brevo (From)</label>
+                      <input
+                        type="text"
+                        value={settings.email_from || ''}
+                        onChange={(e) => handleChange('email_from', e.target.value)}
+                        placeholder='"MégafixaEduc Pro" <votre-email-verifie@domaine.com>'
+                        className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-emerald-500/20 font-medium"
+                      />
+                      <p className="text-[11px] text-slate-400">
+                        Assurez-vous que cet email expéditeur est bien validé dans votre compte Brevo (Expéditeurs & IP).
+                      </p>
+                    </div>
                   </div>
-                  <div className="space-y-2">
-                    <label className="text-xs font-bold text-slate-500">Port (587 ou 465 pour SSL)</label>
-                    <input 
-                      type="text" 
-                      value={settings.smtp_port || '587'} 
-                      onChange={(e) => handleChange('smtp_port', e.target.value)}
-                      placeholder="587"
-                      className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 font-medium" 
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-xs font-bold text-slate-500">Utilisateur / Adresse Gmail</label>
-                    <input 
-                      type="text" 
-                      value={settings.smtp_user || ''} 
-                      onChange={(e) => handleChange('smtp_user', e.target.value)}
-                      placeholder="ex: direction@ecole.com ou ecole@gmail.com"
-                      className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 font-medium" 
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-xs font-bold text-slate-500">Mot de passe SMTP / Mot de passe d'application Google</label>
-                    <input 
-                      type="password" 
-                      value={settings.smtp_pass || ''} 
-                      onChange={(e) => handleChange('smtp_pass', e.target.value)}
-                      placeholder="Mot de passe d'application (16 caractères)"
-                      className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 font-medium" 
-                    />
-                  </div>
-                  <div className="space-y-2 md:col-span-2">
-                    <label className="text-xs font-bold text-slate-500">Nom & Adresse Expéditeur (From)</label>
-                    <input 
-                      type="text" 
-                      value={settings.email_from || ''} 
-                      onChange={(e) => handleChange('email_from', e.target.value)}
-                      placeholder='"MégafixaEduc Pro" <direction@ecole.com>'
-                      className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 font-medium" 
-                    />
-                  </div>
-                </div>
+                )}
 
                 {/* Test Email Section */}
                 <div className="mt-4 p-5 rounded-2xl bg-indigo-50/60 border border-indigo-100 space-y-3">
@@ -1194,6 +1318,7 @@ export default function SuperAdminSettings() {
                       className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 font-medium" 
                     >
                       <option value="simulation">Simulation (Log console uniquement)</option>
+                      <option value="brevo">Brevo Transactional SMS (API v3)</option>
                       <option value="twilio">Twilio (International)</option>
                       <option value="infobip">Infobip</option>
                       <option value="orange">Orange SMS API</option>
@@ -1205,72 +1330,233 @@ export default function SuperAdminSettings() {
                       type="text" 
                       value={settings.sms_sender_id || ''} 
                       onChange={(e) => handleChange('sms_sender_id', e.target.value)}
-                      placeholder="MEGAFIXA"
+                      placeholder="MEGAFIXA (Max 11 car.)"
                       className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 font-medium" 
                     />
                   </div>
                   <div className="space-y-2">
-                    <label className="text-xs font-bold text-slate-500">API Key / Account SID</label>
+                    <label className="text-xs font-bold text-slate-500">
+                      {settings.sms_provider === 'brevo' ? 'Clé API Brevo SMS (ou laisse vide si clé globale ci-dessus)' : 'API Key / Account SID'}
+                    </label>
                     <input 
                       type="password" 
                       value={settings.sms_api_key || ''} 
                       onChange={(e) => handleChange('sms_api_key', e.target.value)}
-                      placeholder="ACxxxxxxxxxxxxxxxxxxxxxxxx"
-                      className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 font-medium" 
+                      placeholder={settings.sms_provider === 'brevo' ? 'xkeysib-... (optionnel si clé Brevo globale remplie)' : 'ACxxxxxxxxxxxxxxxxxxxxxxxx'}
+                      className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm font-mono focus:ring-2 focus:ring-indigo-500/20 font-medium" 
                     />
                   </div>
-                  <div className="space-y-2">
-                    <label className="text-xs font-bold text-slate-500">Auth Token / Secret</label>
-                    <input 
-                      type="password" 
-                      value={settings.sms_auth_token || ''} 
-                      onChange={(e) => handleChange('sms_auth_token', e.target.value)}
-                      placeholder="••••••••••••••••••••"
-                      className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 font-medium" 
-                    />
-                  </div>
+                  {settings.sms_provider !== 'brevo' && (
+                    <div className="space-y-2">
+                      <label className="text-xs font-bold text-slate-500">Auth Token / Secret</label>
+                      <input 
+                        type="password" 
+                        value={settings.sms_auth_token || ''} 
+                        onChange={(e) => handleChange('sms_auth_token', e.target.value)}
+                        placeholder="••••••••••••••••••••"
+                        className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 font-medium" 
+                      />
+                    </div>
+                  )}
                 </div>
 
                 <div className="p-4 rounded-2xl bg-amber-50 border border-amber-100 space-y-4">
                   <div className="space-y-2">
                     <h4 className="text-xs font-bold text-amber-900 flex items-center gap-2">
                       <Smartphone size={16} />
-                      Configuration WhatsApp & SMS
+                      Tester la passerelle SMS globale
                     </h4>
-                    <p className="text-[11px] text-amber-800 leading-relaxed">
-                      Le service WhatsApp utilise par défaut la simulation ou la passerelle configurée. Pour un envoi réel, assurez-vous que les informations d'authentification ci-dessus sont valides pour le provider choisi.
-                    </p>
                   </div>
 
-                  <div className="pt-2 border-t border-amber-200">
-                    <p className="text-[10px] font-bold text-amber-700 uppercase mb-2">Tester l'envoi SMS / WhatsApp</p>
-                    <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+                    <input
+                      type="text"
+                      placeholder="+2290100000000"
+                      value={testSmsPhone}
+                      onChange={(e) => setTestSmsPhone(e.target.value)}
+                      className="flex-1 px-4 py-2 bg-white border border-amber-200 rounded-xl text-xs font-medium focus:ring-2 focus:ring-amber-500/20 outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleTestSms}
+                      disabled={testSmsLoading}
+                      className="px-5 py-2 bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-slate-950 font-bold text-xs rounded-xl shadow-xs transition-all flex items-center justify-center gap-2 shrink-0 cursor-pointer"
+                    >
+                      {testSmsLoading ? (
+                        <>
+                          <span className="w-3.5 h-3.5 rounded-full border-2 border-slate-950 border-t-transparent animate-spin" />
+                          <span>Envoi...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Smartphone size={15} />
+                          <span>Tester le SMS</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+              </section>
+
+              <section className="space-y-4 pt-4 border-t border-slate-100">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-bold text-slate-900 uppercase tracking-widest flex items-center gap-2">
+                    <MessageCircle size={16} className="text-teal-600" />
+                    <span>Passerelle WhatsApp Globale (Repli Plateforme)</span>
+                  </h3>
+                  <span className="text-[11px] font-bold text-teal-700 bg-teal-50 px-2.5 py-1 rounded-lg">
+                    Automatisations & Alertes
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold text-slate-500">Fournisseur WhatsApp</label>
+                    <select
+                      value={settings.whatsapp_provider || 'simulation'}
+                      onChange={(e) => handleChange('whatsapp_provider', e.target.value)}
+                      className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-teal-500/20 font-medium"
+                    >
+                      <option value="simulation">Simulation (Console interne)</option>
+                      <option value="brevo_whatsapp">Brevo WhatsApp Business API (v3)</option>
+                      <option value="meta_cloud_api">Meta WhatsApp Cloud API (Officiel)</option>
+                      <option value="twilio_whatsapp">Twilio WhatsApp Business</option>
+                      <option value="custom_webhook">Webhook WhatsApp personnalisé</option>
+                    </select>
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold text-slate-500">Numéro expéditeur WhatsApp</label>
+                    <input
+                      type="text"
+                      value={settings.whatsapp_sender_number || ''}
+                      onChange={(e) => handleChange('whatsapp_sender_number', e.target.value)}
+                      placeholder="+2290100000000"
+                      className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-teal-500/20 font-medium"
+                    />
+                  </div>
+
+                  {(settings.whatsapp_provider === 'brevo_whatsapp') && (
+                    <div className="space-y-2 md:col-span-2">
+                      <label className="text-xs font-bold text-slate-500">Clé API Brevo WhatsApp (optionnel si clé Brevo globale remplie)</label>
                       <input
-                        type="text"
-                        placeholder="+2290100000000"
-                        value={testSmsPhone}
-                        onChange={(e) => setTestSmsPhone(e.target.value)}
-                        className="flex-1 px-4 py-2 bg-white border border-amber-200 rounded-xl text-xs font-medium focus:ring-2 focus:ring-amber-500/20 outline-none"
+                        type="password"
+                        value={settings.whatsapp_api_key || ''}
+                        onChange={(e) => handleChange('whatsapp_api_key', e.target.value)}
+                        placeholder="xkeysib-... (repli automatique sur la clé Brevo globale)"
+                        className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm font-mono focus:ring-2 focus:ring-teal-500/20"
                       />
-                      <button
-                        type="button"
-                        onClick={handleTestSms}
-                        disabled={testSmsLoading}
-                        className="px-5 py-2 bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-slate-950 font-bold text-xs rounded-xl shadow-xs transition-all flex items-center justify-center gap-2 shrink-0 cursor-pointer"
-                      >
-                        {testSmsLoading ? (
-                          <>
-                            <span className="w-3.5 h-3.5 rounded-full border-2 border-slate-950 border-t-transparent animate-spin" />
-                            <span>Envoi...</span>
-                          </>
-                        ) : (
-                          <>
-                            <Smartphone size={15} />
-                            <span>Tester le SMS</span>
-                          </>
-                        )}
-                      </button>
                     </div>
+                  )}
+
+                  {(settings.whatsapp_provider === 'twilio_whatsapp') && (
+                    <>
+                      <div className="space-y-2">
+                        <label className="text-xs font-bold text-slate-500">Twilio Account SID</label>
+                        <input
+                          type="text"
+                          value={settings.whatsapp_account_sid || ''}
+                          onChange={(e) => handleChange('whatsapp_account_sid', e.target.value)}
+                          placeholder="ACxxxxxxxxxxxxxxxxxxxxxxxx"
+                          className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm font-mono focus:ring-2 focus:ring-teal-500/20"
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-xs font-bold text-slate-500">Twilio Auth Token</label>
+                        <input
+                          type="password"
+                          value={settings.whatsapp_auth_token || ''}
+                          onChange={(e) => handleChange('whatsapp_auth_token', e.target.value)}
+                          placeholder="••••••••••••••••••••"
+                          className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm font-mono focus:ring-2 focus:ring-teal-500/20"
+                        />
+                      </div>
+                    </>
+                  )}
+
+                  {(settings.whatsapp_provider === 'meta_cloud_api') && (
+                    <>
+                      <div className="space-y-2">
+                        <label className="text-xs font-bold text-slate-500">Meta Phone Number ID</label>
+                        <input
+                          type="text"
+                          value={settings.whatsapp_phone_number_id || ''}
+                          onChange={(e) => handleChange('whatsapp_phone_number_id', e.target.value)}
+                          placeholder="109283746512345"
+                          className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm font-mono focus:ring-2 focus:ring-teal-500/20"
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-xs font-bold text-slate-500">Meta Permanent Access Token</label>
+                        <input
+                          type="password"
+                          value={settings.whatsapp_auth_token || ''}
+                          onChange={(e) => handleChange('whatsapp_auth_token', e.target.value)}
+                          placeholder="EAAG..."
+                          className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm font-mono focus:ring-2 focus:ring-teal-500/20"
+                        />
+                      </div>
+                    </>
+                  )}
+
+                  {(settings.whatsapp_provider === 'custom_webhook') && (
+                    <>
+                      <div className="space-y-2">
+                        <label className="text-xs font-bold text-slate-500">URL Webhook WhatsApp (POST)</label>
+                        <input
+                          type="text"
+                          value={settings.whatsapp_api_url || ''}
+                          onChange={(e) => handleChange('whatsapp_api_url', e.target.value)}
+                          placeholder="https://api.whatsapp-gateway.com/send"
+                          className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm font-mono focus:ring-2 focus:ring-teal-500/20"
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-xs font-bold text-slate-500">Clé API / Bearer Token</label>
+                        <input
+                          type="password"
+                          value={settings.whatsapp_api_key || ''}
+                          onChange={(e) => handleChange('whatsapp_api_key', e.target.value)}
+                          placeholder="••••••••••••••••••••"
+                          className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm font-mono focus:ring-2 focus:ring-teal-500/20"
+                        />
+                      </div>
+                    </>
+                  )}
+                </div>
+
+                <div className="p-4 rounded-2xl bg-teal-50 border border-teal-100 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-xs font-bold text-teal-900 flex items-center gap-2">
+                      <MessageCircle size={16} />
+                      Tester la passerelle WhatsApp globale
+                    </h4>
+                  </div>
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+                    <input
+                      type="text"
+                      placeholder="+2290100000000"
+                      value={testWhatsappPhone}
+                      onChange={(e) => setTestWhatsappPhone(e.target.value)}
+                      className="flex-1 px-4 py-2 bg-white border border-teal-200 rounded-xl text-xs font-medium focus:ring-2 focus:ring-teal-500/20 outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleTestWhatsapp}
+                      disabled={testWhatsappLoading}
+                      className="px-5 py-2 bg-teal-600 hover:bg-teal-700 disabled:opacity-50 text-white font-bold text-xs rounded-xl shadow-xs transition-all flex items-center justify-center gap-2 shrink-0 cursor-pointer"
+                    >
+                      {testWhatsappLoading ? (
+                        <>
+                          <span className="w-3.5 h-3.5 rounded-full border-2 border-white border-t-transparent animate-spin" />
+                          <span>Envoi...</span>
+                        </>
+                      ) : (
+                        <>
+                          <MessageCircle size={15} />
+                          <span>Tester WhatsApp</span>
+                        </>
+                      )}
+                    </button>
                   </div>
                 </div>
               </section>
@@ -1303,7 +1589,7 @@ export default function SuperAdminSettings() {
               </div>
 
               {/* Global Defaults Informational Cards */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 {/* Global SMTP */}
                 <div className="p-4 rounded-2xl bg-indigo-50/60 border border-indigo-100 flex items-start gap-3.5">
                   <div className="w-9 h-9 rounded-xl bg-indigo-600 text-white flex items-center justify-center shrink-0">
@@ -1319,7 +1605,9 @@ export default function SuperAdminSettings() {
                       </span>
                     </div>
                     <p className="text-xs font-bold text-slate-800 mt-1 truncate">
-                      {messagingGlobalDefaults?.smtp?.host || 'smtp.gmail.com'}:{messagingGlobalDefaults?.smtp?.port || '587'}
+                      {messagingGlobalDefaults?.smtp?.provider === 'brevo_api'
+                        ? 'Brevo API Transactionnelle v3'
+                        : `${messagingGlobalDefaults?.smtp?.host || 'smtp.gmail.com'}:${messagingGlobalDefaults?.smtp?.port || '587'}`}
                     </p>
                     <p className="text-[11px] text-slate-500 truncate mt-0.5">
                       Expéditeur : {messagingGlobalDefaults?.smtp?.from || messagingGlobalDefaults?.smtp?.user || 'Non configuré'}
@@ -1346,6 +1634,29 @@ export default function SuperAdminSettings() {
                     </p>
                     <p className="text-[11px] text-slate-500 truncate mt-0.5">
                       Sender ID : {messagingGlobalDefaults?.sms?.senderId || 'MEGAFIXA'}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Global WhatsApp */}
+                <div className="p-4 rounded-2xl bg-teal-50/60 border border-teal-100 flex items-start gap-3.5">
+                  <div className="w-9 h-9 rounded-xl bg-teal-600 text-white flex items-center justify-center shrink-0">
+                    <MessageCircle size={18} />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[10px] font-black uppercase tracking-wider text-teal-700">
+                        Passerelle WhatsApp (Repli)
+                      </span>
+                      <span className="text-[10px] bg-teal-200/70 text-teal-900 font-extrabold px-2 py-0.5 rounded-md">
+                        Système
+                      </span>
+                    </div>
+                    <p className="text-xs font-bold text-slate-800 mt-1 truncate uppercase">
+                      Fournisseur : {messagingGlobalDefaults?.whatsapp?.provider || 'Simulation'}
+                    </p>
+                    <p className="text-[11px] text-slate-500 truncate mt-0.5">
+                      Expéditeur : {messagingGlobalDefaults?.whatsapp?.senderNumber || 'Par défaut plateforme'}
                     </p>
                   </div>
                 </div>
@@ -1393,7 +1704,7 @@ export default function SuperAdminSettings() {
                         : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
                     }`}
                   >
-                    Personnalisées ({schoolsMessagingList.filter((s: any) => s.custom_smtp_enabled || s.custom_sms_enabled).length})
+                    Personnalisées ({schoolsMessagingList.filter((s: any) => s.custom_smtp_enabled || s.custom_sms_enabled || s.custom_whatsapp_enabled).length})
                   </button>
                   <button
                     type="button"
@@ -1404,7 +1715,7 @@ export default function SuperAdminSettings() {
                         : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
                     }`}
                   >
-                    Par défaut ({schoolsMessagingList.filter((s: any) => !s.custom_smtp_enabled && !s.custom_sms_enabled).length})
+                    Par défaut ({schoolsMessagingList.filter((s: any) => !s.custom_smtp_enabled && !s.custom_sms_enabled && !s.custom_whatsapp_enabled).length})
                   </button>
                 </div>
               </div>
@@ -1432,16 +1743,17 @@ export default function SuperAdminSettings() {
                       
                       if (!matchesSearch) return false;
                       if (schoolMessagingFilter === 'custom') {
-                        return Boolean(s.custom_smtp_enabled || s.custom_sms_enabled);
+                        return Boolean(s.custom_smtp_enabled || s.custom_sms_enabled || s.custom_whatsapp_enabled);
                       }
                       if (schoolMessagingFilter === 'default') {
-                        return !s.custom_smtp_enabled && !s.custom_sms_enabled;
+                        return !s.custom_smtp_enabled && !s.custom_sms_enabled && !s.custom_whatsapp_enabled;
                       }
                       return true;
                     })
                     .map((school: any) => {
                       const hasCustomSmtp = Boolean(school.custom_smtp_enabled);
                       const hasCustomSms = Boolean(school.custom_sms_enabled);
+                      const hasCustomWa = Boolean(school.custom_whatsapp_enabled);
 
                       return (
                         <div
@@ -1449,7 +1761,7 @@ export default function SuperAdminSettings() {
                           className="p-4 sm:p-5 rounded-2xl bg-white border border-slate-200 hover:border-indigo-300 hover:shadow-md transition-all flex flex-col lg:flex-row lg:items-center justify-between gap-4"
                         >
                           {/* School Identity */}
-                          <div className="flex items-start gap-3.5 min-w-[240px]">
+                          <div className="flex items-start gap-3.5 min-w-[220px]">
                             <div className="w-10 h-10 rounded-2xl bg-indigo-50 border border-indigo-100 text-indigo-700 flex items-center justify-center font-bold text-sm shrink-0">
                               {school.nom?.charAt(0)?.toUpperCase() || 'E'}
                             </div>
@@ -1467,7 +1779,7 @@ export default function SuperAdminSettings() {
                           </div>
 
                           {/* Gateway Badges */}
-                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 flex-1 lg:max-w-xl">
+                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 flex-1 lg:max-w-2xl">
                             {/* SMTP Status */}
                             <div className={`p-3 rounded-xl border text-xs flex flex-col justify-between ${
                               hasCustomSmtp
@@ -1477,7 +1789,7 @@ export default function SuperAdminSettings() {
                               <div className="flex items-center justify-between gap-1 mb-1">
                                 <span className="text-[10px] uppercase font-bold text-slate-500 flex items-center gap-1">
                                   <Mail size={12} />
-                                  <span>Serveur SMTP</span>
+                                  <span>SMTP</span>
                                 </span>
                                 <span className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full ${
                                   hasCustomSmtp
@@ -1488,9 +1800,13 @@ export default function SuperAdminSettings() {
                                 </span>
                               </div>
                               <p className="text-[11px] font-medium truncate">
-                                {hasCustomSmtp 
-                                  ? `${school.smtp_host || 'Non spécifié'} (${school.smtp_user || ''})`
-                                  : `Repli : ${messagingGlobalDefaults?.smtp?.host || 'smtp.gmail.com'}`}
+                                {hasCustomSmtp
+                                  ? school.email_provider === 'brevo_api'
+                                    ? `Brevo API v3${school.smtp_from ? ` (${school.smtp_from})` : ''}`
+                                    : `${school.smtp_host || 'Non spécifié'}${school.smtp_user ? ` (${school.smtp_user})` : ''}`
+                                  : messagingGlobalDefaults?.smtp?.provider === 'brevo_api'
+                                    ? 'Repli : Brevo API v3'
+                                    : `Repli : ${messagingGlobalDefaults?.smtp?.host || 'smtp.gmail.com'}`}
                               </p>
                             </div>
 
@@ -1503,7 +1819,7 @@ export default function SuperAdminSettings() {
                               <div className="flex items-center justify-between gap-1 mb-1">
                                 <span className="text-[10px] uppercase font-bold text-slate-500 flex items-center gap-1">
                                   <Smartphone size={12} />
-                                  <span>Passerelle SMS</span>
+                                  <span>SMS</span>
                                 </span>
                                 <span className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full ${
                                   hasCustomSms
@@ -1515,8 +1831,34 @@ export default function SuperAdminSettings() {
                               </div>
                               <p className="text-[11px] font-medium truncate">
                                 {hasCustomSms 
-                                  ? `${school.sms_provider?.toUpperCase()} • Sender: ${school.sms_sender_id || 'MEGAFIXA'}`
+                                  ? `${school.sms_provider?.toUpperCase()} • ${school.sms_sender_id || 'MEGAFIXA'}`
                                   : `Repli : ${messagingGlobalDefaults?.sms?.provider?.toUpperCase() || 'Simulation'}`}
+                              </p>
+                            </div>
+
+                            {/* WhatsApp Status */}
+                            <div className={`p-3 rounded-xl border text-xs flex flex-col justify-between ${
+                              hasCustomWa
+                                ? 'bg-teal-50/60 border-teal-200 text-teal-900'
+                                : 'bg-slate-50 border-slate-200 text-slate-700'
+                            }`}>
+                              <div className="flex items-center justify-between gap-1 mb-1">
+                                <span className="text-[10px] uppercase font-bold text-slate-500 flex items-center gap-1">
+                                  <MessageCircle size={12} />
+                                  <span>WhatsApp</span>
+                                </span>
+                                <span className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full ${
+                                  hasCustomWa
+                                    ? 'bg-teal-600 text-white'
+                                    : 'bg-slate-200 text-slate-600'
+                                }`}>
+                                  {hasCustomWa ? 'Personnalisé' : 'Par défaut'}
+                                </span>
+                              </div>
+                              <p className="text-[11px] font-medium truncate">
+                                {hasCustomWa
+                                  ? `${school.whatsapp_provider?.toUpperCase() || 'API'} • ${school.whatsapp_sender_number || 'Actif'}`
+                                  : `Repli : ${messagingGlobalDefaults?.whatsapp?.provider?.toUpperCase() || 'Simulation'}`}
                               </p>
                             </div>
                           </div>

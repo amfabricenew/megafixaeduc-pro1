@@ -68,7 +68,7 @@ export interface SmsLog {
 export interface SmsConfig {
   id?: number;
   school_id: number;
-  provider: 'twilio' | 'orange_sms' | 'mtn_sms' | 'custom_gateway' | 'simulation';
+  provider: 'brevo' | 'twilio' | 'orange_sms' | 'mtn_sms' | 'custom_gateway' | 'simulation';
   is_active: number;
   account_sid?: string;
   auth_token?: string;
@@ -77,6 +77,66 @@ export interface SmsConfig {
   api_key?: string;
   custom_headers?: string;
   credit_balance?: number;
+}
+
+export interface WhatsAppConfig {
+  id?: number;
+  school_id: number;
+  custom_whatsapp_enabled: number;
+  provider: 'simulation' | 'brevo_whatsapp' | 'twilio_whatsapp' | 'meta_cloud_api' | 'custom_webhook';
+  is_active: number;
+  account_sid?: string;
+  auth_token?: string;
+  phone_number_id?: string;
+  sender_number?: string;
+  api_url?: string;
+  api_key?: string;
+  global_provider?: string;
+  global_sender_number?: string;
+}
+
+export interface AutomationRule {
+  id: number;
+  school_id: number;
+  code: string;
+  name: string;
+  description: string;
+  category: 'vie_scolaire' | 'finances' | 'pedagogie' | 'admissions' | 'bibliotheque' | 'general';
+  trigger_type: 'event' | 'scheduled';
+  trigger_event: string;
+  is_active: number;
+  channel_sms: number;
+  channel_email: number;
+  channel_whatsapp: number;
+  subject_template: string;
+  message_template: string;
+  schedule_frequency: 'hourly' | 'daily' | 'weekly' | 'monthly';
+  schedule_time: string;
+  days_offset: number;
+  is_custom: number;
+  last_run_at?: string | null;
+  total_sent: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface AutomationLog {
+  id: number;
+  school_id: number;
+  rule_id?: number;
+  rule_code: string;
+  rule_name: string;
+  channel: 'sms' | 'email' | 'whatsapp';
+  recipient_name: string;
+  recipient_contact: string;
+  subject?: string;
+  message_preview: string;
+  status: 'sent' | 'delivered' | 'simulated' | 'failed';
+  provider: string;
+  error_message?: string;
+  entity_ref?: string;
+  execution_mode: 'auto' | 'manual' | 'test';
+  created_at: string;
 }
 
 export interface BackupConfig {

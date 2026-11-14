@@ -9,22 +9,40 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { toast } from 'react-hot-toast';
 import { useNavigate } from 'react-router-dom';
 
+const REFERENCE_REGEX = /^REQ-[A-Z0-9]{6}$/;
+
 export default function PublicTracking() {
   const [code, setCode] = useState('');
   const [type, setType] = useState<'recrutement' | 'inscription'>('recrutement');
   const [result, setResult] = useState<any>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [formatError, setFormatError] = useState<string | null>(null);
   const navigate = useNavigate();
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!code.trim()) return;
-    
+    const cleanedCode = code.trim().toUpperCase();
+
+    if (!cleanedCode) {
+      const msg = "Veuillez saisir votre référence de dossier (format : REQ-XXXXXX).";
+      setFormatError(msg);
+      toast.error(msg);
+      return;
+    }
+
+    if (!REFERENCE_REGEX.test(cleanedCode)) {
+      const msg = "Format de référence invalide. La référence doit correspondre au format REQ-XXXXXX (ex: REQ-A1B2C3).";
+      setFormatError(msg);
+      toast.error(msg);
+      return;
+    }
+
+    setFormatError(null);
     setIsLoading(true);
     try {
       const endpoint = type === 'recrutement' 
-        ? `/api/public/recrutement/suivi/${code.trim()}`
-        : `/api/public/inscription/suivi/${code.trim()}`;
+        ? `/api/public/recrutement/suivi/${encodeURIComponent(cleanedCode)}`
+        : `/api/public/inscription/suivi/${encodeURIComponent(cleanedCode)}`;
       
       const res = await apiFetch(endpoint);
       const data = await res.json();
@@ -149,16 +167,37 @@ export default function PublicTracking() {
             </div>
 
             <form onSubmit={handleSearch} className="max-w-md mx-auto space-y-4">
-              <div className="relative">
+              <div className="space-y-2 text-left">
                 <input 
                   type="text" 
                   value={code}
-                  onChange={(e) => setCode(e.target.value.toUpperCase())}
-                  placeholder="Entrez votre code (ex: CAND-XXXXXX)"
-                  className="w-full px-8 py-5 bg-slate-50 border-2 border-slate-100 rounded-[1.5rem] font-black text-xl text-center text-indigo-600 outline-none focus:border-indigo-600 focus:ring-4 focus:ring-indigo-50 transition-all uppercase placeholder:text-slate-300"
+                  maxLength={10}
+                  onChange={(e) => {
+                    const val = e.target.value.toUpperCase();
+                    setCode(val);
+                    if (formatError) setFormatError(null);
+                  }}
+                  placeholder="Entrez votre référence (ex: REQ-XXXXXX)"
+                  aria-invalid={Boolean(formatError)}
+                  className={`w-full px-8 py-5 bg-slate-50 border-2 rounded-[1.5rem] font-black text-xl text-center outline-none focus:ring-4 transition-all uppercase placeholder:text-slate-300 ${
+                    formatError
+                      ? 'border-rose-500 text-rose-600 focus:border-rose-600 focus:ring-rose-50'
+                      : 'border-slate-100 text-indigo-600 focus:border-indigo-600 focus:ring-indigo-50'
+                  }`}
                 />
+                {formatError ? (
+                  <p className="text-xs font-bold text-rose-600 flex items-center justify-center gap-1.5 px-2 text-center">
+                    <AlertCircle size={14} className="shrink-0" />
+                    <span>{formatError}</span>
+                  </p>
+                ) : (
+                  <p className="text-[11px] font-semibold text-slate-400 text-center">
+                    Format attendu : <span className="font-mono font-bold text-slate-500">REQ-XXXXXX</span> (6 caractères alphanumériques)
+                  </p>
+                )}
               </div>
               <button 
+                type="submit"
                 disabled={isLoading}
                 className="w-full py-5 bg-slate-900 text-white rounded-[1.5rem] font-black shadow-xl shadow-slate-200 hover:scale-[1.02] active:scale-95 transition-all flex items-center justify-center gap-3 disabled:opacity-50"
               >

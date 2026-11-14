@@ -265,6 +265,8 @@ try {
 } catch (e) {}
 
 try { db.prepare("ALTER TABLE sms_configs ADD COLUMN custom_sms_enabled INTEGER DEFAULT 0").run(); } catch(e) {}
+try { db.prepare("ALTER TABLE school_smtp_configs ADD COLUMN email_provider TEXT DEFAULT 'smtp'").run(); } catch(e) {}
+try { db.prepare("ALTER TABLE school_smtp_configs ADD COLUMN brevo_api_key TEXT DEFAULT ''").run(); } catch(e) {}
 
 // Robust Data Persistence Layer (Checkpoint System)
 // In cloud environments like Cloud Run, the local filesystem is ephemeral.
@@ -2525,6 +2527,69 @@ db.exec(`
     FOREIGN KEY(school_id) REFERENCES school_info(id) ON DELETE CASCADE
   );
 
+  CREATE TABLE IF NOT EXISTS whatsapp_configs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    school_id INTEGER NOT NULL UNIQUE,
+    custom_whatsapp_enabled INTEGER DEFAULT 0,
+    provider TEXT DEFAULT 'simulation', -- 'simulation', 'twilio_whatsapp', 'meta_cloud_api', 'custom_webhook'
+    is_active INTEGER DEFAULT 1,
+    account_sid TEXT DEFAULT '',
+    auth_token TEXT DEFAULT '',
+    phone_number_id TEXT DEFAULT '',
+    sender_number TEXT DEFAULT '',
+    api_url TEXT DEFAULT '',
+    api_key TEXT DEFAULT '',
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(school_id) REFERENCES school_info(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS messaging_automation_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    school_id INTEGER NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    category TEXT DEFAULT 'general', -- 'vie_scolaire', 'finances', 'pedagogie', 'admissions', 'bibliotheque', 'general'
+    trigger_type TEXT DEFAULT 'event', -- 'event' | 'scheduled'
+    trigger_event TEXT DEFAULT '',
+    is_active INTEGER DEFAULT 0,
+    channel_sms INTEGER DEFAULT 1,
+    channel_email INTEGER DEFAULT 1,
+    channel_whatsapp INTEGER DEFAULT 1,
+    subject_template TEXT DEFAULT '',
+    message_template TEXT NOT NULL,
+    schedule_frequency TEXT DEFAULT 'daily', -- 'hourly' | 'daily' | 'weekly' | 'monthly'
+    schedule_time TEXT DEFAULT '08:00',
+    days_offset INTEGER DEFAULT 3,
+    is_custom INTEGER DEFAULT 0,
+    last_run_at TEXT,
+    total_sent INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(school_id, code),
+    FOREIGN KEY(school_id) REFERENCES school_info(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS messaging_automation_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    school_id INTEGER NOT NULL,
+    rule_id INTEGER,
+    rule_code TEXT DEFAULT '',
+    rule_name TEXT DEFAULT '',
+    channel TEXT NOT NULL, -- 'sms' | 'email' | 'whatsapp'
+    recipient_name TEXT DEFAULT '',
+    recipient_contact TEXT DEFAULT '',
+    subject TEXT DEFAULT '',
+    message_preview TEXT NOT NULL,
+    status TEXT DEFAULT 'sent', -- 'sent' | 'delivered' | 'simulated' | 'failed'
+    provider TEXT DEFAULT 'simulation',
+    error_message TEXT DEFAULT '',
+    entity_ref TEXT DEFAULT '',
+    execution_mode TEXT DEFAULT 'auto', -- 'auto' | 'manual' | 'test'
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(school_id) REFERENCES school_info(id) ON DELETE CASCADE
+  );
+
   CREATE TABLE IF NOT EXISTS backup_configurations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     school_id INTEGER NOT NULL UNIQUE,
@@ -3427,7 +3492,21 @@ function isValidSmtpHost(host: string): boolean {
   return hostPattern.test(trimmed) || ipPattern.test(trimmed);
 }
 
+function parseEmailSender(fromHeader: string, fallbackUser: string) {
+  const raw = (fromHeader || '').trim();
+  const match = raw.match(/^\s*"?([^"<]+?)"?\s*<([^>]+)>\s*$/);
+  if (match) {
+    return { name: match[1].trim() || 'MégafixaEduc Pro', email: match[2].trim() };
+  }
+  if (raw.includes('@')) {
+    return { name: 'MégafixaEduc Pro', email: raw.replace(/[<>"]/g, '').trim() };
+  }
+  return { name: 'MégafixaEduc Pro', email: (fallbackUser || 'noreply@megafixaeduc.com').trim() };
+}
+
 async function getSmtpConfig(schoolId?: number) {
+  let dbProvider = '';
+  let dbBrevoApiKey = '';
   let dbHost = '';
   let dbPort = '';
   let dbUser = '';
@@ -3436,17 +3515,21 @@ async function getSmtpConfig(schoolId?: number) {
   let dbFrom = '';
   let isCustom = false;
 
-  // 1. If schoolId is provided, check if that school has custom SMTP enabled and configured
+  // 1. If schoolId is provided, check if that school has custom SMTP / Brevo API enabled and configured
   if (schoolId) {
     try {
       const schoolSmtp = db.prepare("SELECT * FROM school_smtp_configs WHERE school_id = ?").get(schoolId) as any;
-      if (schoolSmtp && schoolSmtp.custom_smtp_enabled === 1 && schoolSmtp.smtp_host && schoolSmtp.smtp_user) {
-        dbHost = schoolSmtp.smtp_host;
-        dbPort = schoolSmtp.smtp_port;
-        dbUser = schoolSmtp.smtp_user;
-        dbPass = schoolSmtp.smtp_pass;
-        dbSecure = schoolSmtp.smtp_secure;
-        dbFrom = schoolSmtp.email_from;
+      const hasCustomBrevo = schoolSmtp && schoolSmtp.custom_smtp_enabled === 1 && schoolSmtp.email_provider === 'brevo_api' && schoolSmtp.brevo_api_key;
+      const hasCustomSmtp = schoolSmtp && schoolSmtp.custom_smtp_enabled === 1 && schoolSmtp.smtp_host && schoolSmtp.smtp_user;
+      if (hasCustomBrevo || hasCustomSmtp) {
+        dbProvider = schoolSmtp.email_provider || 'smtp';
+        dbBrevoApiKey = schoolSmtp.brevo_api_key || '';
+        dbHost = schoolSmtp.smtp_host || '';
+        dbPort = schoolSmtp.smtp_port || '587';
+        dbUser = schoolSmtp.smtp_user || '';
+        dbPass = schoolSmtp.smtp_pass || '';
+        dbSecure = schoolSmtp.smtp_secure || 'false';
+        dbFrom = schoolSmtp.email_from || '';
         isCustom = true;
       }
     } catch (err) {}
@@ -3455,8 +3538,13 @@ async function getSmtpConfig(schoolId?: number) {
   // 2. Fallback to platform global super_admin_settings if not custom
   if (!isCustom) {
     try {
-      const rows = db.prepare("SELECT key, value FROM super_admin_settings WHERE key IN ('smtp_host', 'smtp_port', 'smtp_user', 'smtp_pass', 'smtp_secure', 'email_from')").all() as any[];
+      const rows = db.prepare(`
+        SELECT key, value FROM super_admin_settings
+        WHERE key IN ('email_provider', 'brevo_api_key', 'smtp_host', 'smtp_port', 'smtp_user', 'smtp_pass', 'smtp_secure', 'email_from')
+      `).all() as any[];
       for (const r of rows) {
+        if (r.key === 'email_provider' && r.value) dbProvider = r.value;
+        if (r.key === 'brevo_api_key' && r.value) dbBrevoApiKey = r.value;
         if (r.key === 'smtp_host' && r.value) dbHost = r.value;
         if (r.key === 'smtp_port' && r.value) dbPort = r.value;
         if (r.key === 'smtp_user' && r.value) dbUser = r.value;
@@ -3473,8 +3561,10 @@ async function getSmtpConfig(schoolId?: number) {
   const user = (dbUser || process.env.SMTP_USER || 'megafixaservices01@gmail.com').trim();
   const pass = (dbPass || process.env.SMTP_PASS || 'abeyjblqzjjybsif').trim();
   const from = (dbFrom || process.env.EMAIL_FROM || `"MégafixaEduc Pro" <${user}>`).trim();
+  const brevoApiKey = (dbBrevoApiKey || process.env.BREVO_API_KEY || '').trim();
+  const provider = (dbProvider || (host === 'api.brevo.com' ? 'brevo_api' : 'smtp')).trim();
 
-  return { host, port, secure, user, pass, from, isCustom };
+  return { provider, brevoApiKey, host, port, secure, user, pass, from, isCustom };
 }
 
 async function getGlobalSmsConfig() {
@@ -3482,18 +3572,24 @@ async function getGlobalSmsConfig() {
   let apiKey = '';
   let authToken = '';
   let senderId = 'MEGAFIXA';
+  let brevoApiKey = (process.env.BREVO_API_KEY || '').trim();
 
   try {
-    const rows = db.prepare("SELECT key, value FROM super_admin_settings WHERE key IN ('sms_provider', 'sms_api_key', 'sms_auth_token', 'sms_sender_id')").all() as any[];
+    const rows = db.prepare("SELECT key, value FROM super_admin_settings WHERE key IN ('sms_provider', 'sms_api_key', 'sms_auth_token', 'sms_sender_id', 'brevo_api_key')").all() as any[];
     for (const r of rows) {
       if (r.key === 'sms_provider' && r.value) provider = r.value;
       if (r.key === 'sms_api_key' && r.value) apiKey = r.value;
       if (r.key === 'sms_auth_token' && r.value) authToken = r.value;
       if (r.key === 'sms_sender_id' && r.value) senderId = r.value;
+      if (r.key === 'brevo_api_key' && r.value) brevoApiKey = r.value;
     }
   } catch (err) {}
-  
-  return { provider, apiKey, authToken, senderId };
+
+  if (provider === 'brevo' && !apiKey && brevoApiKey) {
+    apiKey = brevoApiKey;
+  }
+
+  return { provider, apiKey, authToken, senderId, brevoApiKey };
 }
 
 async function createMailTransporter(schoolId?: number) {
@@ -3544,18 +3640,114 @@ interface SendEmailResult {
   error?: string;
 }
 
-async function sendWhatsAppSimulation(options: { to: string, message: string, reference?: string }) {
-  const { to, message, reference } = options;
-  const config = await getGlobalSmsConfig();
-  const cleanPhone = to.replace(/[^0-9+]/g, '');
-  
-  if (config.provider === 'twilio' && config.apiKey && config.authToken) {
+async function getWhatsAppConfig(schoolId?: number) {
+  let provider = 'simulation';
+  let isActive = 1;
+  let accountSid = '';
+  let authToken = '';
+  let phoneNumberId = '';
+  let senderNumber = '';
+  let apiUrl = '';
+  let apiKey = '';
+  let isCustom = false;
+
+  if (schoolId) {
     try {
-      const auth = Buffer.from(`${config.apiKey}:${config.authToken}`).toString('base64');
-      const twilioUrl = `https://api.twilio.com/2010-04-01/Accounts/${config.apiKey}/Messages.json`;
+      const schoolWa = db.prepare("SELECT * FROM whatsapp_configs WHERE school_id = ?").get(schoolId) as any;
+      if (schoolWa && schoolWa.custom_whatsapp_enabled === 1) {
+        provider = schoolWa.provider || 'simulation';
+        isActive = schoolWa.is_active !== 0 ? 1 : 0;
+        accountSid = schoolWa.account_sid || '';
+        authToken = schoolWa.auth_token || '';
+        phoneNumberId = schoolWa.phone_number_id || '';
+        senderNumber = schoolWa.sender_number || '';
+        apiUrl = schoolWa.api_url || '';
+        apiKey = schoolWa.api_key || '';
+        isCustom = true;
+      }
+    } catch (e) {}
+  }
+
+  if (!isCustom) {
+    try {
+      const rows = db.prepare(`
+        SELECT key, value FROM super_admin_settings
+        WHERE key IN (
+          'whatsapp_provider', 'whatsapp_account_sid', 'whatsapp_auth_token',
+          'whatsapp_phone_number_id', 'whatsapp_sender_number', 'whatsapp_api_url', 'whatsapp_api_key',
+          'brevo_api_key'
+        )
+      `).all() as any[];
+      const map: Record<string, string> = {};
+      for (const r of rows) {
+        if (r.value) map[r.key] = r.value;
+      }
+      if (map.whatsapp_provider && map.whatsapp_provider !== 'simulation') {
+        provider = map.whatsapp_provider;
+        accountSid = map.whatsapp_account_sid || '';
+        authToken = map.whatsapp_auth_token || '';
+        phoneNumberId = map.whatsapp_phone_number_id || '';
+        senderNumber = map.whatsapp_sender_number || '';
+        apiUrl = map.whatsapp_api_url || '';
+        apiKey = map.whatsapp_api_key || (provider === 'brevo_whatsapp' ? (map.brevo_api_key || process.env.BREVO_API_KEY || '') : '');
+      } else {
+        const globalSms = await getGlobalSmsConfig();
+        if (globalSms.provider === 'twilio' && globalSms.apiKey && globalSms.authToken) {
+          provider = 'twilio_whatsapp';
+          accountSid = globalSms.apiKey;
+          authToken = globalSms.authToken;
+          senderNumber = map.whatsapp_sender_number || globalSms.senderId || '';
+        }
+      }
+    } catch (e) {}
+  }
+
+  return {
+    provider,
+    isActive,
+    accountSid,
+    authToken,
+    phoneNumberId,
+    senderNumber,
+    apiUrl,
+    apiKey,
+    isCustom
+  };
+}
+
+async function sendWhatsAppService(options: {
+  to: string;
+  message: string;
+  schoolId?: number;
+  recipientName?: string;
+  reference?: string;
+}): Promise<{ success: boolean; simulated: boolean; status: string; provider: string; isCustom?: boolean; error?: string }> {
+  const { to, message, schoolId, reference } = options;
+  const cleanPhone = (to || '').replace(/[^0-9+]/g, '');
+  if (!cleanPhone || cleanPhone.replace(/[^0-9]/g, '').length < 8) {
+    return { success: false, simulated: false, status: 'failed', provider: 'none', error: 'Numéro WhatsApp invalide' };
+  }
+
+  const formattedPhone = cleanPhone.startsWith('+') ? cleanPhone : `+${cleanPhone}`;
+  const digitsOnly = formattedPhone.replace(/[^0-9]/g, '');
+  const cfg = await getWhatsAppConfig(schoolId);
+
+  if (cfg.isActive === 0) {
+    return { success: false, simulated: false, status: 'failed', provider: cfg.provider, isCustom: cfg.isCustom, error: 'Passerelle WhatsApp désactivée' };
+  }
+
+  if (cfg.provider === 'twilio_whatsapp' && cfg.accountSid && cfg.authToken && cfg.senderNumber) {
+    try {
+      const auth = Buffer.from(`${cfg.accountSid}:${cfg.authToken}`).toString('base64');
+      const twilioUrl = `https://api.twilio.com/2010-04-01/Accounts/${cfg.accountSid}/Messages.json`;
+      const fromWa = cfg.senderNumber.startsWith('whatsapp:')
+        ? cfg.senderNumber
+        : `whatsapp:${cfg.senderNumber.startsWith('+') ? cfg.senderNumber : `+${cfg.senderNumber}`}`;
+      const toWa = `whatsapp:${formattedPhone}`;
+
       const params = new URLSearchParams();
-      params.append('To', cleanPhone.startsWith('+') ? cleanPhone : `+${cleanPhone}`);
-      params.append('From', config.senderId || 'MEGAFIXA');
+      params.append('To', toWa);
+      params.append('From', fromWa);
       params.append('Body', message);
 
       const twilioRes = await fetch(twilioUrl, {
@@ -3568,52 +3760,146 @@ async function sendWhatsAppSimulation(options: { to: string, message: string, re
       });
 
       if (twilioRes.ok) {
-        console.log(`[TWILIO SUCCESS] Global SMS/WA sent to ${cleanPhone}`);
-        return { success: true, simulated: false };
+        console.log(`[WHATSAPP TWILIO SUCCESS] Sent to ${toWa}`);
+        return { success: true, simulated: false, status: 'delivered', provider: 'twilio_whatsapp', isCustom: cfg.isCustom };
       } else {
-        const errData = await twilioRes.json();
-        console.error("Twilio Global error:", errData);
+        const errData = await twilioRes.json().catch(() => ({}));
+        console.error("Twilio WhatsApp error:", errData);
+        return { success: false, simulated: false, status: 'failed', provider: 'twilio_whatsapp', isCustom: cfg.isCustom, error: errData?.message || 'Erreur API Twilio WhatsApp' };
       }
     } catch (e: any) {
-      console.error("Twilio Global exception:", e);
+      console.error("Twilio WhatsApp exception:", e);
+      return { success: false, simulated: false, status: 'failed', provider: 'twilio_whatsapp', isCustom: cfg.isCustom, error: e.message };
+    }
+  }
+
+  if (cfg.provider === 'meta_cloud_api' && cfg.phoneNumberId && cfg.authToken) {
+    try {
+      const metaUrl = `https://graph.facebook.com/v19.0/${cfg.phoneNumberId}/messages`;
+      const metaRes = await fetch(metaUrl, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${cfg.authToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          messaging_product: 'whatsapp',
+          recipient_type: 'individual',
+          to: digitsOnly,
+          type: 'text',
+          text: { preview_url: false, body: message }
+        })
+      });
+
+      if (metaRes.ok) {
+        console.log(`[WHATSAPP META CLOUD SUCCESS] Sent to ${digitsOnly}`);
+        return { success: true, simulated: false, status: 'delivered', provider: 'meta_cloud_api', isCustom: cfg.isCustom };
+      } else {
+        const errData = await metaRes.json().catch(() => ({}));
+        console.error("Meta WhatsApp Cloud API error:", errData);
+        return { success: false, simulated: false, status: 'failed', provider: 'meta_cloud_api', isCustom: cfg.isCustom, error: errData?.error?.message || 'Erreur Meta WhatsApp Cloud API' };
+      }
+    } catch (e: any) {
+      console.error("Meta WhatsApp exception:", e);
+      return { success: false, simulated: false, status: 'failed', provider: 'meta_cloud_api', isCustom: cfg.isCustom, error: e.message };
+    }
+  }
+
+  if (cfg.provider === 'brevo_whatsapp') {
+    const brevoKey = (cfg.apiKey || cfg.authToken || process.env.BREVO_API_KEY || '').trim();
+    const senderDigits = (cfg.senderNumber || '').replace(/[^0-9]/g, '');
+    if (brevoKey && senderDigits) {
+      try {
+        const brevoRes = await fetch('https://api.brevo.com/v3/whatsapp/sendMessage', {
+          method: 'POST',
+          headers: {
+            'api-key': brevoKey,
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+          },
+          body: JSON.stringify({
+            senderNumber: senderDigits,
+            contactNumbers: [digitsOnly],
+            text: message
+          })
+        });
+
+        if (brevoRes.ok) {
+          console.log(`[WHATSAPP BREVO SUCCESS] Sent to ${digitsOnly}`);
+          return { success: true, simulated: false, status: 'delivered', provider: 'brevo_whatsapp', isCustom: cfg.isCustom };
+        } else {
+          const errData = await brevoRes.json().catch(() => ({}));
+          console.error("Brevo WhatsApp API error:", errData);
+          return {
+            success: false,
+            simulated: false,
+            status: 'failed',
+            provider: 'brevo_whatsapp',
+            isCustom: cfg.isCustom,
+            error: errData?.message || 'Erreur API Brevo WhatsApp'
+          };
+        }
+      } catch (e: any) {
+        console.error("Brevo WhatsApp exception:", e);
+        return { success: false, simulated: false, status: 'failed', provider: 'brevo_whatsapp', isCustom: cfg.isCustom, error: e.message };
+      }
+    }
+  }
+
+  if (cfg.provider === 'custom_webhook' && cfg.apiUrl) {
+    try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (cfg.apiKey) headers['Authorization'] = `Bearer ${cfg.apiKey}`;
+      const res = await fetch(cfg.apiUrl, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          channel: 'whatsapp',
+          to: formattedPhone,
+          recipientName: options.recipientName || '',
+          message,
+          sender: cfg.senderNumber || 'MEGAFIXA'
+        })
+      });
+      if (res.ok) {
+        return { success: true, simulated: false, status: 'delivered', provider: 'custom_webhook', isCustom: cfg.isCustom };
+      }
+      return { success: false, simulated: false, status: 'failed', provider: 'custom_webhook', isCustom: cfg.isCustom, error: `HTTP ${res.status}` };
+    } catch (e: any) {
+      return { success: false, simulated: false, status: 'failed', provider: 'custom_webhook', isCustom: cfg.isCustom, error: e.message };
     }
   }
 
   console.log(`
   --------------------------------------------------
-  [SMS/WHATSAPP SIMULATION]
-  To: ${cleanPhone}
+  [WHATSAPP SIMULATION] (${cfg.isCustom ? 'ECOLE CUSTOM' : 'PLATEFORME GLOBALE'})
+  To: ${formattedPhone}
   Reference: ${reference || 'N/A'}
   Message: ${message}
   --------------------------------------------------
   `);
-  
-  return { success: true, simulated: true };
+  return { success: true, simulated: true, status: 'simulated', provider: 'simulation', isCustom: cfg.isCustom };
+}
+
+async function sendWhatsAppSimulation(options: { to: string, message: string, reference?: string, schoolId?: number }) {
+  const result = await sendWhatsAppService({
+    to: options.to,
+    message: options.message,
+    reference: options.reference,
+    schoolId: options.schoolId
+  });
+  return { success: result.success, simulated: result.simulated };
 }
 
 async function sendMailWithFallback(options: SendEmailOptions): Promise<SendEmailResult> {
   const { to, subject, text, html, otp, schoolId, attachments } = options;
-  const recipientStr = Array.isArray(to) ? to.join(", ") : to;
+  const recipientArray = (Array.isArray(to) ? to : String(to || '').split(','))
+    .map(e => e.trim())
+    .filter(Boolean);
+  const recipientStr = recipientArray.join(", ");
 
   try {
     const cfg = await getSmtpConfig(schoolId);
-    const transporter = await createMailTransporter(schoolId);
-
-    if (!transporter) {
-      console.log(`
-      --------------------------------------------------
-      [EMAIL SIMULATION - NO VALID SMTP CREDENTIALS]
-      Mode: ${cfg.isCustom ? 'ECOLE CUSTOM' : 'PLATEFORME GLOBALE'}
-      To: ${recipientStr}
-      Subject: ${subject}
-      ${otp ? `OTP Code: ${otp}` : ''}
-      Attachments: ${attachments?.length || 0} file(s)
-      Message: ${text}
-      --------------------------------------------------
-      `);
-      return { success: true, simulated: true, isCustom: cfg.isCustom };
-    }
-
     const formattedHtml = html || `
       <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 16px;">
         <div style="border-bottom: 2px solid #10b981; padding-bottom: 12px; margin-bottom: 20px;">
@@ -3635,6 +3921,70 @@ async function sendMailWithFallback(options: SendEmailOptions): Promise<SendEmai
         </div>
       </div>
     `;
+
+    // Option A: Brevo Transactional Email HTTP API v3
+    if (cfg.provider === 'brevo_api' || cfg.host === 'api.brevo.com') {
+      if (!cfg.brevoApiKey) {
+        return { success: false, simulated: true, isCustom: cfg.isCustom, error: "Clé API Brevo manquante (ex: xkeysib-...)." };
+      }
+
+      const senderObj = parseEmailSender(cfg.from, cfg.user);
+      const brevoPayload: any = {
+        sender: senderObj,
+        to: recipientArray.map(email => ({ email })),
+        subject,
+        htmlContent: formattedHtml,
+        textContent: text
+      };
+
+      if (attachments && attachments.length > 0) {
+        brevoPayload.attachment = attachments.map(att => ({
+          name: att.filename,
+          content: Buffer.isBuffer(att.content)
+            ? att.content.toString('base64')
+            : Buffer.from(String(att.content)).toString('base64')
+        }));
+      }
+
+      const brevoRes = await fetch('https://api.brevo.com/v3/smtp/email', {
+        method: 'POST',
+        headers: {
+          'api-key': cfg.brevoApiKey,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify(brevoPayload)
+      });
+
+      if (brevoRes.ok) {
+        const resJson = await brevoRes.json().catch(() => ({}));
+        console.log(`[BREVO EMAIL SUCCESS] Sent to ${recipientStr} (MessageId: ${resJson?.messageId || 'ok'}) [Mode: ${cfg.isCustom ? 'Custom' : 'Platform'}]`);
+        return { success: true, simulated: false, isCustom: cfg.isCustom };
+      } else {
+        const errData = await brevoRes.json().catch(() => ({}));
+        const errMsg = errData?.message || `Erreur API Brevo Email (HTTP ${brevoRes.status})`;
+        console.warn(`[BREVO EMAIL ERROR] ${errMsg}`);
+        return { success: false, simulated: false, isCustom: cfg.isCustom, error: errMsg };
+      }
+    }
+
+    // Option B: Standard SMTP (supports Gmail, Brevo SMTP Relay smtp-relay.brevo.com, custom SMTP)
+    const transporter = await createMailTransporter(schoolId);
+
+    if (!transporter) {
+      console.log(`
+      --------------------------------------------------
+      [EMAIL SIMULATION - NO VALID SMTP CREDENTIALS]
+      Mode: ${cfg.isCustom ? 'ECOLE CUSTOM' : 'PLATEFORME GLOBALE'}
+      To: ${recipientStr}
+      Subject: ${subject}
+      ${otp ? `OTP Code: ${otp}` : ''}
+      Attachments: ${attachments?.length || 0} file(s)
+      Message: ${text}
+      --------------------------------------------------
+      `);
+      return { success: true, simulated: true, isCustom: cfg.isCustom };
+    }
 
     const info = await transporter.sendMail({
       from: cfg.from,
@@ -4918,6 +5268,38 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
         SET status = ?, details_decision = ?, date_entretien = ?, date_examen = ?, note_examen = ?
         WHERE id = ? AND school_id = ?
       `).run(status, details_decision, date_entretien, date_examen, note_examen, id, req.schoolId);
+
+      // Automation event hook for recruitment decision
+      try {
+        const cand = db.prepare("SELECT * FROM recrutement_candidatures WHERE id = ? AND school_id = ?").get(id, req.schoolId) as any;
+        if (cand && (cand.telephone || cand.email)) {
+          const statusLabels: Record<string, string> = {
+            entretien: 'Convoqué en entretien',
+            examen: 'Convoqué à un test / examen',
+            accepte: 'Retenu(e)',
+            embauche: 'Embauché(e)',
+            rejete: 'Non retenu(e)'
+          };
+          triggerAutomationEvent(req.schoolId, 'enrollment_decision', [{
+            recipient: {
+              name: `${cand.prenom || ''} ${cand.nom || ''}`.trim() || 'Candidat',
+              phone: cand.telephone || '',
+              whatsapp: cand.telephone || '',
+              email: cand.email || ''
+            },
+            variables: {
+              nom_eleve: `${cand.prenom || ''} ${cand.nom || ''}`.trim(),
+              nom_parent: `${cand.prenom || ''} ${cand.nom || ''}`.trim(),
+              statut: statusLabels[status] || status,
+              motif: details_decision || (date_entretien ? `Entretien prévu le ${date_entretien}` : 'Consultez votre suivi.'),
+              date: date_entretien || date_examen || new Date().toLocaleDateString('fr-FR'),
+              classe: cand.poste_vise || 'Recrutement'
+            },
+            entityRef: `recrutement:${id}:${status}`
+          }]).catch(() => {});
+        }
+      } catch (autoErr) {}
+
       res.json({ success: true });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -5758,6 +6140,43 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
         SET status = ?, details_decision = ?
         WHERE id = ? AND school_id = ?
       `).run(status, details_decision, id, req.schoolId);
+
+      // Automation event hook for enrollment decision
+      try {
+        const demande = db.prepare(`
+          SELECT d.*, c.nom as classe_nom
+          FROM inscription_demandes d
+          LEFT JOIN classes c ON d.classe_demandee_id = c.id
+          WHERE d.id = ? AND d.school_id = ?
+        `).get(id, req.schoolId) as any;
+        if (demande && (demande.tel_parent || demande.email_parent)) {
+          const statusLabels: Record<string, string> = {
+            accepte: 'Acceptée',
+            valide: 'Validée',
+            en_attente: 'En attente de traitement',
+            rejete: 'Refusée',
+            refuse: 'Refusée'
+          };
+          triggerAutomationEvent(req.schoolId, 'enrollment_decision', [{
+            recipient: {
+              name: demande.nom_parent || 'Parent',
+              phone: demande.tel_parent || '',
+              whatsapp: demande.tel_parent || '',
+              email: demande.email_parent || ''
+            },
+            variables: {
+              nom_eleve: `${demande.prenom_enfant || ''} ${demande.nom_enfant || ''}`.trim(),
+              nom_parent: demande.nom_parent || 'Parent',
+              classe: demande.classe_nom || 'N/A',
+              statut: statusLabels[status] || status,
+              motif: details_decision || 'Veuillez contacter le secrétariat pour plus de précisions.',
+              date: new Date().toLocaleDateString('fr-FR')
+            },
+            entityRef: `inscription:${id}:${status}`
+          }]).catch(() => {});
+        }
+      } catch (autoErr) {}
+
       res.json({ success: true });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -12639,6 +13058,64 @@ function executeYearTransition(
 
       const count = saveTransaction(records);
       logActivity(req.userId, 'UPDATE_SUIVI', 'CLASSE', parseInt(classe_id), { date_suivi, count }, req.schoolId);
+
+      // Automation event hooks for student absences & lateness
+      try {
+        const absentItems: any[] = [];
+        const lateItems: any[] = [];
+        const clsRow = db.prepare("SELECT nom FROM classes WHERE id = ?").get(classe_id) as any;
+        for (const item of records) {
+          if (!item || !item.eleve_id) continue;
+          if (item.statut === 'absent' && !item.justifie) {
+            const st = db.prepare("SELECT id, nom, prenom, nom_parent, tel_parent, email_parent FROM eleves WHERE id = ? AND school_id = ?").get(item.eleve_id, req.schoolId) as any;
+            if (st && (st.tel_parent || st.email_parent)) {
+              absentItems.push({
+                recipient: {
+                  name: st.nom_parent || 'Parent',
+                  phone: st.tel_parent || '',
+                  whatsapp: st.tel_parent || '',
+                  email: st.email_parent || ''
+                },
+                variables: {
+                  nom_eleve: `${st.prenom || ''} ${st.nom || ''}`.trim(),
+                  nom_parent: st.nom_parent || 'Parent',
+                  classe: clsRow?.nom || '',
+                  date: date_suivi,
+                  motif: item.motif || 'Absence non justifiée'
+                },
+                entityRef: `absent:${st.id}:${date_suivi}`
+              });
+            }
+          } else if (item.statut === 'retard') {
+            const st = db.prepare("SELECT id, nom, prenom, nom_parent, tel_parent, email_parent FROM eleves WHERE id = ? AND school_id = ?").get(item.eleve_id, req.schoolId) as any;
+            if (st && (st.tel_parent || st.email_parent)) {
+              lateItems.push({
+                recipient: {
+                  name: st.nom_parent || 'Parent',
+                  phone: st.tel_parent || '',
+                  whatsapp: st.tel_parent || '',
+                  email: st.email_parent || ''
+                },
+                variables: {
+                  nom_eleve: `${st.prenom || ''} ${st.nom || ''}`.trim(),
+                  nom_parent: st.nom_parent || 'Parent',
+                  classe: clsRow?.nom || '',
+                  date: date_suivi,
+                  motif: item.motif || 'Retard constaté à l\'appel'
+                },
+                entityRef: `retard:${st.id}:${date_suivi}`
+              });
+            }
+          }
+        }
+        if (absentItems.length > 0) {
+          triggerAutomationEvent(req.schoolId, 'student_absent', absentItems).catch(() => {});
+        }
+        if (lateItems.length > 0) {
+          triggerAutomationEvent(req.schoolId, 'student_late', lateItems).catch(() => {});
+        }
+      } catch (autoErr) {}
+
       res.json({ success: true, count, message: "Suivi des présences enregistré avec succès." });
     } catch (error: any) {
       console.error("Error saving suivi_eleves:", error);
@@ -20066,25 +20543,7 @@ function executeYearTransition(
     }
   });
 
-  app.post("/api/super-admin/test-sms", authenticateToken, requireSuperAdmin, async (req: any, res) => {
-    try {
-      const { phone } = req.body;
-      if (!phone) return res.status(400).json({ error: "Numéro de téléphone requis." });
-      
-      const result = await sendWhatsAppSimulation({
-        to: phone,
-        message: "Test de configuration SMS / WhatsApp - MégafixaEduc Pro. Si vous recevez ce message, votre passerelle est opérationnelle."
-      });
-      
-      if (result.simulated) {
-        res.json({ success: true, simulated: true, message: "Envoi simulé dans la console (aucune passerelle réelle configurée)." });
-      } else {
-        res.json({ success: true, simulated: false, message: "SMS de test envoyé avec succès via votre passerelle !" });
-      }
-    } catch (err: any) {
-      res.status(500).json({ success: false, error: err.message });
-    }
-  });
+  // (Unified /api/super-admin/test-sms handler is defined in the Super Admin Messaging section below)
 
   // Mobile Money: Initiate payment transaction
   app.post("/api/payments/mobile-money/initiate", async (req, res) => {
@@ -23498,27 +23957,71 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         isCustom = true;
       } else {
         // 2. Fallback to platform global SMS settings if school has no custom credentials
-        if (globalConfig.provider && globalConfig.provider !== 'simulation' && (globalConfig.apiKey || globalConfig.authToken)) {
+        if (globalConfig.provider && globalConfig.provider !== 'simulation' && (globalConfig.apiKey || globalConfig.authToken || globalConfig.brevoApiKey)) {
           provider = globalConfig.provider;
           senderNumberOrName = globalConfig.senderId || 'MEGAFIXA';
           accountSid = globalConfig.apiKey;
           authToken = globalConfig.authToken;
-          apiKey = globalConfig.apiKey;
+          apiKey = globalConfig.apiKey || globalConfig.brevoApiKey;
         } else {
           provider = config?.provider || 'simulation';
           senderNumberOrName = config?.sender_number_or_name || globalConfig.senderId || 'MEGAFIXA';
+          accountSid = config?.account_sid || '';
+          authToken = config?.auth_token || '';
+          apiKey = config?.api_key || '';
+          apiUrl = config?.api_url || '';
         }
       }
-      
+
       // Clean phone number (strip spaces, symbols)
       const cleanPhone = recipientPhone.replace(/[^0-9+]/g, '');
       const formattedPhone = cleanPhone.startsWith('+') ? cleanPhone : `+${cleanPhone}`;
       const smsCount = Math.max(1, Math.ceil(messageText.length / 160));
       let status = 'sent';
+      let errorDetail = '';
       let costEstimate = smsCount * 25; // 25 FCFA approx par SMS
 
       if (isCustom && config?.is_active === 0) {
         status = 'failed';
+        errorDetail = 'Passerelle SMS désactivée.';
+      } else if (provider === 'brevo') {
+        const brevoKey = (apiKey || authToken || globalConfig.brevoApiKey || process.env.BREVO_API_KEY || '').trim();
+        if (!brevoKey) {
+          status = 'failed';
+          errorDetail = 'Clé API Brevo manquante.';
+        } else {
+          try {
+            const cleanSender = (senderNumberOrName || 'MEGAFIXA').replace(/[^a-zA-Z0-9]/g, '').slice(0, 11) || 'MEGAFIXA';
+            const brevoRes = await fetch('https://api.brevo.com/v3/transactionalSMS/sms', {
+              method: 'POST',
+              headers: {
+                'api-key': brevoKey,
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+              },
+              body: JSON.stringify({
+                sender: cleanSender,
+                recipient: formattedPhone,
+                content: messageText,
+                type: 'transactional'
+              })
+            });
+
+            if (brevoRes.ok) {
+              status = 'delivered';
+              console.log(`[SMS BREVO SUCCESS] Sent to ${formattedPhone}`);
+            } else {
+              const errData = await brevoRes.json().catch(() => ({}));
+              console.error("Brevo SMS error:", errData);
+              status = 'failed';
+              errorDetail = errData?.message || `Erreur API Brevo SMS (HTTP ${brevoRes.status})`;
+            }
+          } catch (e: any) {
+            console.error("Brevo SMS exception:", e);
+            status = 'failed';
+            errorDetail = e.message;
+          }
+        }
       } else if (provider === 'twilio' && accountSid && authToken) {
         // Twilio integration
         try {
@@ -23541,13 +24044,15 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
           if (twilioRes.ok) {
             status = 'delivered';
           } else {
-            const errData = await twilioRes.json();
+            const errData = await twilioRes.json().catch(() => ({}));
             console.error("Twilio SMS error:", errData);
             status = 'failed';
+            errorDetail = errData?.message || 'Erreur API Twilio SMS';
           }
         } catch (e: any) {
           console.error("Twilio SMS exception:", e);
           status = 'failed';
+          errorDetail = e.message;
         }
       } else if (provider === 'custom_gateway' && apiUrl) {
         // Custom local HTTP SMS-Gateway integration
@@ -23564,9 +24069,11 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
             })
           });
           status = res.ok ? 'delivered' : 'failed';
+          if (!res.ok) errorDetail = `HTTP ${res.status}`;
         } catch (e: any) {
           console.error("Custom Gateway error:", e);
           status = 'failed';
+          errorDetail = e.message;
         }
       } else {
         // High-fidelity instant simulation with gateway log
@@ -23587,7 +24094,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(schoolId, senderId, cleanPhone, recipientName || 'Destinataire', recipientType || 'autre', messageText, status, provider, smsCount, costEstimate, anneeId);
 
-      return { success: status !== 'failed', status, provider, cleanPhone };
+      return { success: status !== 'failed', status, provider, cleanPhone, error: errorDetail || undefined };
     } catch (err: any) {
       console.error("SMS Dispatch error:", err);
       return { success: false, error: err.message };
@@ -24039,11 +24546,55 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         }
       }
 
+      // 5. Handle WhatsApp dispatch if requested
+      let whatsappResultSummary = { sent: 0, failed: 0, recipients: [] as string[] };
+      if (req.body.send_whatsapp) {
+        let waTargets: { name: string; phone: string }[] = [];
+        if (recipient_type === 'user' && recipient_id) {
+          const userTarget = db.prepare("SELECT nom, telephone FROM utilisateurs WHERE id = ?").get(recipient_id) as any;
+          if (userTarget?.telephone) waTargets.push({ name: userTarget.nom, phone: userTarget.telephone });
+        } else if (recipient_type === 'all_teachers') {
+          const teachers = db.prepare("SELECT nom, telephone FROM enseignants WHERE school_id = ? AND telephone IS NOT NULL").all(schoolId) as any[];
+          for (const t of teachers) if (t.telephone) waTargets.push({ name: t.nom, phone: t.telephone });
+        } else if (recipient_type === 'class_parents' && classe_id) {
+          const classParents = db.prepare("SELECT nom_parent as nom, tel_parent as phone FROM eleves WHERE classe_id = ? AND school_id = ? AND tel_parent IS NOT NULL").all(classe_id, schoolId) as any[];
+          for (const p of classParents) if (p.phone) waTargets.push({ name: p.nom || 'Parent', phone: p.phone });
+        } else if (recipient_type === 'all_parents') {
+          const allParents = db.prepare("SELECT DISTINCT nom_parent as nom, tel_parent as phone FROM eleves WHERE school_id = ? AND tel_parent IS NOT NULL").all(schoolId) as any[];
+          for (const p of allParents) if (p.phone) waTargets.push({ name: p.nom || 'Parent', phone: p.phone });
+        } else if (Array.isArray(parent_phones) && parent_phones.length > 0) {
+          for (const p of parent_phones) if (p && p.phone) waTargets.push({ name: p.name || 'Destinataire', phone: p.phone });
+        }
+
+        const uniqueWaMap = new Map<string, { name: string; phone: string }>();
+        for (const t of waTargets) {
+          const clean = t.phone.replace(/[^0-9]/g, '');
+          if (clean.length >= 8 && !uniqueWaMap.has(clean)) uniqueWaMap.set(clean, t);
+        }
+
+        const waText = subject ? `*${subject}*\n\n${content}` : (content || '');
+        for (const [, item] of uniqueWaMap) {
+          const waRes = await sendWhatsAppService({
+            to: item.phone,
+            message: waText,
+            schoolId,
+            recipientName: item.name
+          });
+          if (waRes.success) {
+            whatsappResultSummary.sent++;
+            whatsappResultSummary.recipients.push(item.phone);
+          } else {
+            whatsappResultSummary.failed++;
+          }
+        }
+      }
+
       res.json({
         success: true,
         messageId,
         smsResult: send_sms ? smsResultSummary : null,
-        emailResult: req.body.send_email ? emailResultSummary : null
+        emailResult: req.body.send_email ? emailResultSummary : null,
+        whatsappResult: req.body.send_whatsapp ? whatsappResultSummary : null
       });
     } catch (err: any) {
       console.error("Send message error:", err);
@@ -24336,6 +24887,1011 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       res.json({ success: true, message: "Configuration SMS enregistrée avec succès." });
     } catch (err: any) {
       console.error("Update SMS config error:", err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ==========================================
+  // WHATSAPP CONFIGURATION & AUTOMATION ENGINE (SMS / EMAIL / WHATSAPP)
+  // ==========================================
+
+  app.get("/api/whatsapp/config", authenticateToken, async (req: any, res) => {
+    try {
+      const schoolId = req.schoolId || 1;
+      let config = db.prepare("SELECT * FROM whatsapp_configs WHERE school_id = ?").get(schoolId) as any;
+      if (!config) {
+        db.prepare("INSERT INTO whatsapp_configs (school_id, provider, is_active) VALUES (?, 'simulation', 1)").run(schoolId);
+        config = db.prepare("SELECT * FROM whatsapp_configs WHERE school_id = ?").get(schoolId);
+      }
+      const globalDefaults = await getWhatsAppConfig(undefined);
+      res.json({
+        ...config,
+        global_provider: globalDefaults.provider,
+        global_sender_number: globalDefaults.senderNumber
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.put("/api/whatsapp/config", authenticateToken, (req: any, res) => {
+    try {
+      if (!isUserAdminOrFonde(req.user?.role)) {
+        return res.status(403).json({ error: "Accès réservé exclusivement à l'administrateur (Fondé)" });
+      }
+      const schoolId = req.schoolId || 1;
+      const {
+        custom_whatsapp_enabled,
+        provider,
+        is_active,
+        account_sid,
+        auth_token,
+        phone_number_id,
+        sender_number,
+        api_url,
+        api_key
+      } = req.body;
+
+      const existing = db.prepare("SELECT * FROM whatsapp_configs WHERE school_id = ?").get(schoolId) as any;
+      const finalAuthToken = auth_token && String(auth_token).trim() !== '' ? String(auth_token).trim() : (existing?.auth_token || '');
+      const finalApiKey = api_key && String(api_key).trim() !== '' ? String(api_key).trim() : (existing?.api_key || '');
+
+      if (existing) {
+        db.prepare(`
+          UPDATE whatsapp_configs SET
+            custom_whatsapp_enabled = ?,
+            provider = ?,
+            is_active = ?,
+            account_sid = ?,
+            auth_token = ?,
+            phone_number_id = ?,
+            sender_number = ?,
+            api_url = ?,
+            api_key = ?,
+            updated_at = CURRENT_TIMESTAMP
+          WHERE school_id = ?
+        `).run(
+          custom_whatsapp_enabled ? 1 : 0,
+          provider || 'simulation',
+          is_active !== undefined ? (is_active ? 1 : 0) : 1,
+          (account_sid || '').trim(),
+          finalAuthToken,
+          (phone_number_id || '').trim(),
+          (sender_number || '').trim(),
+          (api_url || '').trim(),
+          finalApiKey,
+          schoolId
+        );
+      } else {
+        db.prepare(`
+          INSERT INTO whatsapp_configs (
+            school_id, custom_whatsapp_enabled, provider, is_active,
+            account_sid, auth_token, phone_number_id, sender_number, api_url, api_key
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          schoolId,
+          custom_whatsapp_enabled ? 1 : 0,
+          provider || 'simulation',
+          is_active !== undefined ? (is_active ? 1 : 0) : 1,
+          (account_sid || '').trim(),
+          finalAuthToken,
+          (phone_number_id || '').trim(),
+          (sender_number || '').trim(),
+          (api_url || '').trim(),
+          finalApiKey
+        );
+      }
+
+      res.json({ success: true, message: "Configuration WhatsApp enregistrée avec succès." });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/whatsapp/test", authenticateToken, async (req: any, res) => {
+    try {
+      const schoolId = req.schoolId || 1;
+      const { phone, message } = req.body;
+      if (!phone) return res.status(400).json({ error: "Numéro WhatsApp requis." });
+
+      const school = db.prepare("SELECT nom FROM school_info WHERE id = ?").get(schoolId) as any;
+      const result = await sendWhatsAppService({
+        to: phone,
+        schoolId,
+        recipientName: 'Test Administrateur',
+        message: message || `Test de notification WhatsApp automatique pour ${school?.nom || 'MégafixaEduc Pro'}. Votre passerelle WhatsApp est opérationnelle.`
+      });
+
+      res.json({
+        success: result.success,
+        simulated: result.simulated,
+        status: result.status,
+        provider: result.provider,
+        error: result.error,
+        message: result.simulated
+          ? `Message WhatsApp simulé dans le journal (${result.provider}). Configurez Twilio WhatsApp ou Meta Cloud API pour un envoi réel.`
+          : result.success
+          ? `Message WhatsApp envoyé avec succès à ${phone} via ${result.provider} !`
+          : `Échec d'envoi WhatsApp : ${result.error || 'Erreur inconnue'}`
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  function ensureDefaultAutomationRules(schoolId: number) {
+    const defaults = [
+      {
+        code: 'student_absent',
+        name: 'Alerte Absence Non Justifiée',
+        description: 'Envoie automatiquement une alerte aux parents dès qu\'un élève est marqué absent (non justifié) lors de l\'appel.',
+        category: 'vie_scolaire',
+        trigger_type: 'event',
+        trigger_event: 'student_absent',
+        is_active: 1,
+        channel_sms: 1,
+        channel_email: 1,
+        channel_whatsapp: 1,
+        subject_template: '[{ecole}] Signalement d\'absence - {nom_eleve}',
+        message_template: 'Bonjour {nom_parent}, nous vous informons que votre enfant {nom_eleve} (Classe : {classe}) a été enregistré absent le {date}. Motif : {motif}. Merci de contacter la vie scolaire de {ecole}.',
+        schedule_frequency: 'daily',
+        schedule_time: '08:00',
+        days_offset: 0
+      },
+      {
+        code: 'student_late',
+        name: 'Notification de Retard Élève',
+        description: 'Prévient immédiatement les parents lorsque l\'élève arrive en retard en classe.',
+        category: 'vie_scolaire',
+        trigger_type: 'event',
+        trigger_event: 'student_late',
+        is_active: 0,
+        channel_sms: 1,
+        channel_email: 0,
+        channel_whatsapp: 1,
+        subject_template: '[{ecole}] Notification de retard - {nom_eleve}',
+        message_template: 'Bonjour {nom_parent}, votre enfant {nom_eleve} ({classe}) est arrivé en retard le {date}. Merci de veiller à sa ponctualité. — {ecole}',
+        schedule_frequency: 'daily',
+        schedule_time: '08:00',
+        days_offset: 0
+      },
+      {
+        code: 'payment_received',
+        name: 'Confirmation & Reçu de Paiement',
+        description: 'Envoie un accusé de réception automatique après chaque encaissement de frais de scolarité ou d\'inscription.',
+        category: 'finances',
+        trigger_type: 'event',
+        trigger_event: 'payment_received',
+        is_active: 1,
+        channel_sms: 1,
+        channel_email: 1,
+        channel_whatsapp: 1,
+        subject_template: '[{ecole}] Reçu de paiement de {montant} - {nom_eleve}',
+        message_template: 'Bonjour {nom_parent}, nous confirmons la réception de votre paiement de {montant} ({tranche}) pour l\'élève {nom_eleve} le {date}. Reste à payer estimé : {reste_a_payer}. Merci pour votre confiance. — {ecole}',
+        schedule_frequency: 'daily',
+        schedule_time: '08:00',
+        days_offset: 0
+      },
+      {
+        code: 'tuition_upcoming',
+        name: 'Rappel Préventif d\'Échéance Scolarité',
+        description: 'Relance automatiquement les parents quelques jours avant la date limite d\'une tranche de scolarité.',
+        category: 'finances',
+        trigger_type: 'scheduled',
+        trigger_event: 'tuition_upcoming',
+        is_active: 1,
+        channel_sms: 1,
+        channel_email: 1,
+        channel_whatsapp: 1,
+        subject_template: '[{ecole}] Rappel d\'échéance à venir ({tranche}) - {nom_eleve}',
+        message_template: 'Bonjour {nom_parent}, l\'échéance de la {tranche} de scolarité pour {nom_eleve} ({classe}) approche (date limite : {date}). Solde restant dû : {reste_a_payer}. Merci d\'anticiper votre règlement. — {ecole}',
+        schedule_frequency: 'daily',
+        schedule_time: '08:30',
+        days_offset: 5
+      },
+      {
+        code: 'tuition_overdue',
+        name: 'Relance Automatique des Impayés',
+        description: 'Relance périodiquement les parents dont une tranche de scolarité est échue avec un solde restant impayé.',
+        category: 'finances',
+        trigger_type: 'scheduled',
+        trigger_event: 'tuition_overdue',
+        is_active: 0,
+        channel_sms: 1,
+        channel_email: 1,
+        channel_whatsapp: 1,
+        subject_template: '[{ecole}] Relance de paiement scolarité - {nom_eleve}',
+        message_template: 'Bonjour {nom_parent}, sauf erreur de notre part, un solde de {reste_a_payer} reste dû pour {nom_eleve} ({classe}) concernant la {tranche} échue le {date}. Merci de régulariser auprès du service comptable de {ecole}.',
+        schedule_frequency: 'weekly',
+        schedule_time: '09:00',
+        days_offset: 1
+      },
+      {
+        code: 'bulletin_published',
+        name: 'Notification de Publication des Bulletins',
+        description: 'Informe automatiquement les parents par SMS, Email et WhatsApp dès que les bulletins d\'une période sont publiés.',
+        category: 'pedagogie',
+        trigger_type: 'event',
+        trigger_event: 'bulletin_published',
+        is_active: 1,
+        channel_sms: 1,
+        channel_email: 1,
+        channel_whatsapp: 1,
+        subject_template: '[{ecole}] Bulletins disponibles ({periode}) - {nom_eleve}',
+        message_template: 'Bonjour {nom_parent}, les résultats et bulletins de la période ({periode}) pour {nom_eleve} ({classe}) sont désormais disponibles sur votre Espace Parent {ecole}.',
+        schedule_frequency: 'daily',
+        schedule_time: '08:00',
+        days_offset: 0
+      },
+      {
+        code: 'enrollment_decision',
+        name: 'Suivi de Candidature & Inscription',
+        description: 'Notifie automatiquement le parent ou le candidat lors du changement de statut d\'une demande d\'inscription ou de recrutement.',
+        category: 'admissions',
+        trigger_type: 'event',
+        trigger_event: 'enrollment_decision',
+        is_active: 1,
+        channel_sms: 1,
+        channel_email: 1,
+        channel_whatsapp: 1,
+        subject_template: '[{ecole}] Mise à jour de votre dossier - {statut}',
+        message_template: 'Bonjour {nom_parent}, le dossier de {nom_eleve} ({classe}) auprès de {ecole} a été mis à jour : {statut}. Détails : {motif}.',
+        schedule_frequency: 'daily',
+        schedule_time: '08:00',
+        days_offset: 0
+      },
+      {
+        code: 'library_overdue',
+        name: 'Rappel Retard Restitution Bibliothèque',
+        description: 'Relance automatiquement les élèves/parents lorsqu\'un livre emprunté dépasse sa date de retour prévue.',
+        category: 'bibliotheque',
+        trigger_type: 'scheduled',
+        trigger_event: 'library_overdue',
+        is_active: 0,
+        channel_sms: 1,
+        channel_email: 1,
+        channel_whatsapp: 1,
+        subject_template: '[{ecole}] Rappel restitution de livre - {nom_eleve}',
+        message_template: 'Bonjour {nom_parent}, le livre "{motif}" emprunté par {nom_eleve} devait être restitué à la bibliothèque de {ecole} le {date}. Merci de le retourner dans les meilleurs délais.',
+        schedule_frequency: 'weekly',
+        schedule_time: '09:30',
+        days_offset: 1
+      }
+    ];
+
+    const insertStmt = db.prepare(`
+      INSERT OR IGNORE INTO messaging_automation_rules (
+        school_id, code, name, description, category, trigger_type, trigger_event,
+        is_active, channel_sms, channel_email, channel_whatsapp,
+        subject_template, message_template, schedule_frequency, schedule_time, days_offset, is_custom
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+    `);
+
+    for (const r of defaults) {
+      insertStmt.run(
+        schoolId, r.code, r.name, r.description, r.category, r.trigger_type, r.trigger_event,
+        r.is_active, r.channel_sms, r.channel_email, r.channel_whatsapp,
+        r.subject_template, r.message_template, r.schedule_frequency, r.schedule_time, r.days_offset
+      );
+    }
+  }
+
+  function renderAutomationTemplate(template: string, variables: Record<string, any>) {
+    if (!template) return '';
+    return template.replace(/\{([a-zA-Z0-9_]+)\}/g, (match, key) => {
+      const val = variables[key];
+      return val !== undefined && val !== null && val !== '' ? String(val) : '';
+    }).replace(/\s{2,}/g, ' ').trim();
+  }
+
+  function recordAutomationLog(entry: {
+    schoolId: number;
+    ruleId?: number | null;
+    ruleCode?: string;
+    ruleName?: string;
+    channel: 'sms' | 'email' | 'whatsapp';
+    recipientName?: string;
+    recipientContact?: string;
+    subject?: string;
+    messagePreview: string;
+    status: string;
+    provider?: string;
+    errorMessage?: string;
+    entityRef?: string;
+    executionMode?: string;
+  }) {
+    try {
+      db.prepare(`
+        INSERT INTO messaging_automation_logs (
+          school_id, rule_id, rule_code, rule_name, channel,
+          recipient_name, recipient_contact, subject, message_preview,
+          status, provider, error_message, entity_ref, execution_mode
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        entry.schoolId,
+        entry.ruleId || null,
+        entry.ruleCode || '',
+        entry.ruleName || '',
+        entry.channel,
+        entry.recipientName || 'Destinataire',
+        entry.recipientContact || '',
+        entry.subject || '',
+        entry.messagePreview,
+        entry.status,
+        entry.provider || 'simulation',
+        entry.errorMessage || '',
+        entry.entityRef || '',
+        entry.executionMode || 'auto'
+      );
+    } catch (e) {
+      console.error("[Automation Log Error]:", e);
+    }
+  }
+
+  async function dispatchAutomationRuleToRecipient(params: {
+    schoolId: number;
+    rule: any;
+    recipient: { name?: string; phone?: string; whatsapp?: string; email?: string };
+    variables: Record<string, any>;
+    entityRef?: string;
+    executionMode?: 'auto' | 'manual' | 'test';
+    senderId?: number;
+  }) {
+    const { schoolId, rule, recipient, variables, entityRef = '', executionMode = 'auto', senderId } = params;
+    const school = db.prepare("SELECT nom FROM school_info WHERE id = ?").get(schoolId) as any;
+    const mergedVars = {
+      ecole: school?.nom || 'MégafixaEduc Pro',
+      date: new Date().toLocaleDateString('fr-FR'),
+      ...variables
+    };
+
+    const renderedSubject = renderAutomationTemplate(rule.subject_template || rule.name, mergedVars);
+    const renderedBody = renderAutomationTemplate(rule.message_template, mergedVars);
+
+    // Determine fallback system senderId if needed for sms_logs FK
+    let effectiveSenderId = senderId || 0;
+    if (!effectiveSenderId) {
+      const adminUser = db.prepare("SELECT id FROM utilisateurs WHERE school_id = ? ORDER BY id ASC LIMIT 1").get(schoolId) as any
+        || db.prepare("SELECT id FROM utilisateurs ORDER BY id ASC LIMIT 1").get() as any;
+      effectiveSenderId = adminUser?.id || 1;
+    }
+
+    const results: Array<{ channel: string; success: boolean; status: string; provider?: string; error?: string }> = [];
+
+    // 1. SMS Channel
+    if (rule.channel_sms && recipient.phone && recipient.phone.replace(/[^0-9]/g, '').length >= 8) {
+      const smsRes = await sendSmsService(
+        schoolId,
+        effectiveSenderId,
+        recipient.phone,
+        recipient.name || 'Destinataire',
+        'automation',
+        renderedBody
+      );
+      recordAutomationLog({
+        schoolId,
+        ruleId: rule.id,
+        ruleCode: rule.code,
+        ruleName: rule.name,
+        channel: 'sms',
+        recipientName: recipient.name,
+        recipientContact: recipient.phone,
+        messagePreview: renderedBody,
+        status: smsRes.status || (smsRes.success ? 'sent' : 'failed'),
+        provider: smsRes.provider || 'simulation',
+        errorMessage: smsRes.error || '',
+        entityRef,
+        executionMode
+      });
+      results.push({ channel: 'sms', success: Boolean(smsRes.success), status: smsRes.status || 'sent', provider: smsRes.provider, error: smsRes.error });
+    }
+
+    // 2. Email Channel
+    if (rule.channel_email && recipient.email && recipient.email.includes('@')) {
+      const mailRes = await sendMailWithFallback({
+        to: recipient.email.trim(),
+        subject: renderedSubject || `[${mergedVars.ecole}] ${rule.name}`,
+        text: renderedBody,
+        schoolId
+      });
+      const emailStatus = mailRes.success ? (mailRes.simulated ? 'simulated' : 'delivered') : 'failed';
+      recordAutomationLog({
+        schoolId,
+        ruleId: rule.id,
+        ruleCode: rule.code,
+        ruleName: rule.name,
+        channel: 'email',
+        recipientName: recipient.name,
+        recipientContact: recipient.email.trim(),
+        subject: renderedSubject,
+        messagePreview: renderedBody,
+        status: emailStatus,
+        provider: mailRes.isCustom ? 'school_smtp' : 'platform_smtp',
+        errorMessage: mailRes.error || '',
+        entityRef,
+        executionMode
+      });
+      results.push({ channel: 'email', success: mailRes.success, status: emailStatus, provider: mailRes.isCustom ? 'school_smtp' : 'platform_smtp', error: mailRes.error });
+    }
+
+    // 3. WhatsApp Channel
+    const waNumber = recipient.whatsapp || recipient.phone || '';
+    if (rule.channel_whatsapp && waNumber && waNumber.replace(/[^0-9]/g, '').length >= 8) {
+      const waRes = await sendWhatsAppService({
+        to: waNumber,
+        message: renderedBody,
+        schoolId,
+        recipientName: recipient.name,
+        reference: entityRef
+      });
+      recordAutomationLog({
+        schoolId,
+        ruleId: rule.id,
+        ruleCode: rule.code,
+        ruleName: rule.name,
+        channel: 'whatsapp',
+        recipientName: recipient.name,
+        recipientContact: waNumber,
+        messagePreview: renderedBody,
+        status: waRes.status,
+        provider: waRes.provider,
+        errorMessage: waRes.error || '',
+        entityRef,
+        executionMode
+      });
+      results.push({ channel: 'whatsapp', success: waRes.success, status: waRes.status, provider: waRes.provider, error: waRes.error });
+    }
+
+    const successCount = results.filter(r => r.success).length;
+    if (rule.id && successCount > 0) {
+      db.prepare(`
+        UPDATE messaging_automation_rules
+        SET total_sent = COALESCE(total_sent, 0) + ?, last_run_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).run(successCount, rule.id);
+    }
+
+    return results;
+  }
+
+  async function triggerAutomationEvent(
+    schoolId: number,
+    eventCode: string,
+    items: Array<{
+      recipient: { name?: string; phone?: string; whatsapp?: string; email?: string };
+      variables: Record<string, any>;
+      entityRef?: string;
+    }>
+  ) {
+    try {
+      if (!schoolId || !items || items.length === 0) return;
+      ensureDefaultAutomationRules(schoolId);
+      const rules = db.prepare(`
+        SELECT * FROM messaging_automation_rules
+        WHERE school_id = ? AND trigger_event = ? AND is_active = 1
+      `).all(schoolId, eventCode) as any[];
+
+      if (!rules.length) return;
+
+      for (const rule of rules) {
+        for (const item of items) {
+          if (item.entityRef) {
+            const recentSame = db.prepare(`
+              SELECT id FROM messaging_automation_logs
+              WHERE school_id = ? AND rule_id = ? AND entity_ref = ? AND execution_mode = 'auto'
+                AND datetime(created_at) >= datetime('now', '-12 hours')
+              LIMIT 1
+            `).get(schoolId, rule.id, item.entityRef);
+            if (recentSame) continue;
+          }
+          await dispatchAutomationRuleToRecipient({
+            schoolId,
+            rule,
+            recipient: item.recipient,
+            variables: item.variables,
+            entityRef: item.entityRef || '',
+            executionMode: 'auto'
+          });
+        }
+      }
+    } catch (err) {
+      console.error(`[Automation Event Error] ${eventCode}:`, err);
+    }
+  }
+
+  function hasRecentAutomationSend(schoolId: number, ruleId: number, entityRef: string, frequency: string) {
+    let modifier = '-20 hours';
+    if (frequency === 'hourly') modifier = '-50 minutes';
+    else if (frequency === 'weekly') modifier = '-6 days';
+    else if (frequency === 'monthly') modifier = '-27 days';
+
+    const existing = db.prepare(`
+      SELECT id FROM messaging_automation_logs
+      WHERE school_id = ? AND rule_id = ? AND entity_ref = ? AND execution_mode != 'test'
+        AND datetime(created_at) >= datetime('now', ?)
+      LIMIT 1
+    `).get(schoolId, ruleId, entityRef, modifier);
+    return Boolean(existing);
+  }
+
+  async function executeScheduledRule(rule: any, executionMode: 'auto' | 'manual' = 'auto') {
+    const schoolId = rule.school_id;
+    const activeYearId = getActiveYearId(schoolId);
+    const today = new Date();
+    const todayStr = today.toISOString().split('T')[0];
+    const offsetDays = Number(rule.days_offset ?? 3);
+
+    let dispatches = 0;
+    let matchedRecipients = 0;
+
+    if (rule.trigger_event === 'tuition_upcoming' || rule.trigger_event === 'tuition_overdue') {
+      const students = db.prepare(`
+        SELECT e.id, e.nom, e.prenom, e.nom_parent, e.tel_parent, e.email_parent,
+               e.arrieres_scolarite, c.nom as classe_nom, c.frais_scolarite, c.devise,
+               c.tranche1_montant, c.tranche1_date_limite,
+               c.tranche2_montant, c.tranche2_date_limite,
+               c.tranche3_montant, c.tranche3_date_limite
+        FROM eleves e
+        JOIN classes c ON e.classe_id = c.id
+        WHERE e.school_id = ? AND COALESCE(e.est_abandonne, 0) = 0
+          AND (e.tel_parent IS NOT NULL OR e.email_parent IS NOT NULL)
+      `).all(schoolId) as any[];
+
+      for (const st of students) {
+        const paidRow = db.prepare(`
+          SELECT COALESCE(SUM(montant), 0) as total_paid
+          FROM paiements
+          WHERE eleve_id = ? AND school_id = ? ${activeYearId ? 'AND (annee_id = ? OR annee_id IS NULL)' : ''}
+            AND status != 'Annulé'
+            AND (type_paiement IS NULL OR LOWER(type_paiement) NOT LIKE '%inscription%' AND LOWER(type_paiement) NOT LIKE '%biblioth%')
+        `).get(...(activeYearId ? [st.id, schoolId, activeYearId] : [st.id, schoolId])) as any;
+
+        const totalPaid = Number(paidRow?.total_paid || 0);
+        const totalDue = Number(st.frais_scolarite || 0) + Number(st.arrieres_scolarite || 0);
+        const remaining = Math.max(0, totalDue - totalPaid);
+        if (remaining <= 0) continue;
+
+        const t1 = Number(st.tranche1_montant || 0);
+        const t2 = Number(st.tranche2_montant || 0);
+        const t3 = Number(st.tranche3_montant || 0);
+        const tranches = [
+          { label: '1ère Tranche', cumulativeTarget: t1, deadline: st.tranche1_date_limite },
+          { label: '2ème Tranche', cumulativeTarget: t1 + t2, deadline: st.tranche2_date_limite },
+          { label: '3ème Tranche', cumulativeTarget: t1 + t2 + t3 || totalDue, deadline: st.tranche3_date_limite }
+        ].filter(t => t.deadline && t.cumulativeTarget > 0);
+
+        let targetTranche: { label: string; deadline: string; balanceDue: number } | null = null;
+
+        for (const tr of tranches) {
+          if (totalPaid >= tr.cumulativeTarget) continue;
+          const diffDays = Math.ceil((new Date(tr.deadline).getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+          if (rule.trigger_event === 'tuition_upcoming' && diffDays >= 0 && diffDays <= offsetDays) {
+            targetTranche = { label: tr.label, deadline: tr.deadline, balanceDue: Math.max(0, tr.cumulativeTarget - totalPaid) };
+            break;
+          }
+          if (rule.trigger_event === 'tuition_overdue' && diffDays < 0 && Math.abs(diffDays) >= Math.max(0, offsetDays)) {
+            targetTranche = { label: tr.label, deadline: tr.deadline, balanceDue: remaining };
+            break;
+          }
+        }
+
+        // Also match general overdue tuition if student has remaining balance > 0 and no tranche deadlines configured
+        if (!targetTranche && rule.trigger_event === 'tuition_overdue' && tranches.length === 0 && remaining > 0) {
+          targetTranche = { label: 'Scolarité', deadline: todayStr, balanceDue: remaining };
+        }
+
+        if (!targetTranche) continue;
+        const entityRef = `${rule.trigger_event}:${st.id}:${targetTranche.label}`;
+        if (executionMode === 'auto' && hasRecentAutomationSend(schoolId, rule.id, entityRef, rule.schedule_frequency)) {
+          continue;
+        }
+
+        matchedRecipients++;
+        const currency = st.devise || 'FCFA';
+        const resList = await dispatchAutomationRuleToRecipient({
+          schoolId,
+          rule,
+          recipient: {
+            name: st.nom_parent || 'Parent',
+            phone: st.tel_parent || '',
+            whatsapp: st.tel_parent || '',
+            email: st.email_parent || ''
+          },
+          variables: {
+            nom_eleve: `${st.prenom || ''} ${st.nom || ''}`.trim(),
+            nom_parent: st.nom_parent || 'Parent',
+            classe: st.classe_nom || '',
+            tranche: targetTranche.label,
+            date: targetTranche.deadline,
+            reste_a_payer: `${targetTranche.balanceDue.toLocaleString('fr-FR')} ${currency}`,
+            montant: `${targetTranche.balanceDue.toLocaleString('fr-FR')} ${currency}`
+          },
+          entityRef,
+          executionMode
+        });
+        dispatches += resList.filter(r => r.success).length;
+      }
+    } else if (rule.trigger_event === 'library_overdue') {
+      const overdueLoans = db.prepare(`
+        SELECT emp.id as emprunt_id, emp.date_retour_prevue, l.titre as livre_titre,
+               el.id as eleve_id, el.nom, el.prenom, el.nom_parent, el.tel_parent, el.email_parent,
+               c.nom as classe_nom
+        FROM emprunts_bibliotheque emp
+        JOIN eleves el ON emp.eleve_id = el.id
+        LEFT JOIN livres l ON emp.livre_id = l.id
+        LEFT JOIN classes c ON el.classe_id = c.id
+        WHERE emp.school_id = ? AND emp.statut IN ('en_cours', 'en_retard')
+          AND emp.date_retour_prevue IS NOT NULL AND date(emp.date_retour_prevue) < date('now')
+      `).all(schoolId) as any[];
+
+      for (const loan of overdueLoans) {
+        const entityRef = `library_overdue:${loan.emprunt_id}`;
+        if (executionMode === 'auto' && hasRecentAutomationSend(schoolId, rule.id, entityRef, rule.schedule_frequency)) {
+          continue;
+        }
+        matchedRecipients++;
+        const resList = await dispatchAutomationRuleToRecipient({
+          schoolId,
+          rule,
+          recipient: {
+            name: loan.nom_parent || 'Parent',
+            phone: loan.tel_parent || '',
+            whatsapp: loan.tel_parent || '',
+            email: loan.email_parent || ''
+          },
+          variables: {
+            nom_eleve: `${loan.prenom || ''} ${loan.nom || ''}`.trim(),
+            nom_parent: loan.nom_parent || 'Parent',
+            classe: loan.classe_nom || '',
+            date: loan.date_retour_prevue,
+            motif: loan.livre_titre || 'Livre emprunté'
+          },
+          entityRef,
+          executionMode
+        });
+        dispatches += resList.filter(r => r.success).length;
+      }
+    } else {
+      // Custom scheduled announcement broadcast to all parents of the school
+      const parents = db.prepare(`
+        SELECT DISTINCT nom_parent, tel_parent, email_parent
+        FROM eleves
+        WHERE school_id = ? AND COALESCE(est_abandonne, 0) = 0
+          AND (tel_parent IS NOT NULL OR email_parent IS NOT NULL)
+      `).all(schoolId) as any[];
+
+      for (const p of parents) {
+        const contactKey = (p.tel_parent || p.email_parent || '').trim();
+        if (!contactKey) continue;
+        const entityRef = `custom:${rule.code}:${contactKey}`;
+        if (executionMode === 'auto' && hasRecentAutomationSend(schoolId, rule.id, entityRef, rule.schedule_frequency)) {
+          continue;
+        }
+        matchedRecipients++;
+        const resList = await dispatchAutomationRuleToRecipient({
+          schoolId,
+          rule,
+          recipient: {
+            name: p.nom_parent || 'Parent',
+            phone: p.tel_parent || '',
+            whatsapp: p.tel_parent || '',
+            email: p.email_parent || ''
+          },
+          variables: {
+            nom_parent: p.nom_parent || 'Parent',
+            date: todayStr
+          },
+          entityRef,
+          executionMode
+        });
+        dispatches += resList.filter(r => r.success).length;
+      }
+    }
+
+    db.prepare("UPDATE messaging_automation_rules SET last_run_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(rule.id);
+    return { matchedRecipients, dispatches };
+  }
+
+  async function processScheduledAutomations() {
+    try {
+      const rules = db.prepare(`
+        SELECT * FROM messaging_automation_rules
+        WHERE trigger_type = 'scheduled' AND is_active = 1
+      `).all() as any[];
+
+      const now = Date.now();
+      for (const rule of rules) {
+        const lastRun = rule.last_run_at ? new Date(rule.last_run_at).getTime() : 0;
+        let thresholdMs = 24 * 60 * 60 * 1000;
+        if (rule.schedule_frequency === 'hourly') thresholdMs = 60 * 60 * 1000;
+        else if (rule.schedule_frequency === 'weekly') thresholdMs = 7 * 24 * 60 * 60 * 1000;
+        else if (rule.schedule_frequency === 'monthly') thresholdMs = 30 * 24 * 60 * 60 * 1000;
+
+        if (now - lastRun >= thresholdMs) {
+          await executeScheduledRule(rule, 'auto');
+        }
+      }
+    } catch (err) {
+      console.error("[Automation Scheduler Error]:", err);
+    }
+  }
+
+  // Run scheduled automations check every 15 minutes (and shortly after startup)
+  setTimeout(processScheduledAutomations, 45 * 1000);
+  setInterval(processScheduledAutomations, 15 * 60 * 1000);
+
+  // Automation Rules & Logs Endpoints
+  app.get("/api/automations/rules", authenticateToken, (req: any, res) => {
+    try {
+      const schoolId = req.schoolId || 1;
+      ensureDefaultAutomationRules(schoolId);
+      const rules = db.prepare(`
+        SELECT * FROM messaging_automation_rules
+        WHERE school_id = ?
+        ORDER BY is_custom ASC, id ASC
+      `).all(schoolId) as any[];
+
+      const stats = db.prepare(`
+        SELECT
+          COUNT(*) as total_dispatches,
+          SUM(CASE WHEN channel = 'sms' THEN 1 ELSE 0 END) as sms_count,
+          SUM(CASE WHEN channel = 'email' THEN 1 ELSE 0 END) as email_count,
+          SUM(CASE WHEN channel = 'whatsapp' THEN 1 ELSE 0 END) as whatsapp_count,
+          SUM(CASE WHEN status IN ('sent', 'delivered', 'simulated') THEN 1 ELSE 0 END) as success_count,
+          SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_count
+        FROM messaging_automation_logs
+        WHERE school_id = ? AND datetime(created_at) >= datetime('now', '-30 days')
+      `).get(schoolId) as any;
+
+      res.json({ rules, stats });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/automations/rules", authenticateToken, (req: any, res) => {
+    try {
+      if (!isUserAdminOrFonde(req.user?.role)) {
+        return res.status(403).json({ error: "Accès réservé à l'administration." });
+      }
+      const schoolId = req.schoolId || 1;
+      const {
+        name,
+        description,
+        category,
+        trigger_type,
+        trigger_event,
+        is_active,
+        channel_sms,
+        channel_email,
+        channel_whatsapp,
+        subject_template,
+        message_template,
+        schedule_frequency,
+        schedule_time,
+        days_offset
+      } = req.body;
+
+      if (!name?.trim() || !message_template?.trim()) {
+        return res.status(400).json({ error: "Le nom et le modèle de message sont obligatoires." });
+      }
+
+      const code = `custom_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      const result = db.prepare(`
+        INSERT INTO messaging_automation_rules (
+          school_id, code, name, description, category, trigger_type, trigger_event,
+          is_active, channel_sms, channel_email, channel_whatsapp,
+          subject_template, message_template, schedule_frequency, schedule_time, days_offset, is_custom
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+      `).run(
+        schoolId,
+        code,
+        name.trim(),
+        (description || '').trim(),
+        category || 'general',
+        trigger_type === 'scheduled' ? 'scheduled' : 'event',
+        trigger_event || 'custom_broadcast',
+        is_active ? 1 : 0,
+        channel_sms ? 1 : 0,
+        channel_email ? 1 : 0,
+        channel_whatsapp ? 1 : 0,
+        (subject_template || name).trim(),
+        message_template.trim(),
+        schedule_frequency || 'weekly',
+        schedule_time || '08:30',
+        Number(days_offset ?? 3)
+      );
+
+      const created = db.prepare("SELECT * FROM messaging_automation_rules WHERE id = ?").get(result.lastInsertRowid);
+      res.json({ success: true, rule: created });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.put("/api/automations/rules/:id", authenticateToken, (req: any, res) => {
+    try {
+      if (!isUserAdminOrFonde(req.user?.role)) {
+        return res.status(403).json({ error: "Accès réservé à l'administration." });
+      }
+      const schoolId = req.schoolId || 1;
+      const ruleId = parseInt(req.params.id, 10);
+      const existing = db.prepare("SELECT * FROM messaging_automation_rules WHERE id = ? AND school_id = ?").get(ruleId, schoolId) as any;
+      if (!existing) return res.status(404).json({ error: "Règle d'automatisation introuvable." });
+
+      const {
+        name,
+        description,
+        is_active,
+        channel_sms,
+        channel_email,
+        channel_whatsapp,
+        subject_template,
+        message_template,
+        schedule_frequency,
+        schedule_time,
+        days_offset
+      } = req.body;
+
+      db.prepare(`
+        UPDATE messaging_automation_rules SET
+          name = ?,
+          description = ?,
+          is_active = ?,
+          channel_sms = ?,
+          channel_email = ?,
+          channel_whatsapp = ?,
+          subject_template = ?,
+          message_template = ?,
+          schedule_frequency = ?,
+          schedule_time = ?,
+          days_offset = ?,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND school_id = ?
+      `).run(
+        name !== undefined ? String(name).trim() : existing.name,
+        description !== undefined ? String(description).trim() : existing.description,
+        is_active !== undefined ? (is_active ? 1 : 0) : existing.is_active,
+        channel_sms !== undefined ? (channel_sms ? 1 : 0) : existing.channel_sms,
+        channel_email !== undefined ? (channel_email ? 1 : 0) : existing.channel_email,
+        channel_whatsapp !== undefined ? (channel_whatsapp ? 1 : 0) : existing.channel_whatsapp,
+        subject_template !== undefined ? String(subject_template) : existing.subject_template,
+        message_template !== undefined ? String(message_template) : existing.message_template,
+        schedule_frequency || existing.schedule_frequency,
+        schedule_time || existing.schedule_time,
+        days_offset !== undefined ? Number(days_offset) : existing.days_offset,
+        ruleId,
+        schoolId
+      );
+
+      const updated = db.prepare("SELECT * FROM messaging_automation_rules WHERE id = ?").get(ruleId);
+      res.json({ success: true, rule: updated });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.delete("/api/automations/rules/:id", authenticateToken, (req: any, res) => {
+    try {
+      if (!isUserAdminOrFonde(req.user?.role)) {
+        return res.status(403).json({ error: "Accès réservé à l'administration." });
+      }
+      const schoolId = req.schoolId || 1;
+      const ruleId = parseInt(req.params.id, 10);
+      const existing = db.prepare("SELECT * FROM messaging_automation_rules WHERE id = ? AND school_id = ?").get(ruleId, schoolId) as any;
+      if (!existing) return res.status(404).json({ error: "Règle introuvable." });
+      if (!existing.is_custom) {
+        return res.status(400).json({ error: "Les règles système intégrées ne peuvent pas être supprimées (désactivez-les à la place)." });
+      }
+      db.prepare("DELETE FROM messaging_automation_rules WHERE id = ? AND school_id = ?").run(ruleId, schoolId);
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/automations/rules/:id/test", authenticateToken, async (req: any, res) => {
+    try {
+      const schoolId = req.schoolId || 1;
+      const ruleId = parseInt(req.params.id, 10);
+      const rule = db.prepare("SELECT * FROM messaging_automation_rules WHERE id = ? AND school_id = ?").get(ruleId, schoolId) as any;
+      if (!rule) return res.status(404).json({ error: "Règle introuvable." });
+
+      const { phone, whatsapp, email, recipientName } = req.body;
+      if (!phone && !whatsapp && !email) {
+        return res.status(400).json({ error: "Veuillez saisir au moins un numéro ou une adresse email de test." });
+      }
+
+      const results = await dispatchAutomationRuleToRecipient({
+        schoolId,
+        rule,
+        recipient: {
+          name: recipientName || 'Parent Exemple',
+          phone: phone || '',
+          whatsapp: whatsapp || phone || '',
+          email: email || ''
+        },
+        variables: {
+          nom_eleve: 'Jean-Luc Kossi',
+          nom_parent: recipientName || 'M. Kossi',
+          classe: '3ème A',
+          montant: '45 000 FCFA',
+          reste_a_payer: '30 000 FCFA',
+          tranche: '2ème Tranche',
+          periode: '1er Trimestre',
+          statut: 'Validée',
+          motif: 'Test d\'envoi automatisé',
+          date: new Date().toLocaleDateString('fr-FR')
+        },
+        entityRef: `test:${rule.code}:${Date.now()}`,
+        executionMode: 'test',
+        senderId: req.userId
+      });
+
+      if (results.length === 0) {
+        return res.status(400).json({ error: "Aucun canal actif ne correspond aux coordonnées saisies." });
+      }
+
+      res.json({ success: true, results });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/automations/rules/:id/run", authenticateToken, async (req: any, res) => {
+    try {
+      if (!isUserAdminOrFonde(req.user?.role)) {
+        return res.status(403).json({ error: "Accès réservé à l'administration." });
+      }
+      const schoolId = req.schoolId || 1;
+      const ruleId = parseInt(req.params.id, 10);
+      const rule = db.prepare("SELECT * FROM messaging_automation_rules WHERE id = ? AND school_id = ?").get(ruleId, schoolId) as any;
+      if (!rule) return res.status(404).json({ error: "Règle introuvable." });
+
+      const summary = await executeScheduledRule(rule, 'manual');
+      res.json({
+        success: true,
+        matchedRecipients: summary.matchedRecipients,
+        dispatches: summary.dispatches,
+        message: summary.matchedRecipients === 0
+          ? "Aucun destinataire éligible détecté pour cette règle actuellement."
+          : `${summary.dispatches} notification(s) envoyée(s) à ${summary.matchedRecipients} destinataire(s).`
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/automations/logs", authenticateToken, (req: any, res) => {
+    try {
+      const schoolId = req.schoolId || 1;
+      const { channel, status, rule_id, search } = req.query;
+
+      let query = "SELECT * FROM messaging_automation_logs WHERE school_id = ?";
+      const params: any[] = [schoolId];
+
+      if (channel && channel !== 'all') {
+        query += " AND channel = ?";
+        params.push(channel);
+      }
+      if (status && status !== 'all') {
+        query += " AND status = ?";
+        params.push(status);
+      }
+      if (rule_id && rule_id !== 'all') {
+        query += " AND rule_id = ?";
+        params.push(parseInt(String(rule_id), 10));
+      }
+      if (search && String(search).trim() !== '') {
+        query += " AND (recipient_name LIKE ? OR recipient_contact LIKE ? OR message_preview LIKE ? OR rule_name LIKE ?)";
+        const q = `%${String(search).trim()}%`;
+        params.push(q, q, q, q);
+      }
+
+      query += " ORDER BY created_at DESC, id DESC LIMIT 200";
+      const logs = db.prepare(query).all(...params);
+      res.json({ logs });
+    } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
   });
@@ -26117,7 +27673,43 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         }
       }
 
-      const updatedEleve = eleve_id ? (db.prepare("SELECT arrieres_scolarite FROM eleves WHERE id = ?").get(eleve_id) as any) : null;
+      const updatedEleve = eleve_id ? (db.prepare("SELECT * FROM eleves WHERE id = ?").get(eleve_id) as any) : null;
+
+      // Automation event hook for payment confirmation
+      try {
+        if (updatedEleve && (updatedEleve.tel_parent || updatedEleve.email_parent)) {
+          const clsRow = updatedEleve.classe_id ? (db.prepare("SELECT nom, frais_scolarite, devise FROM classes WHERE id = ?").get(updatedEleve.classe_id) as any) : null;
+          const totalPaidRow = db.prepare(`
+            SELECT COALESCE(SUM(montant), 0) as total
+            FROM paiements
+            WHERE eleve_id = ? AND school_id = ? AND (annee_id = ? OR annee_id IS NULL) AND status != 'Annulé'
+              AND (type_paiement IS NULL OR LOWER(type_paiement) NOT LIKE '%inscription%' AND LOWER(type_paiement) NOT LIKE '%biblioth%')
+          `).get(eleve_id, schoolId, yearId) as any;
+          const totalDue = Number(clsRow?.frais_scolarite || 0) + Number(updatedEleve.arrieres_scolarite || 0);
+          const remainingBalance = Math.max(0, totalDue - Number(totalPaidRow?.total || 0));
+          const currency = clsRow?.devise || 'FCFA';
+
+          triggerAutomationEvent(schoolId, 'payment_received', [{
+            recipient: {
+              name: updatedEleve.nom_parent || 'Parent',
+              phone: updatedEleve.tel_parent || '',
+              whatsapp: updatedEleve.tel_parent || '',
+              email: updatedEleve.email_parent || ''
+            },
+            variables: {
+              nom_eleve: `${updatedEleve.prenom || ''} ${updatedEleve.nom || ''}`.trim(),
+              nom_parent: updatedEleve.nom_parent || 'Parent',
+              classe: clsRow?.nom || classe_nom || '',
+              montant: `${Number(montant || 0).toLocaleString('fr-FR')} ${currency}`,
+              tranche: tranche || type_paiement || 'Frais de scolarité',
+              reste_a_payer: `${remainingBalance.toLocaleString('fr-FR')} ${currency}`,
+              date: date_paiement || new Date().toLocaleDateString('fr-FR')
+            },
+            entityRef: `payment:${paymentId}`
+          }]).catch(() => {});
+        }
+      } catch (autoErr) {}
+
       res.json({ 
         success: true, 
         id: Number(paymentId), 
@@ -28269,19 +29861,90 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
     try {
       const { phone } = req.body;
       if (!phone) return res.status(400).json({ error: "Numéro de téléphone requis." });
-      
-      const result = await sendWhatsAppSimulation({
-        to: phone,
-        message: "Test de configuration SMS / WhatsApp - MégafixaEduc Pro. Si vous recevez ce message, votre passerelle est opérationnelle."
-      });
-      
-      if (result.simulated) {
-        res.json({ success: true, simulated: true, message: "Envoi simulé dans la console (aucune passerelle réelle configurée)." });
-      } else {
-        res.json({ success: true, simulated: false, message: "SMS de test envoyé avec succès via votre passerelle !" });
+
+      const globalSms = await getGlobalSmsConfig();
+      const cleanPhone = String(phone).replace(/[^0-9+]/g, '');
+      const formattedPhone = cleanPhone.startsWith('+') ? cleanPhone : `+${cleanPhone}`;
+      const testText = "Test de configuration SMS - MégafixaEduc Pro. Si vous recevez ce SMS, votre passerelle est opérationnelle.";
+
+      if (globalSms.provider === 'brevo') {
+        const brevoKey = (globalSms.apiKey || globalSms.brevoApiKey || process.env.BREVO_API_KEY || '').trim();
+        if (!brevoKey) {
+          return res.status(400).json({ success: false, error: "Clé API Brevo manquante pour les SMS globaux." });
+        }
+        const cleanSender = (globalSms.senderId || 'MEGAFIXA').replace(/[^a-zA-Z0-9]/g, '').slice(0, 11) || 'MEGAFIXA';
+        const brevoRes = await fetch('https://api.brevo.com/v3/transactionalSMS/sms', {
+          method: 'POST',
+          headers: {
+            'api-key': brevoKey,
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+          },
+          body: JSON.stringify({
+            sender: cleanSender,
+            recipient: formattedPhone,
+            content: testText,
+            type: 'transactional'
+          })
+        });
+        if (brevoRes.ok) {
+          return res.json({ success: true, simulated: false, provider: 'brevo', message: `SMS réel envoyé avec succès à ${formattedPhone} via Brevo !` });
+        } else {
+          const errData = await brevoRes.json().catch(() => ({}));
+          return res.status(400).json({ success: false, provider: 'brevo', error: errData?.message || 'Erreur API Brevo SMS' });
+        }
       }
+
+      if (globalSms.provider === 'twilio' && globalSms.apiKey && globalSms.authToken) {
+        const auth = Buffer.from(`${globalSms.apiKey}:${globalSms.authToken}`).toString('base64');
+        const twilioUrl = `https://api.twilio.com/2010-04-01/Accounts/${globalSms.apiKey}/Messages.json`;
+        const params = new URLSearchParams();
+        params.append('To', formattedPhone);
+        params.append('From', globalSms.senderId || 'MEGAFIXA');
+        params.append('Body', testText);
+
+        const twilioRes = await fetch(twilioUrl, {
+          method: 'POST',
+          headers: { 'Authorization': `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: params.toString()
+        });
+        if (twilioRes.ok) {
+          return res.json({ success: true, simulated: false, provider: 'twilio', message: `SMS réel envoyé avec succès à ${formattedPhone} via Twilio !` });
+        } else {
+          const errData = await twilioRes.json().catch(() => ({}));
+          return res.status(400).json({ success: false, provider: 'twilio', error: errData?.message || 'Erreur API Twilio SMS' });
+        }
+      }
+
+      console.log(`[GLOBAL SMS TEST SIMULATION] To: ${formattedPhone} | Provider: ${globalSms.provider}`);
+      return res.json({ success: true, simulated: true, provider: globalSms.provider || 'simulation', message: "Envoi SMS simulé dans la console (aucune passerelle SMS réelle configurée)." });
     } catch (err: any) {
       console.error("Test SMS error:", err);
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  app.post("/api/super-admin/test-whatsapp", authenticateToken, requireSuperAdmin, async (req: any, res) => {
+    try {
+      const { phone } = req.body;
+      if (!phone) return res.status(400).json({ error: "Numéro WhatsApp requis." });
+
+      const result = await sendWhatsAppService({
+        to: phone,
+        message: "Test passerelle WhatsApp globale - MégafixaEduc Pro. Vos notifications automatisées WhatsApp sont prêtes."
+      });
+
+      res.json({
+        success: result.success,
+        simulated: result.simulated,
+        provider: result.provider,
+        message: result.simulated
+          ? "Envoi WhatsApp simulé dans la console (configurez Brevo WhatsApp, Meta Cloud API ou Twilio ci-dessous)."
+          : result.success
+          ? `Message WhatsApp de test envoyé avec succès via ${result.provider} !`
+          : `Échec de l'envoi WhatsApp : ${result.error || 'Erreur inconnue'}`
+      });
+    } catch (err: any) {
       res.status(500).json({ success: false, error: err.message });
     }
   });
@@ -28295,35 +29958,48 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
     try {
       const schools = db.prepare(`
         SELECT s.id, s.nom, s.email, s.telephone, s.pays, s.adresse,
-               smtp.custom_smtp_enabled, smtp.smtp_host, smtp.smtp_port, smtp.smtp_user, smtp.smtp_secure, smtp.email_from,
+               smtp.custom_smtp_enabled, smtp.email_provider, smtp.smtp_host, smtp.smtp_port, smtp.smtp_user, smtp.smtp_secure, smtp.email_from,
                CASE WHEN smtp.smtp_pass IS NOT NULL AND smtp.smtp_pass != '' THEN 1 ELSE 0 END as has_smtp_pass,
+               CASE WHEN smtp.brevo_api_key IS NOT NULL AND smtp.brevo_api_key != '' THEN 1 ELSE 0 END as has_brevo_api_key,
                sms.custom_sms_enabled, sms.provider as sms_provider, sms.sender_number_or_name as sms_sender_id,
                sms.account_sid as sms_account_sid, sms.api_url as sms_api_url, sms.credit_balance as sms_credits, sms.is_active as sms_active,
-               CASE WHEN sms.auth_token IS NOT NULL AND sms.auth_token != '' THEN 1 ELSE 0 END as has_sms_auth_token
+               CASE WHEN sms.auth_token IS NOT NULL AND sms.auth_token != '' THEN 1 ELSE 0 END as has_sms_auth_token,
+               wa.custom_whatsapp_enabled, wa.provider as whatsapp_provider, wa.sender_number as whatsapp_sender_number,
+               wa.phone_number_id as whatsapp_phone_number_id, wa.is_active as whatsapp_active,
+               CASE WHEN wa.auth_token IS NOT NULL AND wa.auth_token != '' THEN 1 ELSE 0 END as has_whatsapp_auth_token
         FROM school_info s
         LEFT JOIN school_smtp_configs smtp ON smtp.school_id = s.id
         LEFT JOIN sms_configs sms ON sms.school_id = s.id
+        LEFT JOIN whatsapp_configs wa ON wa.school_id = s.id
         ORDER BY s.nom ASC
       `).all() as any[];
 
       const globalSmtp = await getSmtpConfig();
       const globalSms = await getGlobalSmsConfig();
+      const globalWa = await getWhatsAppConfig();
 
       res.json({
         schools,
         globalDefaults: {
           smtp: {
+            provider: globalSmtp.provider,
             host: globalSmtp.host,
             port: globalSmtp.port,
             user: globalSmtp.user,
             from: globalSmtp.from,
-            has_pass: Boolean(globalSmtp.pass)
+            has_pass: Boolean(globalSmtp.pass),
+            has_brevo_api_key: Boolean(globalSmtp.brevoApiKey)
           },
           sms: {
             provider: globalSms.provider,
             senderId: globalSms.senderId,
             has_apiKey: Boolean(globalSms.apiKey),
             has_authToken: Boolean(globalSms.authToken)
+          },
+          whatsapp: {
+            provider: globalWa.provider,
+            senderNumber: globalWa.senderNumber,
+            has_authToken: Boolean(globalWa.authToken || globalWa.apiKey)
           }
         }
       });
@@ -28342,15 +30018,19 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
 
       let smtp = db.prepare("SELECT * FROM school_smtp_configs WHERE school_id = ?").get(schoolId) as any;
       let sms = db.prepare("SELECT * FROM sms_configs WHERE school_id = ?").get(schoolId) as any;
+      let whatsapp = db.prepare("SELECT * FROM whatsapp_configs WHERE school_id = ?").get(schoolId) as any;
 
       const globalSmtp = await getSmtpConfig();
       const globalSms = await getGlobalSmsConfig();
+      const globalWa = await getWhatsAppConfig();
 
       res.json({
         school,
         smtp: smtp || {
           school_id: schoolId,
           custom_smtp_enabled: 0,
+          email_provider: 'smtp',
+          brevo_api_key: '',
           smtp_host: '',
           smtp_port: '587',
           smtp_user: '',
@@ -28370,19 +30050,38 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
           credit_balance: 1000,
           is_active: 1
         },
+        whatsapp: whatsapp || {
+          school_id: schoolId,
+          custom_whatsapp_enabled: 0,
+          provider: 'simulation',
+          is_active: 1,
+          account_sid: '',
+          auth_token: '',
+          phone_number_id: '',
+          sender_number: '',
+          api_url: '',
+          api_key: ''
+        },
         globalDefaults: {
           smtp: {
+            provider: globalSmtp.provider,
             host: globalSmtp.host,
             port: globalSmtp.port,
             user: globalSmtp.user,
             from: globalSmtp.from,
-            has_pass: Boolean(globalSmtp.pass)
+            has_pass: Boolean(globalSmtp.pass),
+            has_brevo_api_key: Boolean(globalSmtp.brevoApiKey)
           },
           sms: {
             provider: globalSms.provider,
             senderId: globalSms.senderId,
             has_apiKey: Boolean(globalSms.apiKey),
             has_authToken: Boolean(globalSms.authToken)
+          },
+          whatsapp: {
+            provider: globalWa.provider,
+            senderNumber: globalWa.senderNumber,
+            has_authToken: Boolean(globalWa.authToken || globalWa.apiKey)
           }
         }
       });
@@ -28399,20 +30098,25 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       const school = db.prepare("SELECT id, nom FROM school_info WHERE id = ?").get(schoolId);
       if (!school) return res.status(404).json({ error: "Établissement introuvable." });
 
-      const { smtp, sms } = req.body;
+      const { smtp, sms, whatsapp } = req.body;
 
       db.transaction(() => {
-        // 1. SMTP Config
+        // 1. SMTP / Brevo Email Config
         if (smtp) {
-          const existingSmtp = db.prepare("SELECT id, smtp_pass FROM school_smtp_configs WHERE school_id = ?").get(schoolId) as any;
+          const existingSmtp = db.prepare("SELECT id, smtp_pass, brevo_api_key FROM school_smtp_configs WHERE school_id = ?").get(schoolId) as any;
           const finalPass = (smtp.smtp_pass && smtp.smtp_pass.trim() !== '') 
             ? smtp.smtp_pass.trim() 
             : (existingSmtp?.smtp_pass || '');
+          const finalBrevoKey = (smtp.brevo_api_key && smtp.brevo_api_key.trim() !== '')
+            ? smtp.brevo_api_key.trim()
+            : (existingSmtp?.brevo_api_key || '');
 
           if (existingSmtp) {
             db.prepare(`
               UPDATE school_smtp_configs
               SET custom_smtp_enabled = ?,
+                  email_provider = ?,
+                  brevo_api_key = ?,
                   smtp_host = ?,
                   smtp_port = ?,
                   smtp_user = ?,
@@ -28423,6 +30127,8 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
               WHERE school_id = ?
             `).run(
               smtp.custom_smtp_enabled ? 1 : 0,
+              (smtp.email_provider || 'smtp').trim(),
+              finalBrevoKey,
               (smtp.smtp_host || '').trim(),
               (smtp.smtp_port || '587').toString().trim(),
               (smtp.smtp_user || '').trim(),
@@ -28434,11 +30140,13 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
           } else {
             db.prepare(`
               INSERT INTO school_smtp_configs (
-                school_id, custom_smtp_enabled, smtp_host, smtp_port, smtp_user, smtp_pass, smtp_secure, email_from
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                school_id, custom_smtp_enabled, email_provider, brevo_api_key, smtp_host, smtp_port, smtp_user, smtp_pass, smtp_secure, email_from
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `).run(
               schoolId,
               smtp.custom_smtp_enabled ? 1 : 0,
+              (smtp.email_provider || 'smtp').trim(),
+              finalBrevoKey,
               (smtp.smtp_host || '').trim(),
               (smtp.smtp_port || '587').toString().trim(),
               (smtp.smtp_user || '').trim(),
@@ -28504,9 +30212,66 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
             );
           }
         }
+
+        // 3. WhatsApp Config
+        if (whatsapp) {
+          const existingWa = db.prepare("SELECT id, auth_token, api_key FROM whatsapp_configs WHERE school_id = ?").get(schoolId) as any;
+          const finalWaToken = (whatsapp.auth_token && whatsapp.auth_token.trim() !== '')
+            ? whatsapp.auth_token.trim()
+            : (existingWa?.auth_token || '');
+          const finalWaApiKey = (whatsapp.api_key && whatsapp.api_key.trim() !== '')
+            ? whatsapp.api_key.trim()
+            : (existingWa?.api_key || '');
+
+          if (existingWa) {
+            db.prepare(`
+              UPDATE whatsapp_configs
+              SET custom_whatsapp_enabled = ?,
+                  provider = ?,
+                  is_active = ?,
+                  account_sid = ?,
+                  auth_token = ?,
+                  phone_number_id = ?,
+                  sender_number = ?,
+                  api_url = ?,
+                  api_key = ?,
+                  updated_at = CURRENT_TIMESTAMP
+              WHERE school_id = ?
+            `).run(
+              whatsapp.custom_whatsapp_enabled ? 1 : 0,
+              whatsapp.provider || 'simulation',
+              whatsapp.is_active !== undefined ? (whatsapp.is_active ? 1 : 0) : 1,
+              (whatsapp.account_sid || '').trim(),
+              finalWaToken,
+              (whatsapp.phone_number_id || '').trim(),
+              (whatsapp.sender_number || '').trim(),
+              (whatsapp.api_url || '').trim(),
+              finalWaApiKey,
+              schoolId
+            );
+          } else {
+            db.prepare(`
+              INSERT INTO whatsapp_configs (
+                school_id, custom_whatsapp_enabled, provider, is_active,
+                account_sid, auth_token, phone_number_id, sender_number, api_url, api_key
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `).run(
+              schoolId,
+              whatsapp.custom_whatsapp_enabled ? 1 : 0,
+              whatsapp.provider || 'simulation',
+              whatsapp.is_active !== undefined ? (whatsapp.is_active ? 1 : 0) : 1,
+              (whatsapp.account_sid || '').trim(),
+              finalWaToken,
+              (whatsapp.phone_number_id || '').trim(),
+              (whatsapp.sender_number || '').trim(),
+              (whatsapp.api_url || '').trim(),
+              finalWaApiKey
+            );
+          }
+        }
       })();
 
-      recordSaasLog(req.userId, "UPDATE_SCHOOL_MESSAGING", { schoolId, hasSmtp: Boolean(smtp), hasSms: Boolean(sms) }, req);
+      recordSaasLog(req.userId, "UPDATE_SCHOOL_MESSAGING", { schoolId, hasSmtp: Boolean(smtp), hasSms: Boolean(sms), hasWhatsapp: Boolean(whatsapp) }, req);
 
       res.json({ success: true, message: "Configuration des passerelles enregistrée avec succès." });
     } catch (err: any) {
@@ -28603,6 +30368,40 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
     } catch (err: any) {
       console.error("School test SMS error:", err);
       res.status(500).json({ error: "Échec du test SMS : " + err.message });
+    }
+  });
+
+  // Test School WhatsApp
+  app.post("/api/super-admin/schools/:id/test-whatsapp", authenticateToken, requireSuperAdmin, async (req: any, res) => {
+    try {
+      const schoolId = parseInt(req.params.id, 10);
+      const school = db.prepare("SELECT id, nom, telephone FROM school_info WHERE id = ?").get(schoolId) as any;
+      if (!school) return res.status(404).json({ error: "Établissement introuvable." });
+
+      const { testPhone } = req.body;
+      const target = testPhone || school.telephone;
+      if (!target) return res.status(400).json({ error: "Numéro WhatsApp requis." });
+
+      const result = await sendWhatsAppService({
+        to: target,
+        schoolId,
+        recipientName: school.nom,
+        message: `Test passerelle WhatsApp pour ${school.nom}. Vos notifications automatiques WhatsApp sont opérationnelles.`
+      });
+
+      res.json({
+        success: result.success,
+        status: result.status,
+        provider: result.provider,
+        simulated: result.simulated,
+        message: result.simulated
+          ? `Message WhatsApp simulé avec succès pour ${target} (fournisseur: ${result.provider}).`
+          : result.success
+          ? `Message WhatsApp envoyé avec succès à ${target} via ${result.provider} !`
+          : `Échec d'envoi WhatsApp via ${result.provider} : ${result.error || ''}`
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: "Échec du test WhatsApp : " + err.message });
     }
   });
 
@@ -28844,6 +30643,44 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
             );
           }
         }
+
+        // Trigger multi-channel automation for published results
+        try {
+          let fullStQuery = `
+            SELECT e.id, e.nom, e.prenom, e.nom_parent, e.tel_parent, e.email_parent, c.nom as classe_nom
+            FROM eleves e
+            LEFT JOIN classes c ON e.classe_id = c.id
+            WHERE e.school_id = ? AND (e.tel_parent IS NOT NULL OR e.email_parent IS NOT NULL)
+          `;
+          const fParams: any[] = [schoolId];
+          if (classe_id) {
+            fullStQuery += " AND e.classe_id = ?";
+            fParams.push(classe_id);
+          } else if (resolvedCycle) {
+            fullStQuery += " AND e.classe_id IN (SELECT id FROM classes WHERE school_id = ? AND (cycle = ? OR LOWER(niveau) LIKE ?))";
+            fParams.push(schoolId, resolvedCycle, `%${resolvedCycle.toLowerCase()}%`);
+          }
+          const fullStudents = db.prepare(fullStQuery).all(...fParams) as any[];
+          const autoItems = fullStudents.map(st => ({
+            recipient: {
+              name: st.nom_parent || 'Parent',
+              phone: st.tel_parent || '',
+              whatsapp: st.tel_parent || '',
+              email: st.email_parent || ''
+            },
+            variables: {
+              nom_eleve: `${st.prenom || ''} ${st.nom || ''}`.trim(),
+              nom_parent: st.nom_parent || 'Parent',
+              classe: st.classe_nom || '',
+              periode: periodLabel,
+              date: new Date().toLocaleDateString('fr-FR')
+            },
+            entityRef: `bulletin:${st.id}:${type_periode}:${periode_valeur}`
+          }));
+          if (autoItems.length > 0) {
+            triggerAutomationEvent(schoolId, 'bulletin_published', autoItems).catch(() => {});
+          }
+        } catch (autoErr) {}
       }
 
       res.json({ success: true, cycle: resolvedCycle, est_publie: est_publie ? 1 : 0, bulletin_telechargeable: bulletin_telechargeable ? 1 : 0 });
@@ -28956,6 +30793,44 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       });
 
       tx();
+
+      // Automation event hook on bulk publication
+      if (est_publie && classes.length > 0) {
+        try {
+          const periodLabel = type_periode === 'trimestre'
+            ? `${periode_valeur === '1' ? '1er' : periode_valeur === '2' ? '2ème' : '3ème'} Trimestre`
+            : `Évaluation ${String(periode_valeur).replace('EvalSommative', 'Sommative ')}`;
+          const classIds = classes.map(c => c.id);
+          const placeholders = classIds.map(() => '?').join(',');
+          const fullStudents = db.prepare(`
+            SELECT e.id, e.nom, e.prenom, e.nom_parent, e.tel_parent, e.email_parent, c.nom as classe_nom
+            FROM eleves e
+            LEFT JOIN classes c ON e.classe_id = c.id
+            WHERE e.school_id = ? AND e.classe_id IN (${placeholders})
+              AND (e.tel_parent IS NOT NULL OR e.email_parent IS NOT NULL)
+          `).all(schoolId, ...classIds) as any[];
+          const autoItems = fullStudents.map(st => ({
+            recipient: {
+              name: st.nom_parent || 'Parent',
+              phone: st.tel_parent || '',
+              whatsapp: st.tel_parent || '',
+              email: st.email_parent || ''
+            },
+            variables: {
+              nom_eleve: `${st.prenom || ''} ${st.nom || ''}`.trim(),
+              nom_parent: st.nom_parent || 'Parent',
+              classe: st.classe_nom || '',
+              periode: periodLabel,
+              date: new Date().toLocaleDateString('fr-FR')
+            },
+            entityRef: `bulletin:${st.id}:${type_periode}:${periode_valeur}`
+          }));
+          if (autoItems.length > 0) {
+            triggerAutomationEvent(schoolId, 'bulletin_published', autoItems).catch(() => {});
+          }
+        } catch (autoErr) {}
+      }
+
       res.json({ success: true, cycle: resolvedCycle, count: classes.length + 1, est_publie: est_publie ? 1 : 0, bulletin_telechargeable: bulletin_telechargeable ? 1 : 0 });
     } catch (error: any) {
       res.status(500).json({ error: error.message });

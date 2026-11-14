@@ -38,12 +38,15 @@ import {
   File,
   Download,
   Film,
-  Image as ImageIcon
+  Image as ImageIcon,
+  Zap,
+  MessageCircle
 } from 'lucide-react';
 import { format } from 'date-fns';
 import { fr } from 'date-fns/locale';
 import { InternalMessage, ConversationParticipant, SmsLog, SmsConfig } from '../types';
 import GmailInboxView from '../components/GmailInboxView';
+import AutomationSettingsPanel from '../components/messaging/AutomationSettingsPanel';
 
 // Custom Audio Player with Play / Pause button for voice messages
 function VoicePlayer({ audioUrl, isMine }: { audioUrl: string; isMine?: boolean }) {
@@ -192,8 +195,8 @@ export default function Messaging() {
   const { user } = useAuth();
   const confirm = useConfirm();
 
-  // Active view: 'conversations' | 'sms_direct' | 'sms_logs' | 'sms_settings' | 'gmail'
-  const [activeTab, setActiveTab] = React.useState<'conversations' | 'sms_direct' | 'sms_logs' | 'sms_settings' | 'gmail'>('conversations');
+  // Active view: 'conversations' | 'sms_direct' | 'sms_logs' | 'sms_settings' | 'automations' | 'gmail'
+  const [activeTab, setActiveTab] = React.useState<'conversations' | 'sms_direct' | 'sms_logs' | 'sms_settings' | 'automations' | 'gmail'>('conversations');
 
   // Contact list and groups
   const [contacts, setContacts] = React.useState<{
@@ -222,6 +225,7 @@ export default function Messaging() {
   const [messageSubject, setMessageSubject] = React.useState('');
   const [sendWithSms, setSendWithSms] = React.useState(false);
   const [sendWithEmail, setSendWithEmail] = React.useState(false);
+  const [sendWithWhatsApp, setSendWithWhatsApp] = React.useState(false);
   const [sendingMessage, setSendingMessage] = React.useState(false);
 
   // Filter & Search in contacts
@@ -434,7 +438,8 @@ export default function Messaging() {
         content: messageContent.trim(),
         subject: messageSubject.trim(),
         send_sms: sendWithSms,
-        send_email: sendWithEmail
+        send_email: sendWithEmail,
+        send_whatsapp: sendWithWhatsApp
       };
 
       if (selectedTarget.type === 'user') {
@@ -464,9 +469,11 @@ export default function Messaging() {
         setMessageSubject('');
         setSendWithSms(false);
         setSendWithEmail(false);
+        setSendWithWhatsApp(false);
         const emailMsg = data.emailResult?.sent ? ` • ${data.emailResult.sent} email(s) réel(s) expédié(s)` : '';
         const smsMsg = data.smsResult?.sent ? ` • ${data.smsResult.sent} SMS envoyé(s)` : '';
-        toast.success(`Message expédié avec succès !${emailMsg}${smsMsg}`);
+        const waMsg = data.whatsappResult?.sent ? ` • ${data.whatsappResult.sent} WhatsApp envoyé(s)` : '';
+        toast.success(`Message expédié avec succès !${emailMsg}${smsMsg}${waMsg}`);
         fetchThreadMessages(selectedTarget);
         fetchContacts();
       } else {
@@ -911,7 +918,8 @@ export default function Messaging() {
         attachment_url: url,
         attachment_name: name,
         recipient_type: selectedTarget.type === 'user' ? 'user' : selectedTarget.type,
-        send_sms: sendWithSms
+        send_sms: sendWithSms,
+        send_whatsapp: sendWithWhatsApp
       };
 
       if (selectedTarget.type === 'user') payload.recipient_id = selectedTarget.id;
@@ -973,7 +981,8 @@ export default function Messaging() {
         content: "[Message Vocal]",
         audio_url: audioUrl,
         recipient_type: selectedTarget.type === 'user' ? 'user' : selectedTarget.type,
-        send_sms: sendWithSms
+        send_sms: sendWithSms,
+        send_whatsapp: sendWithWhatsApp
       };
 
       if (selectedTarget.type === 'user') payload.recipient_id = selectedTarget.id;
@@ -1064,11 +1073,11 @@ export default function Messaging() {
 
         {/* Tab Navigation Controls (Full tabs for staff/admin, Conversations tab for teachers) */}
         {!isTeacher ? (
-          <div className="flex items-center gap-1.5 p-1 bg-slate-100 rounded-xl border border-slate-200">
+          <div className="flex items-center gap-1.5 p-1 bg-slate-100 rounded-xl border border-slate-200 overflow-x-auto max-w-full">
             <button
               id="tab-conversations-btn"
               onClick={() => setActiveTab('conversations')}
-              className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition-all ${
+              className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition-all whitespace-nowrap shrink-0 ${
                 activeTab === 'conversations'
                   ? 'bg-white text-emerald-700 shadow-sm'
                   : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
@@ -1077,14 +1086,14 @@ export default function Messaging() {
               <MessageSquare className="w-3.5 h-3.5" />
               <span>Discussions</span>
               {contacts.unreadCount > 0 && (
-                <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse" />
+                <span className="w-2 h-2 rounded-full bg-rose-500" />
               )}
             </button>
 
             <button
               id="tab-sms-direct-btn"
               onClick={() => setActiveTab('sms_direct')}
-              className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition-all ${
+              className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition-all whitespace-nowrap shrink-0 ${
                 activeTab === 'sms_direct'
                   ? 'bg-white text-emerald-700 shadow-sm'
                   : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
@@ -1097,7 +1106,7 @@ export default function Messaging() {
             <button
               id="tab-sms-logs-btn"
               onClick={() => setActiveTab('sms_logs')}
-              className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition-all ${
+              className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition-all whitespace-nowrap shrink-0 ${
                 activeTab === 'sms_logs'
                   ? 'bg-white text-emerald-700 shadow-sm'
                   : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
@@ -1109,9 +1118,24 @@ export default function Messaging() {
 
             {isUserAdmin && (
               <button
+                id="tab-automations-btn"
+                onClick={() => setActiveTab('automations')}
+                className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition-all whitespace-nowrap shrink-0 ${
+                  activeTab === 'automations'
+                    ? 'bg-white text-emerald-700 shadow-sm'
+                    : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
+                }`}
+              >
+                <Zap className="w-3.5 h-3.5 text-emerald-600" />
+                <span>Automatisations</span>
+              </button>
+            )}
+
+            {isUserAdmin && (
+              <button
                 id="tab-sms-settings-btn"
                 onClick={() => setActiveTab('sms_settings')}
-                className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition-all ${
+                className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition-all whitespace-nowrap shrink-0 ${
                   activeTab === 'sms_settings'
                     ? 'bg-white text-emerald-700 shadow-sm'
                     : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
@@ -1125,7 +1149,7 @@ export default function Messaging() {
             <button
               id="tab-gmail-btn"
               onClick={() => setActiveTab('gmail')}
-              className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition-all ${
+              className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition-all whitespace-nowrap shrink-0 ${
                 activeTab === 'gmail'
                   ? 'bg-white text-rose-700 shadow-sm'
                   : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
@@ -1665,7 +1689,7 @@ export default function Messaging() {
                     </span>
                   </label>
 
-                  <label className="flex items-center gap-2 cursor-pointer select-none text-xs text-slate-600 hover:text-slate-900 mr-2 py-1" title="Envoyer également par email réel via megafixaservices01@gmail.com">
+                  <label className="flex items-center gap-2 cursor-pointer select-none text-xs text-slate-600 hover:text-slate-900 mr-2 py-1" title="Envoyer également par email réel via SMTP configuré">
                     <input
                       type="checkbox"
                       checked={sendWithEmail}
@@ -1675,6 +1699,19 @@ export default function Messaging() {
                     <span className="flex items-center gap-1.5 font-bold text-blue-700">
                       <Mail className="w-4 h-4 text-blue-600" />
                       <span className="inline">Envoi</span> Email réel
+                    </span>
+                  </label>
+
+                  <label className="flex items-center gap-2 cursor-pointer select-none text-xs text-slate-600 hover:text-slate-900 mr-2 py-1" title="Envoyer également une copie via WhatsApp">
+                    <input
+                      type="checkbox"
+                      checked={sendWithWhatsApp}
+                      onChange={e => setSendWithWhatsApp(e.target.checked)}
+                      className="w-4 h-4 rounded text-emerald-600 focus:ring-emerald-500 border-slate-300"
+                    />
+                    <span className="flex items-center gap-1.5 font-bold text-emerald-700">
+                      <MessageCircle className="w-4 h-4 text-emerald-600" />
+                      <span className="inline">Copie</span> WhatsApp
                     </span>
                   </label>
 
@@ -2087,6 +2124,7 @@ export default function Messaging() {
                 className="w-full p-2.5 rounded-xl border border-slate-200 bg-white focus:ring-2 focus:ring-emerald-500/20"
               >
                 <option value="simulation">Passerelle Intelligente / Simulation Directe (Inclus)</option>
+                <option value="brevo">Brevo Transactional SMS (API v3)</option>
                 <option value="twilio">Twilio Cloud SMS API</option>
                 <option value="orange_sms">Orange SMS Gateway Africa</option>
                 <option value="mtn_sms">MTN MoMo SMS Gateway</option>
@@ -2104,6 +2142,19 @@ export default function Messaging() {
                 className="w-full p-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-emerald-500/20"
               />
             </div>
+
+            {smsConfig.provider === 'brevo' && (
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Clé API Brevo (xkeysib-...)</label>
+                <input
+                  type="password"
+                  value={smsConfig.api_key || ''}
+                  onChange={e => setSmsConfig({ ...smsConfig, api_key: e.target.value })}
+                  placeholder="xkeysib-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                  className="w-full p-2.5 rounded-xl border border-slate-200 font-mono"
+                />
+              </div>
+            )}
 
             {smsConfig.provider === 'twilio' && (
               <>
@@ -2152,6 +2203,11 @@ export default function Messaging() {
             </div>
           </form>
         </div>
+      )}
+
+      {/* VIEW 5: AUTOMATIONS (SMS / EMAIL / WHATSAPP) */}
+      {activeTab === 'automations' && isUserAdmin && (
+        <AutomationSettingsPanel />
       )}
 
       {/* Gmail Inbox & Compose View */}

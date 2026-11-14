@@ -94,6 +94,7 @@ export default function SmsSettingsTab() {
               className="w-full p-2.5 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-emerald-500/20"
             >
               <option value="simulation">Passerelle Intelligente / Simulation Directe (Inclus)</option>
+              <option value="brevo">Brevo Transactional SMS (API v3)</option>
               <option value="twilio">Twilio Cloud SMS (International / Afrique)</option>
               <option value="orange_sms">Orange SMS Gateway Africa</option>
               <option value="mtn_sms">MTN MoMo SMS Gateway</option>
@@ -122,6 +123,25 @@ export default function SmsSettingsTab() {
         </div>
 
         {/* Provider Specific Settings */}
+        {config.provider === 'brevo' && (
+          <div className="p-4 bg-emerald-50/70 rounded-xl border border-emerald-200 space-y-3">
+            <h3 className="font-bold text-emerald-900 flex items-center gap-1.5">
+              <Key className="w-4 h-4 text-emerald-600" />
+              Identifiants Brevo Transactional SMS (API v3)
+            </h3>
+            <div>
+              <label className="block font-medium text-slate-700 mb-1">Clé API Brevo (xkeysib-...)</label>
+              <input
+                type="password"
+                value={config.api_key || ''}
+                onChange={e => setConfig({ ...config, api_key: e.target.value })}
+                placeholder="xkeysib-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                className="w-full p-2.5 rounded-lg border border-emerald-200 font-mono bg-white"
+              />
+            </div>
+          </div>
+        )}
+
         {config.provider === 'twilio' && (
           <div className="p-4 bg-slate-50 rounded-xl border border-slate-200 space-y-4">
             <h3 className="font-bold text-slate-800 flex items-center gap-1.5">
