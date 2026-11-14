@@ -21,13 +21,24 @@ interface GradesProps {
 
 export const isPrimaryOrMaternelleClass = (classeObjOrNiveau: any, currentCycle?: string) => {
   if (currentCycle === 'primaire' || currentCycle === 'maternelle') return true;
-  if (!classeObjOrNiveau) return currentCycle === 'primaire' || currentCycle === 'maternelle';
+  if (currentCycle === 'secondaire') return false;
+  if (!classeObjOrNiveau) return false;
   const niveau = typeof classeObjOrNiveau === 'string' 
     ? classeObjOrNiveau 
-    : (classeObjOrNiveau.cycle || classeObjOrNiveau.niveau || classeObjOrNiveau.nom || '');
-  return ["maternelle", "primaire", "ci", "cp", "ce1", "ce2", "cm1", "cm2", "sil", "gs", "ms", "ps", "1af", "2af", "3af", "4af", "5af", "6af", "p1", "p2", "p3", "p4", "p5", "p6", "eb", "petite", "moyenne", "grande"].some(lvl => 
-    niveau.toLowerCase().includes(lvl)
+    : `${classeObjOrNiveau.cycle || ''} ${classeObjOrNiveau.niveau || ''} ${classeObjOrNiveau.nom || ''}`;
+  const lower = niveau.toLowerCase();
+  const isSec = ["secondaire", "premier cycle", "second cycle", "technique", "6eme", "6ème", "5eme", "5ème", "4eme", "4ème", "3eme", "3ème", "2nd", "1ere", "1ère", "tle", "terminale"].some(s => lower.includes(s));
+  if (isSec) return false;
+  return ["maternelle", "primaire", "ci", "cp", "ce1", "ce2", "cm1", "cm2", "sil", "gs", "ms", "ps", "1af", "2af", "3af", "4af", "5af", "6af", "p1", "p2", "p3", "p4", "p5", "p6", "eb", "petite", "moyenne", "grande", "creche", "prescolaire"].some(lvl => 
+    lower.includes(lvl)
   );
+};
+
+export const isConduiteSubject = (m: any): boolean => {
+  if (!m) return false;
+  if (m.est_disciplinaire) return true;
+  const nom = (m.matiere_nom || m.nom || '').trim().toLowerCase();
+  return nom === 'conduite';
 };
 
 export const normalizeSubjectName = (name: string): string => {
@@ -161,7 +172,8 @@ export default function Grades({ cycle = 'all' }: GradesProps) {
     I1: '', I2: '', I3: '', I4: '',
     Dev1: '', Dev2: '',
     Composition: '', Examen: '',
-    NoteObtenue: '', NotePerfectionnement: ''
+    NoteObtenue: '', NotePerfectionnement: '',
+    NoteDisciplinaire: '', MinusValue: '', PlusValue: ''
   });
 
   const [showConfigEvalModal, setShowConfigEvalModal] = React.useState(false);
@@ -447,10 +459,13 @@ export default function Grades({ cycle = 'all' }: GradesProps) {
             I1: '', I2: '', I3: '', I4: '',
             Dev1: '', Dev2: '',
             Composition: '', Examen: '',
-            NoteObtenue: '', NotePerfectionnement: ''
+            NoteObtenue: '', NotePerfectionnement: '',
+            NoteDisciplinaire: '', MinusValue: '', PlusValue: ''
           };
           existingNotes.forEach((n: any) => {
-            if (n.type_evaluation in newInputs) {
+            if (n.type_evaluation === 'Disciplinaire') {
+              newInputs.NoteDisciplinaire = n.note.toString();
+            } else if (n.type_evaluation in newInputs) {
               (newInputs as any)[n.type_evaluation] = n.note.toString();
             }
           });
@@ -462,7 +477,8 @@ export default function Grades({ cycle = 'all' }: GradesProps) {
         I1: '', I2: '', I3: '', I4: '',
         Dev1: '', Dev2: '',
         Composition: '', Examen: '',
-        NoteObtenue: '', NotePerfectionnement: ''
+        NoteObtenue: '', NotePerfectionnement: '',
+        NoteDisciplinaire: '', MinusValue: '', PlusValue: ''
       });
     }
   }, [modalFormData.eleve_id, modalFormData.matiere_id, modalFormData.trimestre]);
@@ -812,8 +828,10 @@ export default function Grades({ cycle = 'all' }: GradesProps) {
     const user = JSON.parse(localStorage.getItem('user') || '{}');
     const enseignant_id = user.enseignant_id;
     
+    const modalClasseObj = classes.find((c: any) => c.id === parseInt(modalFormData.classe_id));
+    const isModalPrim = isPrimary(modalClasseObj);
     const currentMatiere = classMatieres.find((m: any) => m.matiere_id?.toString() === modalFormData.matiere_id?.toString());
-    const isDisciplinaire = currentMatiere?.est_disciplinaire;
+    const isDisciplinaire = currentMatiere?.est_disciplinaire && !isModalPrim;
 
     let notesToSave: any[] = [];
     if (isDisciplinaire) {
@@ -886,11 +904,14 @@ export default function Grades({ cycle = 'all' }: GradesProps) {
     const currentClasse = classeDetails || classes.find((c: any) => c.id === parseInt(selectedClasse));
     const isPrimaryClass = isPrimary(currentClasse);
     const safeNotes = Array.isArray(notes) ? notes : [];
+    const activeMatieres = isPrimaryClass
+      ? (matieres || []).filter((m: any) => !isConduiteSubject(m))
+      : (matieres || []);
 
     const calculateForTrimestre = (t: number) => {
       const studentNotes = safeNotes.filter(n => n.eleve_id === eleveId && n.trimestre === t);
       
-      const subjectsGrades = matieres.map(m => {
+      const subjectsGrades = activeMatieres.map(m => {
         const getNote = (type: string) => {
           const noteObj = studentNotes.find(n => n.matiere_id === m.matiere_id && (n.type_evaluation === type || n.type_evaluation?.endsWith(`_${type}`)));
           return noteObj ? noteObj.note : null;
@@ -1032,7 +1053,7 @@ export default function Grades({ cycle = 'all' }: GradesProps) {
       const seuil = `${validatedSubjectsCount}/${totalSubjectsCount}`;
       const seuilAtteint = totalSubjectsCount > 0 && validatedSubjectsCount >= Math.ceil(totalSubjectsCount / 2) ? 'Oui' : 'Non';
 
-      const disciplineGradeObj = finalGrades.find(sg => sg.est_disciplinaire);
+      const disciplineGradeObj = isPrimaryClass ? null : finalGrades.find(sg => sg.est_disciplinaire);
       const disciplineMoy = disciplineGradeObj ? disciplineGradeObj.moy : null;
 
       return {
@@ -1385,11 +1406,13 @@ export default function Grades({ cycle = 'all' }: GradesProps) {
     const sortedByMoy = [...allStudentsGrades].sort((a, b) => b.globalMoy - a.globalMoy);
     const globalRank = sortedByMoy.findIndex(s => s.id === eleve.id) + 1;
 
-    // Check if excluded (Conduite)
+    const isPrim = isPrimaryOrMaternelleClass(classeDetails, cycle);
+
+    // Check if excluded (Conduite - Secondaire uniquement)
     const disciplineMoy = currentStudentGrades.disciplineMoy;
-    const isAutoExclu = disciplineMoy !== null && disciplineMoy !== undefined && disciplineMoy < 7;
-    const manualExclusion = exclusions.find((ex: any) => Number(ex.eleve_id) === Number(eleve.id) && Number(ex.trimestre) === Number(trimestre));
-    const isActuallyExclu = manualExclusion ? manualExclusion.exclu === 1 : isAutoExclu;
+    const isAutoExclu = !isPrim && disciplineMoy !== null && disciplineMoy !== undefined && disciplineMoy < 7;
+    const manualExclusion = isPrim ? null : exclusions.find((ex: any) => Number(ex.eleve_id) === Number(eleve.id) && Number(ex.trimestre) === Number(trimestre));
+    const isActuallyExclu = isPrim ? false : (manualExclusion ? manualExclusion.exclu === 1 : isAutoExclu);
 
     // Previous Trimester Moyenne (if T2 or T3)
     let prevMoy = null;
@@ -1414,7 +1437,6 @@ export default function Grades({ cycle = 'all' }: GradesProps) {
     doc.rect(10, 10, 190, 277); // Main border
 
     // Header Data Configuration & Defaults
-    const isPrim = isPrimaryOrMaternelleClass(classeDetails, cycle);
     const primaryThemeColor = bulletinHeaderData?.couleur_principale || schoolInfo?.couleur_primaire || '#059669';
     const themeRgb = hexToRgb(primaryThemeColor) || [5, 150, 105];
 
@@ -1803,6 +1825,8 @@ export default function Grades({ cycle = 'all' }: GradesProps) {
 
     if (isPrimaryDoc) {
       sourceSubjects = sourceSubjects.filter((sg: any) => {
+        // Maternelle & Primaire : aucune matière de conduite / disciplinaire
+        if (isConduiteSubject(sg)) return false;
         // Exclude strictly secondary subjects
         const cat = (sg.categorie || '').toLowerCase();
         if (cat.includes('collège') || cat.includes('lycée') || (cat.includes('secondaire') && !cat.includes('primaire'))) {
@@ -3056,9 +3080,13 @@ export default function Grades({ cycle = 'all' }: GradesProps) {
     });
 
     // Subject Performance Table
+    const isStatsPrimary = isPrimary(classeDetails);
+    const statsMatieresSource = isStatsPrimary
+      ? (classeDetails?.matieres || []).filter((m: any) => !isConduiteSubject(m))
+      : (classeDetails?.matieres || []);
     const sortedMatieres: any[] = [];
-    const parents = (classeDetails?.matieres || []).filter((m: any) => !m.parent_id);
-    const children = (classeDetails?.matieres || []).filter((m: any) => m.parent_id);
+    const parents = statsMatieresSource.filter((m: any) => !m.parent_id);
+    const children = statsMatieresSource.filter((m: any) => m.parent_id);
     parents.forEach((p: any) => {
       const subMatieres = children.filter((c: any) => c.parent_id === p.matiere_id);
       if (subMatieres.length > 0) subMatieres.forEach((s: any) => sortedMatieres.push(s));
@@ -3564,8 +3592,10 @@ export default function Grades({ cycle = 'all' }: GradesProps) {
     apiFetch(`/api/classes/${selectedClasse}/details`)
       .then(res => res.json())
       .then(data => {
-        const classMatieres = data.matieres || [];
         const isPrimaryClass = isPrimary(currentClasseObj);
+        const classMatieres = isPrimaryClass
+          ? (data.matieres || []).filter((m: any) => !isConduiteSubject(m))
+          : (data.matieres || []);
 
         // Sorting matieres by category as requested: Littéraires, Scientifiques, Autres
         const parents = classMatieres.filter((m: any) => !m.parent_id);
@@ -5253,9 +5283,14 @@ export default function Grades({ cycle = 'all' }: GradesProps) {
                       className="w-full px-4 py-2 bg-slate-50 border-none rounded-xl outline-none focus:ring-2 focus:ring-primary-500 disabled:opacity-50 font-medium"
                     >
                       <option value="">Sélectionner une matière</option>
-                      {classMatieres.map((m: any) => (
-                        <option key={m.matiere_id} value={m.matiere_id}>{m.matiere_nom}</option>
-                      ))}
+                      {classMatieres
+                        .filter((m: any) => {
+                          const modalCls = classes.find((c: any) => c.id === parseInt(modalFormData.classe_id));
+                          return !(isPrimary(modalCls) && isConduiteSubject(m));
+                        })
+                        .map((m: any) => (
+                          <option key={m.matiere_id} value={m.matiere_id}>{m.matiere_nom}</option>
+                        ))}
                     </select>
                     {isLoadingClassMatieres && (
                       <div className="absolute right-8 top-1/2 -translate-y-1/2">
@@ -5286,15 +5321,16 @@ export default function Grades({ cycle = 'all' }: GradesProps) {
                 const modalClasseObj = classes.find((c: any) => c.id === parseInt(modalFormData.classe_id));
                 const isModalPrimary = isPrimary(modalClasseObj);
                 const currentMatiere = classMatieres.find((m: any) => m.matiere_id?.toString() === modalFormData.matiere_id?.toString());
-                const isDisciplinaire = currentMatiere?.est_disciplinaire;
+                const isDisciplinaire = currentMatiere?.est_disciplinaire && !isModalPrimary;
                 const obtVal = parseFloat(notesInputs.NoteObtenue || '0') || 0;
                 const perfVal = parseFloat(notesInputs.NotePerfectionnement || '0') || 0;
                 const totalSum = obtVal + perfVal;
                 const isInvalidPrimary = isModalPrimary && (totalSum > 20 || obtVal > 20 || perfVal > 2);
 
                 if (isDisciplinaire) {
+                  const activeTrim = modalFormData.trimestre || 1;
                   const tMap: any = { 1: 'plafond_conduite_t1', 2: 'plafond_conduite_t2', 3: 'plafond_conduite_t3' };
-                  const plafond = modalClasseObj?.[tMap[selectedTrimestre]] ?? modalClasseObj?.plafond_conduite ?? 20;
+                  const plafond = modalClasseObj?.[tMap[activeTrim]] ?? modalClasseObj?.plafond_conduite ?? 20;
                   const minusVal = notesInputs.MinusValue || '0';
                   const plusVal = notesInputs.PlusValue || '0';
                   const calculatedNote = Math.min(20, Math.max(0, plafond - (parseFloat(minusVal) || 0) + (parseFloat(plusVal) || 0)));
@@ -5307,9 +5343,43 @@ export default function Grades({ cycle = 'all' }: GradesProps) {
                       </div>
                       
                       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                        <div className="space-y-1 p-4 bg-slate-50 rounded-2xl border border-slate-200">
-                          <label className="text-xs font-bold text-slate-500 uppercase tracking-tight">Plafond (T{selectedTrimestre})</label>
-                          <div className="text-xl font-black text-slate-900">{plafond} / 20</div>
+                        <div className="space-y-1 p-3.5 bg-blue-50/70 rounded-2xl border border-blue-200">
+                          <label className="text-xs font-bold text-blue-800 uppercase tracking-tight">Plafond (T{activeTrim})</label>
+                          {user?.role !== 'enseignant' ? (
+                            <div className="flex items-center gap-1.5 mt-1">
+                              <input
+                                type="number"
+                                step="0.25"
+                                min="1"
+                                max="20"
+                                value={plafond}
+                                onChange={async (e) => {
+                                  const val = parseFloat(e.target.value);
+                                  if (isNaN(val) || !modalClasseObj) return;
+                                  const updatedClass = { ...modalClasseObj, [tMap[activeTrim]]: val };
+                                  setClasses(classes.map((c: any) => c.id === updatedClass.id ? updatedClass : c));
+                                  if (classeDetails?.id === updatedClass.id) setClasseDetails(updatedClass);
+                                  const currentMinus = parseFloat(notesInputs.MinusValue) || 0;
+                                  const currentPlus = parseFloat(notesInputs.PlusValue) || 0;
+                                  const final = Math.min(20, Math.max(0, val - currentMinus + currentPlus));
+                                  setNotesInputs({ ...notesInputs, NoteDisciplinaire: final.toString() });
+                                  try {
+                                    await apiFetch(`/api/classes/${modalClasseObj.id}`, {
+                                      method: 'PUT',
+                                      headers: { 'Content-Type': 'application/json' },
+                                      body: JSON.stringify(updatedClass)
+                                    });
+                                  } catch (err) {
+                                    console.error(err);
+                                  }
+                                }}
+                                className="w-20 px-2.5 py-1 bg-white border border-blue-200 rounded-lg text-base font-black text-slate-900 text-center outline-none focus:ring-2 focus:ring-blue-500"
+                              />
+                              <span className="text-sm font-bold text-slate-600">/ 20</span>
+                            </div>
+                          ) : (
+                            <div className="text-xl font-black text-slate-900">{plafond} / 20</div>
+                          )}
                         </div>
                         <div className="space-y-1">
                           <label className="text-xs font-bold text-slate-700">Moins (Malus)</label>
@@ -5735,9 +5805,11 @@ export default function Grades({ cycle = 'all' }: GradesProps) {
                   className="w-full px-4 py-2 bg-white border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-primary-500 text-sm font-bold"
                 >
                   <option value="">Sélectionner une matière</option>
-                  {(classeDetails?.matieres || matieres)?.map((m: any) => (
-                    <option key={m.matiere_id || m.id} value={m.matiere_id || m.id}>{m.matiere_nom || m.nom}</option>
-                  ))}
+                  {(classeDetails?.matieres || matieres)
+                    ?.filter((m: any) => !(isPrimary(classes.find((c: any) => c.id === parseInt(selectedClasse)) || classeDetails) && isConduiteSubject(m)))
+                    .map((m: any) => (
+                      <option key={m.matiere_id || m.id} value={m.matiere_id || m.id}>{m.matiere_nom || m.nom}</option>
+                    ))}
                 </select>
               </div>
               <div className="space-y-1">
@@ -5756,14 +5828,61 @@ export default function Grades({ cycle = 'all' }: GradesProps) {
                 const rapidClasseObj = classes.find((c: any) => c.id === parseInt(selectedClasse));
                 const isRapidPrimary = isPrimary(rapidClasseObj || classeDetails);
                 const currentMatiere = (classeDetails?.matieres || matieres)?.find((m: any) => (m.matiere_id || m.id).toString() === selectedMatiereRapid);
-                const isDisciplinaire = currentMatiere?.est_disciplinaire;
+                const isDisciplinaire = currentMatiere?.est_disciplinaire && !isRapidPrimary;
 
                 if (isDisciplinaire) {
+                  const activeTrimRapid = selectedTrimestreRapid || 1;
                   const tMap: any = { 1: 'plafond_conduite_t1', 2: 'plafond_conduite_t2', 3: 'plafond_conduite_t3' };
-                  const plafond = rapidClasseObj?.[tMap[selectedTrimestre]] ?? rapidClasseObj?.plafond_conduite ?? 20;
+                  const plafond = rapidClasseObj?.[tMap[activeTrimRapid]] ?? rapidClasseObj?.plafond_conduite ?? 20;
 
                   return (
-                    <table className="w-full border-collapse text-sm">
+                    <div className="space-y-4">
+                      {user?.role !== 'enseignant' && rapidClasseObj && (
+                        <div className="p-3 bg-blue-50/80 border border-blue-200 rounded-2xl flex flex-wrap items-center justify-between gap-3 text-xs">
+                          <div className="flex items-center gap-2 font-bold text-slate-800">
+                            <ShieldCheck size={16} className="text-blue-600" />
+                            <span>Plafond de la conduite (Trimestre {activeTrimRapid}) :</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="number"
+                              step="0.25"
+                              min="1"
+                              max="20"
+                              value={plafond}
+                              onChange={async (e) => {
+                                const val = parseFloat(e.target.value);
+                                if (isNaN(val)) return;
+                                const updatedClass = { ...rapidClasseObj, [tMap[activeTrimRapid]]: val };
+                                setClasses(classes.map((c: any) => c.id === updatedClass.id ? updatedClass : c));
+                                if (classeDetails?.id === updatedClass.id) setClasseDetails(updatedClass);
+                                setRapidEntryData(prev => prev.map((st: any) => {
+                                  const m = parseFloat(st.notes.MinusValue);
+                                  const p = parseFloat(st.notes.PlusValue);
+                                  if (!isNaN(m) || !isNaN(p)) {
+                                    const nextFinal = Math.min(20, Math.max(0, val - (isNaN(m) ? 0 : m) + (isNaN(p) ? 0 : p)));
+                                    return { ...st, notes: { ...st.notes, Disciplinaire: nextFinal.toString() } };
+                                  }
+                                  return st;
+                                }));
+                                try {
+                                  const res = await apiFetch(`/api/classes/${selectedClasse}`, {
+                                    method: 'PUT',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify(updatedClass)
+                                  });
+                                  if (!res.ok) toast.error("Erreur lors de l'enregistrement du plafond");
+                                } catch (err) {
+                                  console.error(err);
+                                }
+                              }}
+                              className="w-20 px-2 py-1.5 text-center font-bold border border-blue-200 rounded-lg outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                            />
+                            <span className="text-slate-500 font-medium">/ 20</span>
+                          </div>
+                        </div>
+                      )}
+                      <table className="w-full border-collapse text-sm">
                       <thead className="sticky top-0 bg-white z-10">
                         <tr className="bg-slate-100">
                           <th className="border border-slate-200 p-3 text-left sticky left-0 bg-slate-100 z-20 min-w-[200px]">Élève</th>
@@ -5852,6 +5971,7 @@ export default function Grades({ cycle = 'all' }: GradesProps) {
                         )})}
                       </tbody>
                     </table>
+                    </div>
                   );
                 }
 
@@ -5981,9 +6101,13 @@ export default function Grades({ cycle = 'all' }: GradesProps) {
 
       {/* Grid Modal */}
       {showGridModal && classeDetails && (() => {
+        const isGridPrimary = isPrimary(classeDetails);
+        const gridMatieresSource = isGridPrimary
+          ? (classeDetails?.matieres || []).filter((m: any) => !isConduiteSubject(m))
+          : (classeDetails?.matieres || []);
         const sortedMatieres: any[] = [];
-        const parents = (classeDetails?.matieres || []).filter((m: any) => !m.parent_id);
-        const children = (classeDetails?.matieres || []).filter((m: any) => m.parent_id);
+        const parents = gridMatieresSource.filter((m: any) => !m.parent_id);
+        const children = gridMatieresSource.filter((m: any) => m.parent_id);
 
         // Categorized sorting for subjects: Littéraires, Scientifiques, Autres
         const categoryOrder = ['littéraire', 'littéraires', 'scientifique', 'scientifiques', 'autre', 'autres'];
@@ -6346,9 +6470,12 @@ export default function Grades({ cycle = 'all' }: GradesProps) {
                       </th>
 
                       {(() => {
-                        const parents = (classeDetails?.matieres || []).filter((m: any) => !m.parent_id);
-                        const children = (classeDetails?.matieres || []).filter((m: any) => !!m.parent_id);
                         const isPrim = isPrimary(classeDetails);
+                        const headerMatieresSource = isPrim
+                          ? (classeDetails?.matieres || []).filter((m: any) => !isConduiteSubject(m))
+                          : (classeDetails?.matieres || []);
+                        const parents = headerMatieresSource.filter((m: any) => !m.parent_id);
+                        const children = headerMatieresSource.filter((m: any) => !!m.parent_id);
                         
                         // We need to maintain the same order as sortedMatieres (which is used in the body)
                         // sortedMatieres was built from subjectsWithMetadata which was sorted.
@@ -6451,7 +6578,6 @@ export default function Grades({ cycle = 'all' }: GradesProps) {
                           )}
                           {user?.role !== 'enseignant' && (
                             <>
-                              <th rowSpan={2} className="border border-slate-200 bg-red-100 text-red-900 p-2 min-w-[70px]">Exclu. (Conduite)</th>
                               <th rowSpan={2} className="border border-slate-200 bg-slate-100 p-2 min-w-[120px]">Bulletin</th>
                             </>
                           )}
@@ -6762,11 +6888,6 @@ export default function Grades({ cycle = 'all' }: GradesProps) {
                           const studentData = allStudentsGrades.get(e.id);
                           const studentGrades = studentData?.grades || { globalMoy: 0, seuil: '0/0', seuilAtteint: 'Non', disciplineMoy: null };
                           const annualBilan = studentData?.annualBilan || { seuilRatio: '0/0', seuilAtteint: 'Non', decision: 'Redouble', annualMoy: 0 };
-                          
-                          const disciplineMoy = studentGrades.disciplineMoy;
-                          const isAutoExclu = disciplineMoy !== null && disciplineMoy !== undefined && disciplineMoy < 7;
-                          const manualExclusion = exclusions.find((ex: any) => Number(ex.eleve_id) === Number(e.id) && Number(ex.trimestre) === Number(selectedTrimestre));
-                          const isActuallyExclu = manualExclusion ? manualExclusion.exclu === 1 : isAutoExclu;
 
                           return (
                             <>
@@ -6803,15 +6924,6 @@ export default function Grades({ cycle = 'all' }: GradesProps) {
                               )}
                               {user?.role !== 'enseignant' && (
                                 <>
-                                  <td className="border border-slate-200 p-2 text-center">
-                                    <button
-                                      onClick={() => handleToggleExclusion(e.id, isActuallyExclu)}
-                                      className={`px-2 py-1 rounded text-xs font-bold transition-colors ${isActuallyExclu ? 'bg-red-100 text-red-800 hover:bg-red-200' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
-                                      title={isActuallyExclu ? 'Annuler l\'exclusion' : 'Marquer comme exclu'}
-                                    >
-                                      {isActuallyExclu ? 'Oui' : 'Non'}
-                                    </button>
-                                  </td>
                                   <td className="border border-slate-200 p-2 text-center bg-white">
                                     <div className="flex items-center justify-center gap-2">
                                       <button 

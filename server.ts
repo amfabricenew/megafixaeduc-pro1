@@ -4016,14 +4016,19 @@ async function sendMailWithFallback(options: SendEmailOptions): Promise<SendEmai
     if (!classe) return false;
     const cycle = (classe.cycle || '').toLowerCase();
     const level = (classe.niveau || '').toLowerCase();
-    return ["maternelle", "primaire", "ci", "cp", "ce1", "ce2", "cm1", "cm2", "sil", "gs", "ms", "ps", "1af", "2af", "3af", "4af", "5af", "6af", "p1", "p2", "p3", "p4", "p5", "p6", "eb", "petite", "moyenne", "grande"].some(lvl => 
-      cycle.includes(lvl) || level.includes(lvl)
+    const nom = (classe.nom || '').toLowerCase();
+    const isSec = ["secondaire", "premier cycle", "second cycle", "technique", "6eme", "6ème", "5eme", "5ème", "4eme", "4ème", "3eme", "3ème", "2nd", "1ere", "1ère", "tle", "terminale"].some(s =>
+      cycle.includes(s) || level.includes(s) || nom.includes(s)
+    );
+    if (isSec) return false;
+    return ["maternelle", "primaire", "ci", "cp", "ce1", "ce2", "cm1", "cm2", "sil", "gs", "ms", "ps", "1af", "2af", "3af", "4af", "5af", "6af", "p1", "p2", "p3", "p4", "p5", "p6", "eb", "petite", "moyenne", "grande", "creche", "prescolaire"].some(lvl => 
+      cycle.includes(lvl) || level.includes(lvl) || nom.includes(lvl)
     );
   }
 
   function calculateAnnualAverage(eleveId: number, anneeId: number, classeId: number, schoolId: number) {
     const notes = db.prepare("SELECT * FROM notes WHERE eleve_id = ? AND annee_id = ? AND school_id = ?").all(eleveId, anneeId, schoolId) as any[];
-    const matieres = db.prepare(`
+    let matieres = db.prepare(`
       SELECT m.*, cm.coefficient 
       FROM matieres m 
       JOIN classe_matieres cm ON m.id = cm.matiere_id 
@@ -4033,8 +4038,11 @@ async function sendMailWithFallback(options: SendEmailOptions): Promise<SendEmai
     const classe = db.prepare("SELECT * FROM classes WHERE id = ?").get(classeId) as any;
     const isPrimary = isPrimaryOrMaternelleClass(classe);
 
-    // Auto-add Conduite for Secondary if missing
-    if (!isPrimary) {
+    if (isPrimary) {
+      // Maternelle & Primaire : aucune note de conduite / matière disciplinaire
+      matieres = matieres.filter(m => !m.est_disciplinaire && (m.nom || '').trim().toLowerCase() !== 'conduite');
+    } else {
+      // Auto-add Conduite for Secondary only if missing
       const hasConduite = matieres.some(m => (m.nom || '').toLowerCase() === 'conduite');
       if (!hasConduite) {
         const conduiteMatiere = db.prepare("SELECT * FROM matieres WHERE nom = 'Conduite' AND school_id = ?").get(schoolId) as any;
@@ -7174,7 +7182,7 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
       ORDER BY e.nom, e.prenom
     `).all(id, req.schoolId);
     
-    const matieres = db.prepare(`
+    let matieres = db.prepare(`
       SELECT cm.*, cm.matiere_id as id, m.nom as matiere_nom, m.categorie, m.parent_id, m.est_disciplinaire, e.nom as enseignant_nom, e.prenom as enseignant_prenom
       FROM classe_matieres cm
       JOIN matieres m ON cm.matiere_id = m.id
@@ -7183,35 +7191,38 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
       ORDER BY m.nom
     `).all(id, req.schoolId) as any[];
 
-    // Ensure Conduite is included for secondary classes even if not manually assigned
-    const isSec = classe && (classe.niveau || '').toLowerCase().includes('secondaire') || (classe && !["Primaire", "Maternelle", "CI", "CP", "CE1", "CE2", "CM1", "CM2"].some(lvl => (classe.niveau || '').toLowerCase().includes(lvl.toLowerCase())));
-    const hasConduite = matieres.some(m => (m.matiere_nom || m.nom || '').toLowerCase() === 'conduite');
-    
-    if (isSec && !hasConduite) {
-      let conduiteBase = db.prepare("SELECT * FROM matieres WHERE nom = 'Conduite' AND school_id = ?").get(req.schoolId) as any;
-      if (!conduiteBase) {
-        // Create Conduite subject if missing
-        try {
-          const res = db.prepare("INSERT INTO matieres (nom, code, sigle, categorie, coefficient, school_id, est_disciplinaire, cycle) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
-            'Conduite', 'MAT-COND-AUTO', 'COND', 'Sciences Humaines & Sociales', 1, req.schoolId, 1, 'secondaire'
-          );
-          conduiteBase = db.prepare("SELECT * FROM matieres WHERE id = ?").get(res.lastInsertRowid);
-        } catch (e) {
-          console.error("Auto-creation of Conduite subject failed:", e);
+    // La conduite concerne uniquement le Secondaire (jamais Maternelle ni Primaire)
+    const isPrimaryClass = isPrimaryOrMaternelleClass(classe);
+    if (isPrimaryClass) {
+      matieres = matieres.filter(m => !m.est_disciplinaire && (m.matiere_nom || m.nom || '').trim().toLowerCase() !== 'conduite');
+    } else {
+      const hasConduite = matieres.some(m => (m.matiere_nom || m.nom || '').toLowerCase() === 'conduite');
+      if (!hasConduite) {
+        let conduiteBase = db.prepare("SELECT * FROM matieres WHERE nom = 'Conduite' AND school_id = ?").get(req.schoolId) as any;
+        if (!conduiteBase) {
+          // Create Conduite subject if missing
+          try {
+            const res = db.prepare("INSERT INTO matieres (nom, code, sigle, categorie, coefficient, school_id, est_disciplinaire, cycle) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
+              'Conduite', 'MAT-COND-AUTO', 'COND', 'Sciences Humaines & Sociales', 1, req.schoolId, 1, 'secondaire'
+            );
+            conduiteBase = db.prepare("SELECT * FROM matieres WHERE id = ?").get(res.lastInsertRowid);
+          } catch (e) {
+            console.error("Auto-creation of Conduite subject failed:", e);
+          }
         }
-      }
-      
-      if (conduiteBase) {
-        matieres.push({
-          ...conduiteBase,
-          matiere_id: conduiteBase.id,
-          matiere_nom: conduiteBase.nom,
-          enseignant_id: null,
-          enseignant_nom: 'Système',
-          enseignant_prenom: '',
-          coefficient: conduiteBase.coefficient || 1,
-          heures_hebdo: 0
-        });
+        
+        if (conduiteBase) {
+          matieres.push({
+            ...conduiteBase,
+            matiere_id: conduiteBase.id,
+            matiere_nom: conduiteBase.nom,
+            enseignant_id: null,
+            enseignant_nom: 'Système',
+            enseignant_prenom: '',
+            coefficient: conduiteBase.coefficient || 1,
+            heures_hebdo: 0
+          });
+        }
       }
     }
 
