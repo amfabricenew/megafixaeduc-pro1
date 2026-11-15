@@ -1,10 +1,10 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import { 
   GraduationCap, BookOpen, Clock, Calendar, CheckCircle2, AlertCircle, AlertTriangle,
   Send, Plus, Trash2, ArrowRight, ArrowLeft, ShieldCheck, School,
   User, Mail, Phone, Lock, Sparkles, Check, Download, Printer, ShieldAlert,
-  Search, X, CheckSquare, Square
+  Search, X, CheckSquare, Square, RefreshCw
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { apiFetch } from '../utils/api';
@@ -161,66 +161,149 @@ export default function PublicTeacherForm() {
     return detectTimetableConflicts(timetableSlots);
   }, [timetableSlots]);
 
-  // Fetch form data & verify blocking status
+  const isMountedRef = useRef(true);
+  const [reloadNonce, setReloadNonce] = useState(0);
+
   useEffect(() => {
-    const cleanToken = decodeURIComponent(String(token || '')).trim();
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
+  const loadForm = useCallback(async (signal?: AbortSignal) => {
+    let cleanToken = '';
+    try {
+      cleanToken = decodeURIComponent(String(token || '')).trim();
+    } catch {
+      cleanToken = String(token || '').trim();
+    }
+
     if (!cleanToken) {
-      setLoadError("Le lien du formulaire est incomplet ou invalide (jeton manquant).");
-      setLoading(false);
+      if (isMountedRef.current) {
+        setLoadError("Le lien du formulaire est incomplet ou invalide (jeton manquant).");
+        setLoading(false);
+      }
       return;
     }
 
     // Check if this respondent device was flagged as blocked
     try {
-      const isTokenBlocked = localStorage.getItem(`blocked_collecte_${cleanToken}`);
-      const isUserBlocked = localStorage.getItem('megafixa_blocked_respondent');
+      const isTokenBlocked = window.localStorage?.getItem(`blocked_collecte_${cleanToken}`);
+      const isUserBlocked = window.localStorage?.getItem('megafixa_blocked_respondent');
       if (isTokenBlocked || isUserBlocked) {
-        setIsBlocked(true);
-        setLoading(false);
+        if (isMountedRef.current) {
+          setIsBlocked(true);
+          setLoading(false);
+        }
         return;
       }
     } catch {
       // ignore restricted storage
     }
 
-    setLoading(true);
-    setLoadError(null);
-    apiFetch(`/api/public/collecte-enseignant/${encodeURIComponent(cleanToken)}`)
-      .then(async (res) => {
+    if (isMountedRef.current) {
+      setLoading(true);
+      setLoadError(null);
+    }
+
+    const maxTransientAttempts = 3;
+    for (let attempt = 1; attempt <= maxTransientAttempts; attempt++) {
+      if (signal?.aborted) return;
+      try {
+        const res = await apiFetch(`/api/public/collecte-enseignant/${encodeURIComponent(cleanToken)}`, {
+          cache: 'no-store',
+          signal
+        });
         const rawText = await res.text();
         let data: any = {};
         try {
           data = rawText ? JSON.parse(rawText) : {};
         } catch {
+          if (res.status >= 500 && attempt < maxTransientAttempts) {
+            await new Promise((r) => setTimeout(r, attempt * 700));
+            continue;
+          }
           throw new Error("Impossible de lire la réponse du serveur pour ce formulaire.");
         }
+
         if (!res.ok) {
-          if (data.isBlocked) {
+          if (data?.isBlocked) {
             try {
-              localStorage.setItem(`blocked_collecte_${cleanToken}`, 'true');
-              localStorage.setItem('megafixa_blocked_respondent', 'true');
+              window.localStorage?.setItem(`blocked_collecte_${cleanToken}`, 'true');
+              window.localStorage?.setItem('megafixa_blocked_respondent', 'true');
             } catch {}
-            setIsBlocked(true);
+            if (isMountedRef.current) {
+              setIsBlocked(true);
+              setLoading(false);
+            }
             return;
           }
-          throw new Error(data.error || "Impossible de charger le formulaire");
+          // Retry only on transient server/gateway errors
+          if (res.status >= 500 && attempt < maxTransientAttempts) {
+            await new Promise((r) => setTimeout(r, attempt * 700));
+            continue;
+          }
+          throw new Error(data?.error || "Impossible de charger le formulaire");
         }
-        if (data.isBlocked) {
+
+        if (data?.isBlocked) {
           try {
-            localStorage.setItem(`blocked_collecte_${cleanToken}`, 'true');
-            localStorage.setItem('megafixa_blocked_respondent', 'true');
+            window.localStorage?.setItem(`blocked_collecte_${cleanToken}`, 'true');
+            window.localStorage?.setItem('megafixa_blocked_respondent', 'true');
           } catch {}
-          setIsBlocked(true);
+          if (isMountedRef.current) {
+            setIsBlocked(true);
+            setLoading(false);
+          }
           return;
         }
-        setFormConfig(data);
-      })
-      .catch((err) => {
-        console.error(err);
-        setLoadError(err?.message || "Ce formulaire est introuvable ou temporairement indisponible.");
-      })
-      .finally(() => setLoading(false));
+
+        const safeAvailableClasses = Array.isArray(data?.available_classes)
+          ? data.available_classes
+              .filter((c: any) => c && (c.id !== undefined && c.id !== null))
+              .map((c: any) => ({
+                ...c,
+                id: Number(c.id),
+                nom: String(c.nom || `Classe #${c.id}`),
+                niveau: c.niveau ? String(c.niveau) : 'Secondaire'
+              }))
+          : [];
+
+        if (isMountedRef.current && !signal?.aborted) {
+          setFormConfig({
+            ...data,
+            school_nom: String(data?.school_nom || 'Établissement Scolaire'),
+            titre: String(data?.titre || 'Collecte d\'informations enseignant'),
+            available_classes: safeAvailableClasses
+          });
+          setLoading(false);
+        }
+        return;
+      } catch (err: any) {
+        if (err?.name === 'AbortError' || signal?.aborted) return;
+        if (attempt < maxTransientAttempts && (!err?.message || err.message.includes('contacter le serveur') || err.message.includes('Failed to fetch'))) {
+          await new Promise((r) => setTimeout(r, attempt * 700));
+          continue;
+        }
+        console.error('[PublicTeacherForm] Load error:', err);
+        if (isMountedRef.current && !signal?.aborted) {
+          setLoadError(err?.message || "Ce formulaire est introuvable ou temporairement indisponible.");
+          setLoading(false);
+        }
+        return;
+      }
+    }
   }, [token]);
+
+  // Fetch form data & verify blocking status
+  useEffect(() => {
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    void loadForm(controller?.signal);
+    return () => {
+      controller?.abort();
+    };
+  }, [loadForm, reloadNonce]);
 
   // Toggle class selection with non-conflicting default slot allocation
   const toggleClassSelection = (cls: { id: number; nom: string; niveau?: string }) => {
@@ -348,7 +431,12 @@ export default function PublicTeacherForm() {
 
     setIsSubmitting(true);
     try {
-      const cleanToken = decodeURIComponent(String(token || '')).trim();
+      let cleanToken = '';
+      try {
+        cleanToken = decodeURIComponent(String(token || '')).trim();
+      } catch {
+        cleanToken = String(token || '').trim();
+      }
       const res = await apiFetch(`/api/public/collecte-enseignant/${encodeURIComponent(cleanToken)}/soumettre`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -364,12 +452,19 @@ export default function PublicTeacherForm() {
         })
       });
 
-      const data = await res.json();
+      const rawText = await res.text();
+      let data: any = {};
+      try {
+        data = rawText ? JSON.parse(rawText) : {};
+      } catch {
+        throw new Error("Réponse invalide du serveur lors de l'envoi. Veuillez réessayer.");
+      }
+
       if (!res.ok) {
         if (data.isBlocked) {
           try {
-            localStorage.setItem(`blocked_collecte_${cleanToken}`, 'true');
-            localStorage.setItem('megafixa_blocked_respondent', 'true');
+            window.localStorage?.setItem(`blocked_collecte_${cleanToken}`, 'true');
+            window.localStorage?.setItem('megafixa_blocked_respondent', 'true');
           } catch {}
           setIsBlocked(true);
           return;
@@ -515,12 +610,26 @@ export default function PublicTeacherForm() {
   if (loadError || !formConfig) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
-        <div className="bg-white max-w-md w-full p-8 rounded-3xl border border-slate-200 shadow-xl text-center space-y-4">
+        <div className="bg-white max-w-md w-full p-8 rounded-3xl border border-slate-200 shadow-xl text-center space-y-5">
           <div className="w-14 h-14 bg-amber-50 text-amber-600 rounded-2xl flex items-center justify-center mx-auto">
             <AlertCircle size={32} />
           </div>
-          <h2 className="text-lg font-bold text-slate-800">Formulaire Inaccessible</h2>
-          <p className="text-sm text-slate-600">{loadError || "Ce formulaire n'est plus disponible."}</p>
+          <div className="space-y-2">
+            <h2 className="text-lg font-bold text-slate-800">Formulaire Inaccessible</h2>
+            <p className="text-sm text-slate-600 leading-relaxed">
+              {loadError || "Ce formulaire n'est plus disponible."}
+            </p>
+          </div>
+          <div className="flex flex-col sm:flex-row gap-2.5 justify-center pt-1">
+            <button
+              type="button"
+              onClick={() => setReloadNonce(n => n + 1)}
+              className="inline-flex items-center justify-center gap-2 px-5 py-2.5 bg-teal-600 hover:bg-teal-700 active:scale-95 text-white font-bold rounded-xl text-sm transition-all shadow-sm cursor-pointer"
+            >
+              <RefreshCw size={16} />
+              <span>Réessayer</span>
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -895,8 +1004,8 @@ export default function PublicTeacherForm() {
                 <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3 pt-1">
                   {availableClassesList
                     .filter(cls => 
-                      cls.nom.toLowerCase().includes(classSearch.toLowerCase()) ||
-                      (cls.niveau && cls.niveau.toLowerCase().includes(classSearch.toLowerCase()))
+                      (cls?.nom || '').toLowerCase().includes(classSearch.toLowerCase()) ||
+                      (cls?.niveau && String(cls.niveau).toLowerCase().includes(classSearch.toLowerCase()))
                     )
                     .map((cls) => {
                       const isChecked = selectedClasses.some(c => c.id === cls.id);
@@ -1049,7 +1158,7 @@ export default function PublicTeacherForm() {
                               ? 'bg-rose-100 text-rose-800' 
                               : 'bg-teal-100 text-teal-800'
                           }`}>
-                            {cls.nom.slice(0, 2)}
+                            {(cls.nom || 'CL').slice(0, 2)}
                           </span>
                           <div>
                             <div className="flex items-center gap-2">
@@ -1263,7 +1372,7 @@ export default function PublicTeacherForm() {
               <div className="flex items-center justify-between border-b border-slate-200 pb-3">
                 <div className="flex items-center gap-3">
                   <div className="w-12 h-12 rounded-2xl bg-teal-600 text-white font-black text-base flex items-center justify-center">
-                    {nom.charAt(0)}{prenom.charAt(0)}
+                    {(nom.trim().charAt(0) || 'E').toUpperCase()}{(prenom.trim().charAt(0) || '').toUpperCase()}
                   </div>
                   <div>
                     <h3 className="text-base font-black text-slate-900">{nom.toUpperCase()} {prenom}</h3>

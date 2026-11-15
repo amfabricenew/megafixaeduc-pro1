@@ -31,9 +31,17 @@ export const notifyAppUpdate = () => {
   }
 };
 
+const safeStorageGet = (key: string): string | null => {
+  try {
+    return typeof window !== 'undefined' && window.localStorage ? window.localStorage.getItem(key) : null;
+  } catch {
+    return null;
+  }
+};
+
 export const apiFetch = async (input: RequestInfo | URL, init?: RequestInit, retryCount = 0): Promise<Response> => {
-  const token = localStorage.getItem('token');
-  const selectedYearId = localStorage.getItem('selected_year_id');
+  const token = safeStorageGet('token');
+  const selectedYearId = safeStorageGet('selected_year_id');
   
   let url = '';
   if (typeof input === 'string') {
@@ -44,16 +52,23 @@ export const apiFetch = async (input: RequestInfo | URL, init?: RequestInit, ret
     url = input.url;
   }
 
+  const isPublicApi = url.includes('/api/public/');
+  const methodUpper = (init?.method || (input instanceof Request ? input.method : 'GET')).toUpperCase();
+  const shouldUseTimeout = !init?.signal && typeof AbortController !== 'undefined' && methodUpper === 'GET';
+  const controller = shouldUseTimeout ? new AbortController() : null;
+  const timeoutMs = isPublicApi ? 12000 : 20000;
+  const timeoutId = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+
   let res: Response;
 
   try {
     if (url.includes('/api/')) {
       if (input instanceof Request) {
         const newHeaders = new Headers(input.headers);
-        if (token && !newHeaders.has('Authorization')) {
+        if (!isPublicApi && token && !newHeaders.has('Authorization')) {
           newHeaders.set('Authorization', `Bearer ${token}`);
         }
-        if (selectedYearId && !newHeaders.has('X-Academic-Year-ID')) {
+        if (!isPublicApi && selectedYearId && !newHeaders.has('X-Academic-Year-ID')) {
           newHeaders.set('X-Academic-Year-ID', selectedYearId);
         }
         if (init?.body && typeof init.body === 'string' && !newHeaders.has('Content-Type') && !newHeaders.has('content-type')) {
@@ -63,15 +78,15 @@ export const apiFetch = async (input: RequestInfo | URL, init?: RequestInit, ret
           }
         }
         const newRequest = new Request(input, { headers: newHeaders });
-        res = await fetch(newRequest, init);
+        res = await fetch(newRequest, controller ? { ...init, signal: controller.signal } : init);
       } else {
-        const newInit = { ...init };
+        const newInit = { ...init, ...(controller ? { signal: controller.signal } : {}) };
         const headers = new Headers(newInit.headers || {});
         
-        if (token && !headers.has('Authorization') && !headers.has('authorization')) {
+        if (!isPublicApi && token && !headers.has('Authorization') && !headers.has('authorization')) {
           headers.set('Authorization', `Bearer ${token}`);
         }
-        if (selectedYearId && !headers.has('X-Academic-Year-ID')) {
+        if (!isPublicApi && selectedYearId && !headers.has('X-Academic-Year-ID')) {
           headers.set('X-Academic-Year-ID', selectedYearId);
         }
         if (newInit.body && typeof newInit.body === 'string' && !headers.has('Content-Type') && !headers.has('content-type')) {
@@ -85,7 +100,7 @@ export const apiFetch = async (input: RequestInfo | URL, init?: RequestInit, ret
         res = await fetch(input, newInit);
       }
     } else {
-      const newInit = { ...init };
+      const newInit = { ...init, ...(controller ? { signal: controller.signal } : {}) };
       if (newInit.body && typeof newInit.body === 'string') {
         const headers = new Headers(newInit.headers || {});
         if (!headers.has('Content-Type') && !headers.has('content-type')) {
@@ -98,6 +113,8 @@ export const apiFetch = async (input: RequestInfo | URL, init?: RequestInit, ret
       }
       res = await fetch(input, newInit);
     }
+
+    if (timeoutId) clearTimeout(timeoutId);
 
     // Retry for transient server errors (502, 503, 504) or rate limits (429)
     if (retryCount < 2 && [429, 502, 503, 504].includes(res.status)) {
@@ -136,9 +153,13 @@ export const apiFetch = async (input: RequestInfo | URL, init?: RequestInit, ret
       }
     }
   } catch (netErr: any) {
+    if (timeoutId) clearTimeout(timeoutId);
+    if (init?.signal?.aborted) {
+      throw netErr;
+    }
     const method = (init?.method || (input instanceof Request ? input.method : 'GET')).toUpperCase();
     // Retry once or twice for GET requests or server cold-start/brief lag
-    if (retryCount < 2 && (method === 'GET' || netErr.name === 'TypeError')) {
+    if (retryCount < 2 && (method === 'GET' || netErr?.name === 'TypeError')) {
       await new Promise(resolve => setTimeout(resolve, 350 * (retryCount + 1)));
       return apiFetch(input, init, retryCount + 1);
     }

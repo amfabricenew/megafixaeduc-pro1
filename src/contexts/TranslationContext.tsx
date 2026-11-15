@@ -87,7 +87,12 @@ export const TranslationProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
   // Sync initial language from school info on mount
   useEffect(() => {
-    const token = localStorage.getItem('token');
+    let token: string | null = null;
+    try {
+      token = window.localStorage?.getItem('token') || null;
+    } catch {
+      token = null;
+    }
     if (token) {
       apiFetch('/api/school-info', {
         headers: { 'Authorization': `Bearer ${token}` }
@@ -96,19 +101,26 @@ export const TranslationProvider: React.FC<{ children: React.ReactNode }> = ({ c
         .then(data => {
           if (data && data.langue && (data.langue === 'en' || data.langue === 'fr')) {
             lastSyncedSchoolLangRef.current = data.langue;
-            const localLang = localStorage.getItem('app_language');
-            if (!localLang) {
-              setLanguageState(data.langue as Language);
-              languageRef.current = data.langue as Language;
-              localStorage.setItem('app_language', data.langue);
-            }
+            try {
+              const localLang = window.localStorage?.getItem('app_language');
+              if (!localLang) {
+                setLanguageState(data.langue as Language);
+                languageRef.current = data.langue as Language;
+                window.localStorage?.setItem('app_language', data.langue);
+              }
+            } catch {}
           }
         })
         .catch(() => {});
     }
 
     const handleSchoolInfoChange = () => {
-      const activeToken = localStorage.getItem('token');
+      let activeToken: string | null = null;
+      try {
+        activeToken = window.localStorage?.getItem('token') || null;
+      } catch {
+        activeToken = null;
+      }
       if (activeToken) {
         apiFetch('/api/school-info', {
           headers: { 'Authorization': `Bearer ${activeToken}` }
@@ -121,7 +133,9 @@ export const TranslationProvider: React.FC<{ children: React.ReactNode }> = ({ c
               if (previousSchoolLang && data.langue !== previousSchoolLang) {
                 setLanguageState(data.langue as Language);
                 languageRef.current = data.langue as Language;
-                localStorage.setItem('app_language', data.langue);
+                try {
+                  window.localStorage?.setItem('app_language', data.langue);
+                } catch {}
               }
             }
           })

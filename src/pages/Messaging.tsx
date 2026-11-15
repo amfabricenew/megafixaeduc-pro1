@@ -1,5 +1,5 @@
 import React from 'react';
-import { apiFetch } from '../utils/api';
+import { apiFetch, useAppSync } from '../utils/api';
 import { useAuth } from '../contexts/AuthContext';
 import { useConfirm } from '../contexts/ConfirmContext';
 import { toast } from 'react-hot-toast';
@@ -40,16 +40,24 @@ import {
   Film,
   Image as ImageIcon,
   Zap,
-  MessageCircle
+  MessageCircle,
+  Pencil,
+  Trash2,
+  SmilePlus,
+  Smile
 } from 'lucide-react';
 import { format } from 'date-fns';
 import { fr } from 'date-fns/locale';
-import { InternalMessage, ConversationParticipant, SmsLog, SmsConfig } from '../types';
+import { InternalMessage, ConversationParticipant, SmsLog, SmsConfig, MessageReaction } from '../types';
 import GmailInboxView from '../components/GmailInboxView';
 import AutomationSettingsPanel from '../components/messaging/AutomationSettingsPanel';
 
-// Custom Audio Player with Play / Pause button for voice messages
-function VoicePlayer({ audioUrl, isMine }: { audioUrl: string; isMine?: boolean }) {
+const QUICK_STICKERS = ['👍', '❤️', '😂', '🎉', '👏', '🙏'];
+const EXTENDED_STICKERS = ['👍', '❤️', '😂', '🎉', '👏', '🙏', '🔥', '💯', '✨', '😮', '😢', '📌', '✅', '🚀', '💡', '🤝'];
+const WAVEFORM_BARS = [35, 65, 48, 88, 72, 42, 95, 60, 50, 82, 74, 38, 90, 68, 52, 78, 85, 45, 62, 40];
+
+// Refined single-button VoicePlayer with animated waveform & mutual-exclusion playback
+function VoicePlayer({ audioUrl, isMine, playerId }: { audioUrl: string; isMine?: boolean; playerId: string }) {
   const audioRef = React.useRef<HTMLAudioElement | null>(null);
   const [isPlaying, setIsPlaying] = React.useState(false);
   const [currentTime, setCurrentTime] = React.useState(0);
@@ -57,13 +65,41 @@ function VoicePlayer({ audioUrl, isMine }: { audioUrl: string; isMine?: boolean 
   const [playbackRate, setPlaybackRate] = React.useState(1);
   const [isLoading, setIsLoading] = React.useState(false);
 
+  // Pause this player if another voice note starts playing
+  React.useEffect(() => {
+    const handleOtherPlay = (e: Event) => {
+      const customEvt = e as CustomEvent<string>;
+      if (customEvt.detail !== playerId && audioRef.current && !audioRef.current.paused) {
+        audioRef.current.pause();
+      }
+    };
+    window.addEventListener('messagerie:voice-play', handleOtherPlay);
+    return () => window.removeEventListener('messagerie:voice-play', handleOtherPlay);
+  }, [playerId]);
+
+  const syncDuration = () => {
+    const el = audioRef.current;
+    if (!el) return;
+    if (Number.isFinite(el.duration) && el.duration > 0) {
+      setDuration(el.duration);
+    } else if (el.seekable && el.seekable.length > 0) {
+      const end = el.seekable.end(el.seekable.length - 1);
+      if (Number.isFinite(end) && end > 0) {
+        setDuration(end);
+      }
+    }
+  };
+
   const togglePlay = () => {
-    if (!audioRef.current) return;
+    const el = audioRef.current;
+    if (!el) return;
     if (isPlaying) {
-      audioRef.current.pause();
+      el.pause();
     } else {
+      window.dispatchEvent(new CustomEvent('messagerie:voice-play', { detail: playerId }));
       setIsLoading(true);
-      audioRef.current.play()
+      el.playbackRate = playbackRate;
+      el.play()
         .then(() => setIsLoading(false))
         .catch(err => {
           setIsLoading(false);
@@ -76,21 +112,20 @@ function VoicePlayer({ audioUrl, isMine }: { audioUrl: string; isMine?: boolean 
   const handleTimeUpdate = () => {
     if (audioRef.current) {
       setCurrentTime(audioRef.current.currentTime);
+      if (!duration || !Number.isFinite(duration)) {
+        syncDuration();
+      }
     }
   };
 
-  const handleLoadedMetadata = () => {
-    if (audioRef.current && Number.isFinite(audioRef.current.duration)) {
-      setDuration(audioRef.current.duration);
-    }
-  };
-
-  const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const time = parseFloat(e.target.value);
-    setCurrentTime(time);
-    if (audioRef.current) {
-      audioRef.current.currentTime = time;
-    }
+  const handleSeekByRatio = (ratio: number) => {
+    const el = audioRef.current;
+    if (!el) return;
+    const effectiveDuration = Number.isFinite(el.duration) && el.duration > 0 ? el.duration : duration;
+    if (!effectiveDuration || !Number.isFinite(effectiveDuration)) return;
+    const nextTime = Math.max(0, Math.min(effectiveDuration, ratio * effectiveDuration));
+    setCurrentTime(nextTime);
+    el.currentTime = nextTime;
   };
 
   const cycleSpeed = (e: React.MouseEvent) => {
@@ -109,12 +144,16 @@ function VoicePlayer({ audioUrl, isMine }: { audioUrl: string; isMine?: boolean 
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
+  const progressRatio = duration > 0 ? Math.min(1, Math.max(0, currentTime / duration)) : 0;
+
   return (
-    <div className={`mt-1.5 p-2.5 rounded-xl border flex flex-col gap-1.5 w-full max-w-[280px] sm:max-w-[320px] shadow-xs select-none transition-all ${
-      isMine 
-        ? 'bg-emerald-800/70 border-emerald-500/70 text-white' 
-        : 'bg-white/95 border-slate-200 text-slate-800'
-    }`}>
+    <div
+      className={`mt-1.5 px-3 py-2.5 rounded-2xl border flex items-center gap-3 w-full min-w-[230px] max-w-[320px] shadow-xs select-none transition-all ${
+        isMine
+          ? 'bg-emerald-700/75 border-emerald-400/40 text-white'
+          : 'bg-slate-50 border-slate-200/90 text-slate-800'
+      }`}
+    >
       <audio
         ref={audioRef}
         src={audioUrl}
@@ -126,67 +165,87 @@ function VoicePlayer({ audioUrl, isMine }: { audioUrl: string; isMine?: boolean 
           setCurrentTime(0);
         }}
         onTimeUpdate={handleTimeUpdate}
-        onLoadedMetadata={handleLoadedMetadata}
+        onLoadedMetadata={syncDuration}
+        onDurationChange={syncDuration}
       />
 
-      <div className="flex items-center gap-2.5">
-        {/* Prominent Play / Pause Button */}
-        <button
-          type="button"
-          onClick={togglePlay}
-          disabled={isLoading}
-          className={`w-9 h-9 rounded-full flex items-center justify-center shrink-0 transition-all active:scale-90 shadow-sm ${
-            isMine 
-              ? 'bg-white text-emerald-700 hover:bg-emerald-50 hover:scale-105' 
-              : 'bg-emerald-600 text-white hover:bg-emerald-700 hover:scale-105'
-          }`}
-          title={isPlaying ? "Mettre en pause" : "Lire le vocal"}
-          aria-label={isPlaying ? "Pause vocal" : "Lire vocal"}
-        >
-          {isPlaying ? (
-            <Pause className="w-4 h-4 fill-current" />
-          ) : (
-            <Play className="w-4 h-4 fill-current ml-0.5" />
-          )}
-        </button>
+      {/* Single Primary Play / Pause Button */}
+      <button
+        type="button"
+        onClick={togglePlay}
+        disabled={isLoading}
+        className={`w-9 h-9 rounded-full flex items-center justify-center shrink-0 transition-all active:scale-90 shadow-sm ${
+          isMine
+            ? 'bg-white text-emerald-700 hover:bg-emerald-50'
+            : 'bg-emerald-600 text-white hover:bg-emerald-700'
+        }`}
+        title={isPlaying ? "Mettre en pause" : "Écouter le message vocal"}
+        aria-label={isPlaying ? "Pause vocal" : "Écouter le vocal"}
+      >
+        {isPlaying ? (
+          <Pause className="w-4 h-4 fill-current" />
+        ) : (
+          <Play className="w-4 h-4 fill-current ml-0.5" />
+        )}
+      </button>
 
-        {/* Progress bar and time display */}
-        <div className="flex-1 min-w-0 flex flex-col justify-center gap-1">
-          <input
-            type="range"
-            min={0}
-            max={duration || 100}
-            step={0.1}
-            value={currentTime}
-            onChange={handleSeek}
-            className={`w-full h-1.5 rounded-lg appearance-none cursor-pointer ${
-              isMine 
-                ? 'accent-white bg-emerald-950/50' 
-                : 'accent-emerald-600 bg-slate-200'
-            }`}
-          />
-          <div className={`flex items-center justify-between text-[10px] font-mono font-medium ${
-            isMine ? 'text-emerald-100' : 'text-slate-500'
-          }`}>
-            <span>{formatAudioTime(currentTime)}</span>
-            <span>{duration > 0 ? formatAudioTime(duration) : '0:00'}</span>
-          </div>
+      {/* Interactive Waveform + Duration */}
+      <div className="flex-1 min-w-0 flex flex-col gap-1">
+        <div
+          className="h-7 flex items-center gap-[3px] cursor-pointer group"
+          onClick={(e) => {
+            const rect = e.currentTarget.getBoundingClientRect();
+            const ratio = (e.clientX - rect.left) / Math.max(1, rect.width);
+            handleSeekByRatio(ratio);
+          }}
+          title="Cliquer pour avancer dans l'audio"
+        >
+          {WAVEFORM_BARS.map((heightPct, idx) => {
+            const barRatio = (idx + 0.5) / WAVEFORM_BARS.length;
+            const isPlayed = barRatio <= progressRatio;
+            return (
+              <span
+                key={idx}
+                style={{ height: `${heightPct}%` }}
+                className={`flex-1 min-w-[2px] rounded-full transition-all duration-150 ${
+                  isPlaying ? 'animate-pulse' : ''
+                } ${
+                  isMine
+                    ? isPlayed
+                      ? 'bg-white'
+                      : 'bg-emerald-300/45 group-hover:bg-emerald-200/70'
+                    : isPlayed
+                      ? 'bg-emerald-600'
+                      : 'bg-slate-300 group-hover:bg-slate-400'
+                }`}
+              />
+            );
+          })}
         </div>
 
-        {/* Playback speed toggle (1x / 1.5x / 2x) */}
-        <button
-          type="button"
-          onClick={cycleSpeed}
-          className={`px-1.5 py-0.5 rounded text-[10px] font-bold font-mono shrink-0 transition-colors ${
-            isMine 
-              ? 'bg-emerald-950/50 hover:bg-emerald-950 text-emerald-100' 
-              : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200'
+        <div
+          className={`flex items-center justify-between text-[10px] font-mono font-semibold leading-none ${
+            isMine ? 'text-emerald-100' : 'text-slate-500'
           }`}
-          title="Modifier la vitesse de lecture (1x, 1.5x, 2x)"
         >
-          {playbackRate}x
-        </button>
+          <span>{formatAudioTime(currentTime)}</span>
+          <span>{duration > 0 ? formatAudioTime(duration) : '0:00'}</span>
+        </div>
       </div>
+
+      {/* Playback speed toggle (1x / 1.5x / 2x) */}
+      <button
+        type="button"
+        onClick={cycleSpeed}
+        className={`px-1.5 py-1 rounded-lg text-[10px] font-bold font-mono shrink-0 transition-colors ${
+          isMine
+            ? 'bg-emerald-900/60 hover:bg-emerald-950 text-emerald-50 border border-emerald-400/30'
+            : 'bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 shadow-2xs'
+        }`}
+        title="Modifier la vitesse de lecture (1x, 1.5x, 2x)"
+      >
+        {playbackRate}x
+      </button>
     </div>
   );
 }
@@ -220,6 +279,15 @@ export default function Messaging() {
   // Messages in current thread
   const [messages, setMessages] = React.useState<InternalMessage[]>([]);
   const [loadingMessages, setLoadingMessages] = React.useState(false);
+
+  // Interactive message actions: sticker reactions, editing (text-only), deletion
+  const [openStickerPickerMsgId, setOpenStickerPickerMsgId] = React.useState<number | null>(null);
+  const [activeReactionMsgId, setActiveReactionMsgId] = React.useState<number | null>(null);
+  const [showComposerStickers, setShowComposerStickers] = React.useState(false);
+  const [editingMsgId, setEditingMsgId] = React.useState<number | null>(null);
+  const [editingContent, setEditingContent] = React.useState('');
+  const [savingEdit, setSavingEdit] = React.useState(false);
+  const [deletingMsgId, setDeletingMsgId] = React.useState<number | null>(null);
 
   const [messageContent, setMessageContent] = React.useState('');
   const [messageSubject, setMessageSubject] = React.useState('');
@@ -323,10 +391,11 @@ export default function Messaging() {
   };
 
   // Fetch messages for active selected target
-  const fetchThreadMessages = async (target = selectedTarget) => {
+  const prevMsgCountRef = React.useRef<number>(0);
+  const fetchThreadMessages = React.useCallback(async (target = selectedTarget, silent = false) => {
     if (!target) return;
     try {
-      setLoadingMessages(true);
+      if (!silent) setLoadingMessages(true);
       let query = '';
       if (target.type === 'user' && target.id) {
         query = `?contactId=${target.id}`;
@@ -343,15 +412,20 @@ export default function Messaging() {
       const res = await apiFetch(`/api/messagerie/messages${query}${query ? '&' : '?'}annee_id=${selectedYearId}`);
       if (res.ok) {
         const data = await res.json();
-        setMessages(data);
-        setTimeout(scrollToBottom, 100);
+        const incoming: InternalMessage[] = Array.isArray(data) ? data : [];
+        const hasNewMessages = incoming.length > prevMsgCountRef.current;
+        prevMsgCountRef.current = incoming.length;
+        setMessages(incoming);
+        if (!silent || hasNewMessages) {
+          setTimeout(scrollToBottom, 100);
+        }
       }
     } catch (err: any) {
       console.error("Fetch messages error:", err);
     } finally {
-      setLoadingMessages(false);
+      if (!silent) setLoadingMessages(false);
     }
-  };
+  }, [selectedTarget, selectedYearId]);
 
   // Fetch SMS Logs
   const fetchSmsLogs = async () => {
@@ -391,7 +465,11 @@ export default function Messaging() {
 
   React.useEffect(() => {
     if (selectedTarget) {
-      fetchThreadMessages(selectedTarget);
+      prevMsgCountRef.current = 0;
+      setEditingMsgId(null);
+      setOpenStickerPickerMsgId(null);
+      setActiveReactionMsgId(null);
+      fetchThreadMessages(selectedTarget, false);
     }
   }, [selectedTarget, selectedYearId]);
 
@@ -401,15 +479,12 @@ export default function Messaging() {
     }
   }, [activeTab, selectedYearId]);
 
-  // Periodic polling for new messages
-  React.useEffect(() => {
-    const interval = setInterval(() => {
-      if (activeTab === 'conversations' && selectedTarget) {
-        fetchThreadMessages(selectedTarget);
-      }
-    }, 15000);
-    return () => clearInterval(interval);
-  }, [activeTab, selectedTarget]);
+  // Automatic real-time silent synchronization for messages, sticker reactions, edits & deletions
+  useAppSync(() => {
+    if (activeTab === 'conversations' && selectedTarget && editingMsgId === null) {
+      fetchThreadMessages(selectedTarget, true);
+    }
+  }, 5000);
 
   // Clean up speech synthesis & speech recognition on component unmount
   React.useEffect(() => {
@@ -474,7 +549,7 @@ export default function Messaging() {
         const smsMsg = data.smsResult?.sent ? ` • ${data.smsResult.sent} SMS envoyé(s)` : '';
         const waMsg = data.whatsappResult?.sent ? ` • ${data.whatsappResult.sent} WhatsApp envoyé(s)` : '';
         toast.success(`Message expédié avec succès !${emailMsg}${smsMsg}${waMsg}`);
-        fetchThreadMessages(selectedTarget);
+        fetchThreadMessages(selectedTarget, true);
         fetchContacts();
       } else {
         const err = await res.json();
@@ -484,6 +559,197 @@ export default function Messaging() {
       toast.error("Erreur réseau: " + err.message);
     } finally {
       setSendingMessage(false);
+    }
+  };
+
+  // Toggle sticker reaction on a message (optimistic + persisted)
+  const handleToggleReaction = async (messageId: number, sticker: string) => {
+    setOpenStickerPickerMsgId(null);
+    setActiveReactionMsgId(null);
+
+    // Optimistic state update
+    setMessages(prev =>
+      prev.map(m => {
+        if (m.id !== messageId) return m;
+        const current = Array.isArray(m.reactions) ? [...m.reactions] : [];
+        const idx = current.findIndex(r => r.sticker === sticker);
+        if (idx >= 0) {
+          const item = current[idx];
+          if (item.reactedByMe) {
+            if (item.count <= 1) {
+              current.splice(idx, 1);
+            } else {
+              current[idx] = {
+                ...item,
+                count: item.count - 1,
+                reactedByMe: false,
+                users: item.users.filter(u => u.id !== user?.id)
+              };
+            }
+          } else {
+            current[idx] = {
+              ...item,
+              count: item.count + 1,
+              reactedByMe: true,
+              users: [...item.users, { id: user?.id || 0, nom: user?.nom || 'Moi' }]
+            };
+          }
+        } else {
+          current.push({
+            sticker,
+            count: 1,
+            reactedByMe: true,
+            users: [{ id: user?.id || 0, nom: user?.nom || 'Moi' }]
+          });
+        }
+        return { ...m, reactions: current };
+      })
+    );
+
+    try {
+      const res = await apiFetch(`/api/messagerie/messages/${messageId}/reactions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sticker })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.reactions)) {
+          setMessages(prev =>
+            prev.map(m => (m.id === messageId ? { ...m, reactions: data.reactions as MessageReaction[] } : m))
+          );
+        }
+      } else {
+        const err = await res.json().catch(() => ({}));
+        toast.error(err.error || "Impossible d'enregistrer la réaction.");
+        if (selectedTarget) fetchThreadMessages(selectedTarget, true);
+      }
+    } catch {
+      toast.error("Erreur réseau lors de la réaction.");
+      if (selectedTarget) fetchThreadMessages(selectedTarget, true);
+    }
+  };
+
+  // Send a standalone sticker directly in the conversation
+  const handleSendSticker = async (sticker: string) => {
+    if (!selectedTarget || sendingMessage) return;
+    setShowComposerStickers(false);
+    try {
+      setSendingMessage(true);
+      const payload: any = {
+        content: sticker,
+        recipient_type: selectedTarget.type === 'user' ? 'user' : selectedTarget.type
+      };
+      if (selectedTarget.type === 'user') payload.recipient_id = selectedTarget.id;
+      else if (selectedTarget.type === 'class_parents') payload.classe_id = selectedTarget.classe_id;
+      else if (selectedTarget.type === 'role_direction') {
+        payload.recipient_type = 'role';
+        payload.recipient_role = 'direction';
+      }
+
+      const res = await apiFetch('/api/messagerie/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (res.ok) {
+        fetchThreadMessages(selectedTarget, true);
+        fetchContacts();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        toast.error(err.error || "Impossible d'envoyer le sticker.");
+      }
+    } catch {
+      toast.error("Erreur réseau.");
+    } finally {
+      setSendingMessage(false);
+    }
+  };
+
+  // Start editing a text-only message
+  const startEditingMessage = (msg: InternalMessage) => {
+    if (msg.audio_url || msg.attachment_url || msg.content === '[Message Vocal]') {
+      toast.error("Seuls les messages texte peuvent être modifiés.");
+      return;
+    }
+    setEditingMsgId(msg.id);
+    setEditingContent(msg.content || '');
+    setOpenStickerPickerMsgId(null);
+  };
+
+  // Save edited text message
+  const handleSaveEditMessage = async (msgId: number) => {
+    const trimmed = editingContent.trim();
+    if (!trimmed) {
+      toast.error("Le message ne peut pas être vide.");
+      return;
+    }
+    try {
+      setSavingEdit(true);
+      const res = await apiFetch(`/api/messagerie/messages/${msgId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: trimmed })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setMessages(prev =>
+          prev.map(m =>
+            m.id === msgId
+              ? { ...m, content: trimmed, is_edited: 1, edited_at: data.edited_at || new Date().toISOString() }
+              : m
+          )
+        );
+        setEditingMsgId(null);
+        setEditingContent('');
+        toast.success("Message modifié");
+      } else {
+        const err = await res.json().catch(() => ({}));
+        toast.error(err.error || "Impossible de modifier ce message.");
+      }
+    } catch {
+      toast.error("Erreur réseau lors de la modification.");
+    } finally {
+      setSavingEdit(false);
+    }
+  };
+
+  // Delete a message with in-app confirmation modal
+  const handleDeleteMessage = async (msg: InternalMessage) => {
+    const isConfirmed = await confirm({
+      title: "Supprimer ce message ?",
+      message: msg.audio_url
+        ? "Ce message vocal sera définitivement supprimé pour cette conversation."
+        : msg.attachment_url
+          ? "Ce message et sa pièce jointe seront définitivement supprimés."
+          : "Ce message sera définitivement supprimé.",
+      confirmText: "Supprimer",
+      cancelText: "Annuler",
+      type: "danger"
+    });
+    if (!isConfirmed) return;
+
+    try {
+      setDeletingMsgId(msg.id);
+      const res = await apiFetch(`/api/messagerie/messages/${msg.id}`, {
+        method: 'DELETE'
+      });
+      if (res.ok) {
+        setMessages(prev => prev.filter(m => m.id !== msg.id));
+        if (editingMsgId === msg.id) {
+          setEditingMsgId(null);
+          setEditingContent('');
+        }
+        toast.success("Message supprimé");
+        fetchContacts();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        toast.error(err.error || "Impossible de supprimer ce message.");
+      }
+    } catch {
+      toast.error("Erreur réseau lors de la suppression.");
+    } finally {
+      setDeletingMsgId(null);
     }
   };
 
@@ -1441,12 +1707,25 @@ export default function Messaging() {
                   <p className="text-[11px] text-slate-400">Envoyez le premier message ci-dessous.</p>
                 </div>
               ) : (
-                messages.map((msg) => {
+                messages.map((msg, msgIdx) => {
                   const isMine = msg.sender_id === user?.id;
+                  const isLastMessage = msgIdx === messages.length - 1;
+                  const isPureVoice = Boolean(msg.audio_url) && (!msg.content || msg.content === '[Message Vocal]');
+                  const isTextOnly = !msg.audio_url && !msg.attachment_url && Boolean(msg.content) && msg.content !== '[Message Vocal]';
+                  const canEdit = isMine && isTextOnly;
+                  const canDelete = isMine || isUserAdmin;
+                  const isEditingThis = editingMsgId === msg.id;
+                  const showPicker = openStickerPickerMsgId === msg.id;
+                  const isStickerBarOpen = activeReactionMsgId === msg.id || showPicker;
+                  const isSingleStickerMsg = isTextOnly && EXTENDED_STICKERS.includes((msg.content || '').trim());
+
                   return (
                     <div
                       key={`msg-${msg.id}`}
-                      className={`flex flex-col ${isMine ? 'items-end' : 'items-start'}`}
+                      className={`group/msg relative flex flex-col ${isMine ? 'items-end' : 'items-start'}`}
+                      onMouseLeave={() => {
+                        if (openStickerPickerMsgId === msg.id) setOpenStickerPickerMsgId(null);
+                      }}
                     >
                       <div className="flex items-baseline gap-2 mb-1 px-1">
                         <span className="text-[11px] font-semibold text-slate-700">
@@ -1455,6 +1734,9 @@ export default function Messaging() {
                         <span className="text-[10px] text-slate-400">
                           {msg.created_at ? format(new Date(msg.created_at), 'dd MMM HH:mm', { locale: fr }) : ''}
                         </span>
+                        {msg.is_edited === 1 && (
+                          <span className="text-[10px] italic text-slate-400">(Modifié)</span>
+                        )}
                         {msg.is_sms_sent === 1 && (
                           <span className="text-[9px] bg-amber-100 text-amber-800 font-semibold px-1.5 py-0.2 rounded flex items-center gap-0.5">
                             <Smartphone className="w-2.5 h-2.5" /> SMS expédié
@@ -1462,11 +1744,83 @@ export default function Messaging() {
                         )}
                       </div>
 
+                      {/* Auto-appearing floating quick-sticker reaction bar on hover/focus or tap */}
+                      {!isEditingThis && (
+                        <div
+                          className={`mb-1 flex items-center gap-1 px-2 py-1 rounded-full bg-white border border-slate-200/90 shadow-md transition-all duration-150 z-20 ${
+                            isStickerBarOpen
+                              ? 'opacity-100 translate-y-0 scale-100 pointer-events-auto'
+                              : isLastMessage
+                                ? 'opacity-90 group-hover/msg:opacity-100 translate-y-0 scale-100 pointer-events-auto'
+                                : 'opacity-0 translate-y-1 scale-95 pointer-events-none group-hover/msg:opacity-100 group-hover/msg:translate-y-0 group-hover/msg:scale-100 group-hover/msg:pointer-events-auto'
+                          }`}
+                        >
+                          {QUICK_STICKERS.map((sticker) => {
+                            const alreadyReacted = msg.reactions?.some(r => r.sticker === sticker && r.reactedByMe);
+                            return (
+                              <button
+                                key={sticker}
+                                type="button"
+                                onClick={() => handleToggleReaction(msg.id, sticker)}
+                                className={`w-6 h-6 rounded-full flex items-center justify-center text-sm transition-transform hover:scale-125 active:scale-95 ${
+                                  alreadyReacted ? 'bg-emerald-100 ring-1 ring-emerald-400' : 'hover:bg-slate-100'
+                                }`}
+                                title={`Réagir avec ${sticker}`}
+                              >
+                                {sticker}
+                              </button>
+                            );
+                          })}
+                          <button
+                            type="button"
+                            onClick={() => setOpenStickerPickerMsgId(showPicker ? null : msg.id)}
+                            className={`w-6 h-6 rounded-full flex items-center justify-center transition-colors ${
+                              showPicker
+                                ? 'bg-emerald-600 text-white'
+                                : 'text-slate-500 hover:text-emerald-700 hover:bg-slate-100'
+                            }`}
+                            title="Plus de stickers"
+                          >
+                            <SmilePlus className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      )}
+
+                      {/* Extended Sticker Picker Drawer */}
+                      {showPicker && (
+                        <div className={`mb-1.5 p-2 rounded-2xl bg-white border border-slate-200 shadow-xl grid grid-cols-8 gap-1 z-30 animate-in zoom-in-95 duration-150 ${
+                          isMine ? 'origin-bottom-right' : 'origin-bottom-left'
+                        }`}>
+                          {EXTENDED_STICKERS.map((sticker) => {
+                            const alreadyReacted = msg.reactions?.some(r => r.sticker === sticker && r.reactedByMe);
+                            return (
+                              <button
+                                key={sticker}
+                                type="button"
+                                onClick={() => handleToggleReaction(msg.id, sticker)}
+                                className={`w-8 h-8 rounded-xl flex items-center justify-center text-base transition-transform hover:scale-120 active:scale-95 ${
+                                  alreadyReacted ? 'bg-emerald-100 ring-1 ring-emerald-400' : 'hover:bg-slate-100'
+                                }`}
+                              >
+                                {sticker}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+
                       <div
-                        className={`max-w-[85%] sm:max-w-[70%] p-3.5 rounded-2xl text-xs leading-relaxed ${
-                          isMine
-                            ? 'bg-emerald-600 text-white rounded-br-none shadow-sm'
-                            : 'bg-white text-slate-800 border border-slate-200/80 rounded-bl-none shadow-sm'
+                        onClick={() => {
+                          if (!isEditingThis && !msg.audio_url) {
+                            setActiveReactionMsgId(activeReactionMsgId === msg.id ? null : msg.id);
+                          }
+                        }}
+                        className={`max-w-[85%] sm:max-w-[72%] rounded-2xl text-xs leading-relaxed transition-all ${
+                          isSingleStickerMsg && !isEditingThis
+                            ? 'bg-transparent p-1 shadow-none'
+                            : isMine
+                              ? 'bg-emerald-600 text-white p-3.5 rounded-br-none shadow-sm'
+                              : 'bg-white text-slate-800 p-3.5 border border-slate-200/80 rounded-bl-none shadow-sm'
                         }`}
                       >
                         {msg.subject && (
@@ -1474,46 +1828,92 @@ export default function Messaging() {
                             {msg.subject}
                           </div>
                         )}
-                        {msg.content && msg.content !== '[Message Vocal]' && (
-                          <div className="whitespace-pre-wrap mb-1">{msg.content}</div>
-                        )}
-                        
-                        {msg.audio_url && (
-                          <div className="flex items-center gap-2 mt-1.5">
-                            <VoicePlayer audioUrl={msg.audio_url} isMine={isMine} />
-                            <button
-                              onClick={() => {
-                                const audio = new Audio(msg.audio_url!);
-                                audio.play().catch(e => console.warn("Quick play error:", e));
+
+                        {isEditingThis ? (
+                          <div className="space-y-2 min-w-[220px] sm:min-w-[280px]" onClick={e => e.stopPropagation()}>
+                            <textarea
+                              rows={3}
+                              value={editingContent}
+                              onChange={e => setEditingContent(e.target.value)}
+                              onKeyDown={e => {
+                                if (e.key === 'Escape') {
+                                  setEditingMsgId(null);
+                                  setEditingContent('');
+                                } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                                  e.preventDefault();
+                                  handleSaveEditMessage(msg.id);
+                                }
                               }}
-                              className={`p-2 rounded-full shadow-sm transition-all active:scale-90 ${
-                                isMine ? 'bg-emerald-500 text-white hover:bg-emerald-400' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                              }`}
-                              title="Lecture rapide"
-                            >
-                              <Play size={12} fill="currentColor" />
-                            </button>
+                              className="w-full p-2.5 text-xs rounded-xl bg-white text-slate-900 border border-emerald-300 focus:outline-none focus:ring-2 focus:ring-emerald-400 resize-none"
+                              autoFocus
+                            />
+                            <div className="flex items-center justify-end gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditingMsgId(null);
+                                  setEditingContent('');
+                                }}
+                                disabled={savingEdit}
+                                className="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-emerald-800/60 hover:bg-emerald-900 text-white transition-colors"
+                              >
+                                Annuler
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleSaveEditMessage(msg.id)}
+                                disabled={savingEdit || !editingContent.trim()}
+                                className="px-3 py-1 rounded-lg text-[11px] font-bold bg-white text-emerald-700 hover:bg-emerald-50 disabled:opacity-50 flex items-center gap-1 shadow-xs"
+                              >
+                                <Check className="w-3.5 h-3.5" />
+                                {savingEdit ? 'Enregistrement...' : 'Enregistrer'}
+                              </button>
+                            </div>
                           </div>
+                        ) : (
+                          msg.content && msg.content !== '[Message Vocal]' && (
+                            isSingleStickerMsg ? (
+                              <div className="text-4xl leading-none py-1 select-none drop-shadow-xs">
+                                {msg.content}
+                              </div>
+                            ) : (
+                              <div className="whitespace-pre-wrap mb-1">{msg.content}</div>
+                            )
+                          )
                         )}
+
+                        {/* Refined Single-Button Voice Player (duplicate quick-play button eliminated) */}
+                        {msg.audio_url && (
+                          <VoicePlayer
+                            audioUrl={msg.audio_url}
+                            isMine={isMine}
+                            playerId={`voice-${msg.id}`}
+                          />
+                        )}
+
                         {msg.attachment_url && (
                           <div className={`mt-2 rounded-xl border flex flex-col transition-all overflow-hidden ${
                             isMine ? 'bg-emerald-700/30 border-emerald-500/50' : 'bg-slate-50 border-slate-200'
                           }`}>
                             {/* Media Preview */}
                             {msg.attachment_name?.toLowerCase().match(/\.(jpg|jpeg|png|gif|webp)$/) ? (
-                              <div className="relative group cursor-pointer overflow-hidden max-h-[300px]">
-                                <img 
-                                  src={msg.attachment_url} 
+                              <a
+                                href={msg.attachment_url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="relative group block overflow-hidden max-h-[300px]"
+                              >
+                                <img
+                                  src={msg.attachment_url}
                                   alt={msg.attachment_name}
                                   className="w-full h-full object-cover transition-transform group-hover:scale-105"
-                                  onClick={() => window.open(msg.attachment_url, '_blank')}
                                 />
-                              </div>
+                              </a>
                             ) : msg.attachment_name?.toLowerCase().match(/\.(mp4|webm|mov|avi|wmv)$/) ? (
                               <div className="relative max-h-[300px] bg-black">
-                                <video 
-                                  src={msg.attachment_url} 
-                                  controls 
+                                <video
+                                  src={msg.attachment_url}
+                                  controls
                                   className="w-full max-h-[300px]"
                                 />
                               </div>
@@ -1540,9 +1940,9 @@ export default function Messaging() {
                                 <div className={`text-[11px] font-bold truncate leading-tight mb-0.5 ${isMine ? 'text-white' : 'text-slate-800'}`}>
                                   {msg.attachment_name || 'Fichier joint'}
                                 </div>
-                                <a 
-                                  href={msg.attachment_url} 
-                                  target="_blank" 
+                                <a
+                                  href={msg.attachment_url}
+                                  target="_blank"
                                   rel="noopener noreferrer"
                                   className={`text-[10px] flex items-center gap-1 font-semibold underline decoration-2 underline-offset-2 ${
                                     isMine ? 'text-emerald-100 hover:text-white' : 'text-emerald-600 hover:text-emerald-700'
@@ -1556,11 +1956,38 @@ export default function Messaging() {
                         )}
                       </div>
 
-                      <div className="flex items-center gap-2.5 mt-1 px-1">
+                      {/* Sticker Reaction Chips */}
+                      {Array.isArray(msg.reactions) && msg.reactions.length > 0 && (
+                        <div className={`flex flex-wrap items-center gap-1 mt-1 px-1 ${isMine ? 'justify-end' : 'justify-start'}`}>
+                          {msg.reactions.map((reaction) => (
+                            <button
+                              key={`${msg.id}-${reaction.sticker}`}
+                              type="button"
+                              onClick={() => handleToggleReaction(msg.id, reaction.sticker)}
+                              title={
+                                reaction.users?.length
+                                  ? `${reaction.users.map(u => u.nom).join(', ')} — Cliquer pour réagir`
+                                  : 'Cliquer pour réagir'
+                              }
+                              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border transition-all animate-in zoom-in-95 duration-150 active:scale-90 ${
+                                reaction.reactedByMe
+                                  ? 'bg-emerald-50 border-emerald-400 text-emerald-800 font-bold shadow-2xs'
+                                  : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50 shadow-2xs'
+                              }`}
+                            >
+                              <span className="text-sm leading-none">{reaction.sticker}</span>
+                              <span className="text-[10px] font-bold">{reaction.count}</span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Bottom Metadata & Action Row */}
+                      <div className="flex items-center gap-2 mt-1 px-1">
                         {msg.audio_url && (
                           <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200/60 shadow-2xs">
-                            <Volume2 className="w-3 h-3 text-emerald-600" />
-                            Message vocal
+                            <Mic className="w-3 h-3 text-emerald-600" />
+                            Note vocale
                           </span>
                         )}
                         {msg.attachment_url && (
@@ -1570,17 +1997,60 @@ export default function Messaging() {
                           </span>
                         )}
 
+                        {/* Quick-react trigger */}
                         <button
-                          onClick={() => speakMessage(msg)}
+                          type="button"
+                          onClick={() => setOpenStickerPickerMsgId(showPicker ? null : msg.id)}
                           className={`p-1 rounded-md transition-colors ${
-                            speakingMsgId === msg.id 
-                              ? 'text-rose-500 bg-rose-50' 
-                              : 'text-slate-400 hover:text-slate-600 hover:bg-slate-100'
+                            showPicker
+                              ? 'text-emerald-600 bg-emerald-50'
+                              : 'text-slate-400 hover:text-emerald-600 hover:bg-emerald-50'
                           }`}
-                          title={speakingMsgId === msg.id ? "Arrêter la synthèse vocale" : "Synthèse vocale (lecture du texte)"}
+                          title="Réagir avec un sticker"
                         >
-                          <Volume2 className={`w-3.5 h-3.5 ${speakingMsgId === msg.id ? 'animate-pulse' : ''}`} />
+                          <SmilePlus className="w-3.5 h-3.5" />
                         </button>
+
+                        {/* Text-to-speech button ONLY for non-voice text messages */}
+                        {!isPureVoice && msg.content && msg.content !== '[Message Vocal]' && !isSingleStickerMsg && (
+                          <button
+                            type="button"
+                            onClick={() => speakMessage(msg)}
+                            className={`p-1 rounded-md transition-colors ${
+                              speakingMsgId === msg.id
+                                ? 'text-rose-500 bg-rose-50'
+                                : 'text-slate-400 hover:text-slate-600 hover:bg-slate-100'
+                            }`}
+                            title={speakingMsgId === msg.id ? "Arrêter la synthèse vocale" : "Synthèse vocale (lecture du texte)"}
+                          >
+                            <Volume2 className={`w-3.5 h-3.5 ${speakingMsgId === msg.id ? 'animate-pulse' : ''}`} />
+                          </button>
+                        )}
+
+                        {/* Edit button (strictly for author's text-only messages) */}
+                        {canEdit && !isEditingThis && (
+                          <button
+                            type="button"
+                            onClick={() => startEditingMessage(msg)}
+                            className="p-1 rounded-md text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition-colors"
+                            title="Modifier ce message texte"
+                          >
+                            <Pencil className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+
+                        {/* Delete button (author or admin/direction) */}
+                        {canDelete && (
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteMessage(msg)}
+                            disabled={deletingMsgId === msg.id}
+                            className="p-1 rounded-md text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors disabled:opacity-40"
+                            title="Supprimer ce message"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
 
                         <div className="flex items-center gap-1 text-[10px] text-slate-400">
                           {isMine && (
@@ -1748,8 +2218,8 @@ export default function Messaging() {
                     className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-slate-200 text-slate-700 hover:text-rose-600 hover:bg-rose-50 hover:border-rose-200 bg-white text-xs font-bold transition-all shadow-sm"
                     title="Enregistrer un message vocal direct au micro"
                   >
-                    <Volume2 size={15} className="text-rose-500" />
-                    <span>Micro</span>
+                    <Mic size={15} className="text-rose-500" />
+                    <span>Vocal</span>
                   </button>
 
                   {/* Audio Tool 3: Dictation button */}
@@ -1763,9 +2233,42 @@ export default function Messaging() {
                     }`}
                     title={listeningTarget === 'internal' ? "Arrêter la dictée" : "Activer la dictée vocale"}
                   >
-                    {listeningTarget === 'internal' ? <MicOff size={15} /> : <Mic size={15} className="text-slate-400" />}
+                    {listeningTarget === 'internal' ? <MicOff size={15} /> : <Volume2 size={15} className="text-slate-400" />}
                     <span>Dictée</span>
                   </button>
+
+                  {/* Tool 4: Stickers drawer button */}
+                  <div className="relative">
+                    <button
+                      type="button"
+                      onClick={() => setShowComposerStickers(prev => !prev)}
+                      disabled={sendingMessage || isRecording}
+                      className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border text-xs font-bold transition-all shadow-sm ${
+                        showComposerStickers
+                          ? 'bg-amber-50 border-amber-300 text-amber-700'
+                          : 'border-slate-200 text-slate-700 hover:text-amber-700 hover:bg-amber-50 hover:border-amber-200 bg-white'
+                      }`}
+                      title="Envoyer un sticker rapidement"
+                    >
+                      <Smile size={15} className="text-amber-500" />
+                      <span>Stickers</span>
+                    </button>
+                    {showComposerStickers && (
+                      <div className="absolute bottom-full left-0 mb-2 p-2.5 bg-white rounded-2xl border border-slate-200 shadow-xl grid grid-cols-8 gap-1.5 z-30 w-64 animate-in zoom-in-95 duration-150">
+                        {EXTENDED_STICKERS.map(st => (
+                          <button
+                            key={st}
+                            type="button"
+                            onClick={() => handleSendSticker(st)}
+                            className="w-7 h-7 rounded-lg hover:bg-slate-100 flex items-center justify-center text-base transition-transform hover:scale-125 active:scale-95"
+                            title={`Envoyer ${st}`}
+                          >
+                            {st}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 </div>
 
                 {/* Right side: Send button cleanly separated */}

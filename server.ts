@@ -3406,6 +3406,8 @@ db.exec(`
   try { db.prepare("ALTER TABLE messages_internes ADD COLUMN annee_id INTEGER").run(); } catch(e) {}
   try { db.prepare("ALTER TABLE messages_internes ADD COLUMN attachment_url TEXT").run(); } catch(e) {}
   try { db.prepare("ALTER TABLE messages_internes ADD COLUMN attachment_name TEXT").run(); } catch(e) {}
+  try { db.prepare("ALTER TABLE messages_internes ADD COLUMN is_edited INTEGER DEFAULT 0").run(); } catch(e) {}
+  try { db.prepare("ALTER TABLE messages_internes ADD COLUMN edited_at TEXT").run(); } catch(e) {}
 
   db.exec(`
   CREATE TABLE IF NOT EXISTS message_lectures (
@@ -3414,6 +3416,18 @@ db.exec(`
     user_id INTEGER NOT NULL,
     read_at TEXT DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(message_id, user_id),
+    FOREIGN KEY(message_id) REFERENCES messages_internes(id) ON DELETE CASCADE,
+    FOREIGN KEY(user_id) REFERENCES utilisateurs(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS message_reactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    school_id INTEGER NOT NULL DEFAULT 1,
+    sticker TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(message_id, user_id, sticker),
     FOREIGN KEY(message_id) REFERENCES messages_internes(id) ON DELETE CASCADE,
     FOREIGN KEY(user_id) REFERENCES utilisateurs(id) ON DELETE CASCADE
   );
@@ -6871,7 +6885,7 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
   // Public: Submit Teacher Information Form
   app.post("/api/public/collecte-enseignant/:token/soumettre", (req, res) => {
     try {
-      const { token } = req.params;
+      const token = decodeURIComponent(String(req.params.token || '')).trim();
       const {
         nom,
         prenom,
@@ -6883,7 +6897,7 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
         emploi_du_temps
       } = req.body;
 
-      const form = db.prepare("SELECT * FROM collecte_enseignants_formulaires WHERE token = ?").get(token) as any;
+      const form = db.prepare("SELECT * FROM collecte_enseignants_formulaires WHERE TRIM(token) = ?").get(token) as any;
       if (!form) {
         return res.status(404).json({ error: "Formulaire introuvable." });
       }
@@ -21155,6 +21169,132 @@ function executeYearTransition(
     });
   });
 
+  // One-click demo / test school login endpoint
+  app.post("/api/auth/test-school-login", (req: any, res: any) => {
+    try {
+      const requestedRole = String(req.body?.role || 'admin').trim().toLowerCase();
+      const allowedDemoRoles = ['admin', 'direction', 'secretariat', 'enseignant', 'comptable', 'parent', 'eleve'];
+      const targetRole = allowedDemoRoles.includes(requestedRole) ? requestedRole : 'admin';
+
+      // Locate test school (usually school_id = 1 'École par Défaut')
+      let testSchool = db.prepare(`
+        SELECT id, nom FROM school_info
+        WHERE id = 1 OR LOWER(nom) LIKE '%défaut%' OR LOWER(nom) LIKE '%test%'
+        ORDER BY id ASC LIMIT 1
+      `).get() as any;
+
+      if (!testSchool) {
+        const anySchool = db.prepare("SELECT id, nom FROM school_info ORDER BY id ASC LIMIT 1").get() as any;
+        testSchool = anySchool || { id: 1, nom: 'École Test' };
+      }
+
+      let demoUser = db.prepare(`
+        SELECT * FROM utilisateurs
+        WHERE COALESCE(is_test_account, 0) = 1
+          AND role = ?
+          AND school_id IS NOT NULL
+        ORDER BY CASE WHEN school_id = ? THEN 0 ELSE 1 END, id ASC
+        LIMIT 1
+      `).get(targetRole, testSchool.id) as any;
+
+      if (!demoUser) {
+        demoUser = db.prepare(`
+          SELECT * FROM utilisateurs
+          WHERE LOWER(email) LIKE '%@ecole.com'
+            AND role = ?
+            AND school_id IS NOT NULL
+          ORDER BY id ASC LIMIT 1
+        `).get(targetRole) as any;
+      }
+
+      if (!demoUser) {
+        // Fallback: auto-create/ensure the admin test account if missing
+        const fallbackPass = bcrypt.hashSync("password", 10);
+        const allPerms = JSON.stringify([
+          '/', '/classes', '/eleves', '/promotions', '/enseignants',
+          '/matieres', '/notes', '/paiements', '/emploi-du-temps',
+          '/ecole', '/parametres', '/audit-logs', '/alertes'
+        ]);
+        const info = db.prepare(`
+          INSERT INTO utilisateurs (nom, email, mot_de_passe, role, approuve, is_first_login, permissions, can_write, school_id, is_test_account)
+          VALUES (?, ?, ?, 'admin', 1, 0, ?, 1, ?, 1)
+        `).run('Administrateur École Test', 'admin@ecole.com', fallbackPass, allPerms, testSchool.id);
+        demoUser = db.prepare("SELECT * FROM utilisateurs WHERE id = ?").get(info.lastInsertRowid) as any;
+      }
+
+      if (!demoUser) {
+        return res.status(404).json({ success: false, error: "Aucun compte d'école test disponible." });
+      }
+
+      if (demoUser.approuve === 0) {
+        db.prepare("UPDATE utilisateurs SET approuve = 1 WHERE id = ?").run(demoUser.id);
+      }
+
+      let enseignant_id = demoUser.enseignant_id || null;
+      let cycle = null;
+      if (demoUser.role === 'enseignant' || demoUser.enseignant_id) {
+        const enseignant = db.prepare("SELECT id, cycle FROM enseignants WHERE (email = ? OR id = ?) AND school_id = ?").get(demoUser.email, demoUser.enseignant_id, demoUser.school_id) as any;
+        if (enseignant) {
+          enseignant_id = enseignant.id;
+          cycle = enseignant.cycle;
+        }
+      }
+
+      const rolePerms = db.prepare("SELECT permissions FROM role_permissions WHERE role = ? AND school_id = ?").get(demoUser.role, demoUser.school_id) as any;
+      const defaultPermissions = rolePerms ? JSON.parse(rolePerms.permissions) : [];
+
+      let parsedPermissions = defaultPermissions;
+      try {
+        if (demoUser.permissions) {
+          parsedPermissions = typeof demoUser.permissions === 'string' ? JSON.parse(demoUser.permissions) : demoUser.permissions;
+        }
+      } catch {
+        parsedPermissions = defaultPermissions;
+      }
+
+      logActivity(demoUser.id, 'LOGIN_TEST_SCHOOL', 'USER', demoUser.id, { email: demoUser.email, role: demoUser.role }, demoUser.school_id);
+
+      const token = jwt.sign(
+        {
+          id: demoUser.id,
+          email: demoUser.email,
+          role: demoUser.role,
+          schoolId: demoUser.school_id,
+          eleve_id: demoUser.eleve_id,
+          enseignant_id: enseignant_id || demoUser.enseignant_id,
+          cycle,
+          lastSeen: new Date().toISOString()
+        },
+        JWT_SECRET,
+        { expiresIn: '24h' }
+      );
+
+      res.json({
+        success: true,
+        token,
+        schoolName: testSchool.nom,
+        user: {
+          id: demoUser.id,
+          nom: demoUser.nom,
+          email: demoUser.email,
+          role: demoUser.role,
+          school_id: demoUser.school_id,
+          is_first_login: 0,
+          must_change_password: 0,
+          cycle,
+          can_write: demoUser.can_write ?? 1,
+          is_test_account: 1,
+          enseignant_id,
+          eleve_id: demoUser.eleve_id,
+          permissions: parsedPermissions
+        }
+      });
+    } catch (error: any) {
+      console.error("Test school login error:", error);
+      res.status(500).json({ success: false, error: "Impossible de connecter à l'école test." });
+    }
+  });
+
   app.get("/api/auth/me", authenticateToken, (req: any, res: any) => {
     const user = db.prepare("SELECT id, nom, email, role, approuve, permissions, enseignant_id, personnel_id, eleve_id, google_id, school_id, is_test_account, is_first_login, must_change_password FROM utilisateurs WHERE id = ?").get(req.user.id) as any;
     if (!user) return res.status(404).json({ error: "Utilisateur non trouvé" });
@@ -25400,7 +25540,39 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         messages = db.prepare(query).all(...params);
       }
 
-      res.json(messages);
+      const attachReactions = (list: any[]) => {
+        if (!Array.isArray(list) || list.length === 0) return list;
+        const msgIds = list.map((m: any) => m.id).filter(Boolean);
+        if (msgIds.length === 0) return list;
+        const placeholders = msgIds.map(() => '?').join(',');
+        const rawReactions = db.prepare(`
+          SELECT r.message_id, r.sticker, r.user_id, u.nom as user_nom
+          FROM message_reactions r
+          LEFT JOIN utilisateurs u ON r.user_id = u.id
+          WHERE r.message_id IN (${placeholders})
+          ORDER BY r.created_at ASC
+        `).all(...msgIds) as any[];
+
+        const groupedByMsg = new Map<number, Map<string, { sticker: string; count: number; reactedByMe: boolean; users: { id: number; nom: string }[] }>>();
+        for (const r of rawReactions) {
+          if (!groupedByMsg.has(r.message_id)) groupedByMsg.set(r.message_id, new Map());
+          const stickerMap = groupedByMsg.get(r.message_id)!;
+          if (!stickerMap.has(r.sticker)) {
+            stickerMap.set(r.sticker, { sticker: r.sticker, count: 0, reactedByMe: false, users: [] });
+          }
+          const entry = stickerMap.get(r.sticker)!;
+          entry.count += 1;
+          if (r.user_id === currentUserId) entry.reactedByMe = true;
+          entry.users.push({ id: r.user_id, nom: r.user_nom || 'Utilisateur' });
+        }
+
+        return list.map((m: any) => ({
+          ...m,
+          reactions: groupedByMsg.has(m.id) ? Array.from(groupedByMsg.get(m.id)!.values()) : []
+        }));
+      };
+
+      res.json(attachReactions(messages));
     } catch (err: any) {
       console.error("Fetch messages error:", err);
       res.status(500).json({ error: err.message });
@@ -25710,6 +25882,160 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       }
       res.json({ success: true });
     } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Toggle sticker reaction on an internal message
+  app.post("/api/messagerie/messages/:id/reactions", authenticateToken, (req: any, res) => {
+    try {
+      const schoolId = req.schoolId || 1;
+      const currentUserId = req.userId;
+      const messageId = parseInt(req.params.id, 10);
+      const sticker = String(req.body?.sticker || '').trim();
+
+      if (!Number.isFinite(messageId) || !sticker || sticker.length > 32) {
+        return res.status(400).json({ error: "Sticker invalide." });
+      }
+
+      const msg = db.prepare("SELECT id, school_id FROM messages_internes WHERE id = ? AND school_id = ?").get(messageId, schoolId) as any;
+      if (!msg) {
+        return res.status(404).json({ error: "Message introuvable." });
+      }
+
+      const existing = db.prepare(`
+        SELECT id FROM message_reactions
+        WHERE message_id = ? AND user_id = ? AND sticker = ?
+      `).get(messageId, currentUserId, sticker) as any;
+
+      let action: 'added' | 'removed' = 'added';
+      if (existing) {
+        db.prepare("DELETE FROM message_reactions WHERE id = ?").run(existing.id);
+        action = 'removed';
+      } else {
+        db.prepare(`
+          INSERT INTO message_reactions (message_id, user_id, school_id, sticker)
+          VALUES (?, ?, ?, ?)
+        `).run(messageId, currentUserId, schoolId, sticker);
+      }
+
+      const rawReactions = db.prepare(`
+        SELECT r.sticker, r.user_id, u.nom as user_nom
+        FROM message_reactions r
+        LEFT JOIN utilisateurs u ON r.user_id = u.id
+        WHERE r.message_id = ?
+        ORDER BY r.created_at ASC
+      `).all(messageId) as any[];
+
+      const stickerMap = new Map<string, { sticker: string; count: number; reactedByMe: boolean; users: { id: number; nom: string }[] }>();
+      for (const r of rawReactions) {
+        if (!stickerMap.has(r.sticker)) {
+          stickerMap.set(r.sticker, { sticker: r.sticker, count: 0, reactedByMe: false, users: [] });
+        }
+        const entry = stickerMap.get(r.sticker)!;
+        entry.count += 1;
+        if (r.user_id === currentUserId) entry.reactedByMe = true;
+        entry.users.push({ id: r.user_id, nom: r.user_nom || 'Utilisateur' });
+      }
+
+      bumpServerDataVersion();
+      res.json({ success: true, action, reactions: Array.from(stickerMap.values()) });
+    } catch (err: any) {
+      console.error("Reaction toggle error:", err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Edit an internal text message (text-only messages belonging to the sender)
+  app.put("/api/messagerie/messages/:id", authenticateToken, (req: any, res) => {
+    try {
+      const schoolId = req.schoolId || 1;
+      const currentUserId = req.userId;
+      const messageId = parseInt(req.params.id, 10);
+      const { content, subject } = req.body || {};
+
+      const msg = db.prepare("SELECT * FROM messages_internes WHERE id = ? AND school_id = ?").get(messageId, schoolId) as any;
+      if (!msg) {
+        return res.status(404).json({ error: "Message introuvable." });
+      }
+
+      if (msg.sender_id !== currentUserId) {
+        return res.status(403).json({ error: "Vous ne pouvez modifier que vos propres messages." });
+      }
+
+      if (msg.audio_url || msg.attachment_url || msg.content === '[Message Vocal]') {
+        return res.status(400).json({ error: "Seuls les messages texte peuvent être modifiés." });
+      }
+
+      const trimmedContent = typeof content === 'string' ? content.trim() : '';
+      if (!trimmedContent) {
+        return res.status(400).json({ error: "Le contenu du message ne peut pas être vide." });
+      }
+
+      const nextSubject = typeof subject === 'string' ? subject.trim() : (msg.subject || '');
+
+      db.prepare(`
+        UPDATE messages_internes
+        SET content = ?, subject = ?, is_edited = 1, edited_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND school_id = ?
+      `).run(trimmedContent, nextSubject, messageId, schoolId);
+
+      bumpServerDataVersion();
+      const updated = db.prepare("SELECT * FROM messages_internes WHERE id = ?").get(messageId);
+      res.json({ success: true, message: updated });
+    } catch (err: any) {
+      console.error("Edit message error:", err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Delete an internal message (author or admin/direction)
+  app.delete("/api/messagerie/messages/:id", authenticateToken, (req: any, res) => {
+    try {
+      const schoolId = req.schoolId || 1;
+      const currentUserId = req.userId;
+      const userRole = req.user?.role || '';
+      const messageId = parseInt(req.params.id, 10);
+
+      const msg = db.prepare("SELECT * FROM messages_internes WHERE id = ? AND school_id = ?").get(messageId, schoolId) as any;
+      if (!msg) {
+        return res.status(404).json({ error: "Message introuvable." });
+      }
+
+      const isAdmin = ['admin', 'direction', 'super_admin', 'fonde'].includes(userRole);
+      if (msg.sender_id !== currentUserId && !isAdmin) {
+        return res.status(403).json({ error: "Vous n'êtes pas autorisé à supprimer ce message." });
+      }
+
+      db.transaction(() => {
+        db.prepare("DELETE FROM message_reactions WHERE message_id = ?").run(messageId);
+        db.prepare("DELETE FROM message_lectures WHERE message_id = ?").run(messageId);
+        db.prepare("DELETE FROM messages_internes WHERE id = ? AND school_id = ?").run(messageId, schoolId);
+      })();
+
+      // Clean up local uploaded audio/attachment file if no other message references it
+      const mediaUrls = [msg.audio_url, msg.attachment_url].filter((u): u is string => typeof u === 'string' && u.startsWith('/uploads/'));
+      for (const mediaUrl of mediaUrls) {
+        try {
+          const refCount = (db.prepare("SELECT COUNT(*) as c FROM messages_internes WHERE audio_url = ? OR attachment_url = ?").get(mediaUrl, mediaUrl) as any)?.c || 0;
+          if (refCount === 0) {
+            const relPath = mediaUrl.replace(/^\/+/, '');
+            for (const baseDir of [path.join(process.cwd(), 'public'), path.join(process.cwd(), 'dist')]) {
+              const target = path.join(baseDir, relPath);
+              if (fs.existsSync(target)) {
+                fs.unlinkSync(target);
+              }
+            }
+          }
+        } catch {
+          // non-critical file cleanup error
+        }
+      }
+
+      bumpServerDataVersion();
+      res.json({ success: true, deletedId: messageId });
+    } catch (err: any) {
+      console.error("Delete message error:", err);
       res.status(500).json({ error: err.message });
     }
   });

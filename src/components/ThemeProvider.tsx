@@ -37,7 +37,12 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const now = Date.now();
     if (!force && now - lastThemeFetchRef.current < 3000) return;
     lastThemeFetchRef.current = now;
-    const token = localStorage.getItem('token');
+    let token: string | null = null;
+    try {
+      token = window.localStorage?.getItem('token') || null;
+    } catch {
+      token = null;
+    }
     apiFetch('/api/school-info', {
       headers: token ? { 'Authorization': `Bearer ${token}` } : {}
     })

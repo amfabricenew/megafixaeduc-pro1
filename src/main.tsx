@@ -40,11 +40,15 @@ if (typeof window !== 'undefined') {
   window.addEventListener('vite:preloadError', (event) => {
     event.preventDefault();
     console.warn('[MégafixaEduc] Module chunk reload requested');
-    const reloadKey = 'megafixa_preload_reload';
-    const lastReload = parseInt(sessionStorage.getItem(reloadKey) || '0', 10);
-    const now = Date.now();
-    if (now - lastReload > 15000) {
-      sessionStorage.setItem(reloadKey, now.toString());
+    try {
+      const reloadKey = 'megafixa_preload_reload';
+      const lastReload = parseInt(sessionStorage.getItem(reloadKey) || '0', 10);
+      const now = Date.now();
+      if (now - lastReload > 15000) {
+        sessionStorage.setItem(reloadKey, now.toString());
+        window.location.reload();
+      }
+    } catch {
       window.location.reload();
     }
   });
@@ -56,10 +60,19 @@ if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
     let refreshing = false;
     navigator.serviceWorker.addEventListener('controllerchange', () => {
       if (refreshing) return;
-      const key = 'megafixa_sw_controller_reload';
-      const last = parseInt(sessionStorage.getItem(key) || '0', 10);
-      if (Date.now() - last > 20000) {
-        sessionStorage.setItem(key, Date.now().toString());
+      const p = (window.location.pathname || '').toLowerCase();
+      if (p.startsWith('/formulaire-enseignant') || p.startsWith('/collecte-enseignant') || p.startsWith('/f/')) {
+        return;
+      }
+      try {
+        const key = 'megafixa_sw_controller_reload';
+        const last = parseInt(sessionStorage.getItem(key) || '0', 10);
+        if (Date.now() - last > 20000) {
+          sessionStorage.setItem(key, Date.now().toString());
+          refreshing = true;
+          window.location.reload();
+        }
+      } catch {
         refreshing = true;
         window.location.reload();
       }

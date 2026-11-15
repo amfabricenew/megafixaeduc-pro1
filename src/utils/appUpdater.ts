@@ -72,9 +72,25 @@ export function triggerCrossLevelDataSync(reason = 'server_sync'): void {
   window.dispatchEvent(new CustomEvent('refresh_notifications', { detail: { timestamp, reason } }));
 }
 
+function isActivePublicFormRoute(): boolean {
+  if (typeof window === 'undefined') return false;
+  const p = (window.location.pathname || '').toLowerCase();
+  return (
+    p.startsWith('/formulaire-enseignant') ||
+    p.startsWith('/collecte-enseignant') ||
+    p.startsWith('/public/formulaire-enseignant') ||
+    p.startsWith('/public/collecte-enseignant') ||
+    p.startsWith('/f/')
+  );
+}
+
 export async function applyAutomaticUpdate(newBuildId: string, broadcast = true): Promise<void> {
   if (typeof window === 'undefined' || isApplyingUpdate || isStaticFallbackHost()) return;
   if (!newBuildId || newBuildId === 'static') return;
+  if (isActivePublicFormRoute()) {
+    knownBuildId = newBuildId;
+    return;
+  }
 
   try {
     const lastBuild = sessionStorage.getItem(RELOAD_GUARD_KEY);

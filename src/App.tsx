@@ -18,6 +18,8 @@ import SubscriptionGatedView from './components/SubscriptionGatedView';
 import FloatingNotificationOverlay from './components/FloatingNotificationOverlay';
 import AIAssistantWidget from './components/AIAssistantWidget';
 import Login from './pages/Login';
+import PublicTeacherForm from './pages/PublicTeacherForm';
+import ErrorBoundary from './components/ErrorBoundary';
 import SuperAdminLayout from './components/super-admin/SuperAdminLayout';
 import { clearAppCachesAndUpdateSW } from './utils/appUpdater';
 
@@ -133,7 +135,6 @@ const PublicRecruitment = lazyWithRetry(() => import('./pages/PublicRecruitment'
 const PublicEnrollment = lazyWithRetry(() => import('./pages/PublicEnrollment'));
 const PublicTracking = lazyWithRetry(() => import('./pages/PublicTracking'));
 const TeacherCollectionManagement = lazyWithRetry(() => import('./pages/TeacherCollectionManagement'));
-const PublicTeacherForm = lazyWithRetry(() => import('./pages/PublicTeacherForm'));
 const AILab = lazyWithRetry(() => import('./pages/AILab'));
 
 // Super Admin Pages
@@ -234,16 +235,20 @@ export default function App() {
                   <Route path="/public/inscription/:token" element={<PublicEnrollment />} />
                   <Route path="/public/suivi-candidature" element={<PublicTracking />} />
                   <Route path="/public/suivi-inscription" element={<PublicTracking />} />
-                  <Route path="/formulaire-enseignant" element={<PublicTeacherForm />} />
-                  <Route path="/formulaire-enseignant/:token" element={<PublicTeacherForm />} />
-                  <Route path="/public/formulaire-enseignant" element={<PublicTeacherForm />} />
-                  <Route path="/public/formulaire-enseignant/:token" element={<PublicTeacherForm />} />
-                  <Route path="/public/collecte-enseignant" element={<PublicTeacherForm />} />
-                  <Route path="/public/collecte-enseignant/:token" element={<PublicTeacherForm />} />
-                  <Route path="/public/collecte-enseignants/:token" element={<PublicTeacherForm />} />
-                  <Route path="/collecte-enseignant" element={<PublicTeacherForm />} />
-                  <Route path="/collecte-enseignant/:token" element={<PublicTeacherForm />} />
-                  <Route path="/f/:token" element={<PublicTeacherForm />} />
+                  <Route path="/formulaire-enseignant" element={<ErrorBoundary inline><PublicTeacherForm /></ErrorBoundary>} />
+                  <Route path="/formulaire-enseignant/:token" element={<ErrorBoundary inline><PublicTeacherForm /></ErrorBoundary>} />
+                  <Route path="/formulaire-enseignant/:token/*" element={<ErrorBoundary inline><PublicTeacherForm /></ErrorBoundary>} />
+                  <Route path="/public/formulaire-enseignant" element={<ErrorBoundary inline><PublicTeacherForm /></ErrorBoundary>} />
+                  <Route path="/public/formulaire-enseignant/:token" element={<ErrorBoundary inline><PublicTeacherForm /></ErrorBoundary>} />
+                  <Route path="/public/formulaire-enseignant/:token/*" element={<ErrorBoundary inline><PublicTeacherForm /></ErrorBoundary>} />
+                  <Route path="/public/collecte-enseignant" element={<ErrorBoundary inline><PublicTeacherForm /></ErrorBoundary>} />
+                  <Route path="/public/collecte-enseignant/:token" element={<ErrorBoundary inline><PublicTeacherForm /></ErrorBoundary>} />
+                  <Route path="/public/collecte-enseignant/:token/*" element={<ErrorBoundary inline><PublicTeacherForm /></ErrorBoundary>} />
+                  <Route path="/public/collecte-enseignants/:token" element={<ErrorBoundary inline><PublicTeacherForm /></ErrorBoundary>} />
+                  <Route path="/collecte-enseignant" element={<ErrorBoundary inline><PublicTeacherForm /></ErrorBoundary>} />
+                  <Route path="/collecte-enseignant/:token" element={<ErrorBoundary inline><PublicTeacherForm /></ErrorBoundary>} />
+                  <Route path="/collecte-enseignant/:token/*" element={<ErrorBoundary inline><PublicTeacherForm /></ErrorBoundary>} />
+                  <Route path="/f/:token" element={<ErrorBoundary inline><PublicTeacherForm /></ErrorBoundary>} />
 
                   {/* Super Admin Routes */}
                   <Route 

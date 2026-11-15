@@ -12,6 +12,13 @@ export interface User {
   telephone?: string;
 }
 
+export interface MessageReaction {
+  sticker: string;
+  count: number;
+  reactedByMe: boolean;
+  users: { id: number; nom: string }[];
+}
+
 export interface InternalMessage {
   id: number;
   school_id: number;
@@ -28,6 +35,8 @@ export interface InternalMessage {
   parent_message_id?: number | null;
   is_sms_sent?: number;
   sms_status?: string;
+  is_edited?: number;
+  edited_at?: string | null;
   created_at: string;
   sender_name?: string;
   sender_role?: string;
@@ -35,6 +44,7 @@ export interface InternalMessage {
   recipient_name?: string;
   classe_nom?: string;
   is_read?: number;
+  reactions?: MessageReaction[];
 }
 
 export interface ConversationParticipant {

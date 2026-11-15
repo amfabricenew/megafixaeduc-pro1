@@ -30,9 +30,61 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+const safeGet = (key: string): string | null => {
+  try {
+    return typeof window !== 'undefined' && window.localStorage ? window.localStorage.getItem(key) : null;
+  } catch {
+    return null;
+  }
+};
+
+const safeSet = (key: string, value: string): void => {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      window.localStorage.setItem(key, value);
+    }
+  } catch {
+    // ignore storage errors in restricted webviews
+  }
+};
+
+const safeRemove = (key: string): void => {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      window.localStorage.removeItem(key);
+    }
+  } catch {
+    // ignore storage errors
+  }
+};
+
+const isPublicUnblockedRoute = (): boolean => {
+  if (typeof window === 'undefined') return false;
+  const p = (window.location.pathname || '/').toLowerCase();
+  return (
+    p === '/' ||
+    p === '/welcome' ||
+    p === '/login' ||
+    p === '/parent-login' ||
+    p === '/signup' ||
+    p.startsWith('/formulaire-enseignant') ||
+    p.startsWith('/collecte-enseignant') ||
+    p.startsWith('/public/') ||
+    p.startsWith('/f/') ||
+    p.startsWith('/verifier-document') ||
+    p.startsWith('/verify-doc') ||
+    p.startsWith('/demande-compte-ecole') ||
+    p.startsWith('/demande-ecole') ||
+    p.startsWith('/school-request') ||
+    p.startsWith('/paiement') ||
+    p.startsWith('/subscription-payment') ||
+    p.startsWith('/setup-password')
+  );
+};
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState<boolean>(() => !isPublicUnblockedRoute());
   const [schoolPlan, setSchoolPlan] = useState<string | null>(null);
   const [years, setYears] = useState<any[]>([]);
   const [selectedYearId, setSelectedYearIdState] = useState<number | null>(null);
@@ -46,7 +98,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           setYears(data);
           
           // Auto-select year logic
-          const storedYearId = localStorage.getItem('selected_year_id');
+          const storedYearId = safeGet('selected_year_id');
           if (storedYearId) {
             const id = parseInt(storedYearId);
             if (data.some((y: any) => y.id === id)) {
@@ -66,7 +118,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
           if (newId) {
             setSelectedYearIdState(newId);
-            localStorage.setItem('selected_year_id', newId.toString());
+            safeSet('selected_year_id', newId.toString());
           }
         } else {
           console.error('Expected array from /api/annees, got:', data);
@@ -80,7 +132,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const setSelectedYearId = (id: number) => {
     setSelectedYearIdState(id);
-    localStorage.setItem('selected_year_id', id.toString());
+    safeSet('selected_year_id', id.toString());
     // Trigger a window event so other components can react if needed
     window.dispatchEvent(new CustomEvent('academic_year_changed', { detail: { yearId: id } }));
     
@@ -106,7 +158,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const refreshUser = async () => {
     try {
-      const token = localStorage.getItem('token');
+      const token = safeGet('token');
       if (!token) {
         setLoading(false);
         return;
@@ -118,14 +170,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       if (response.ok) {
         const userData = await response.json();
-        localStorage.setItem('user', JSON.stringify(userData));
+        safeSet('user', JSON.stringify(userData));
         setUser(userData);
       } else if (response.status === 401 || response.status === 403) {
         // Token is definitely invalid or expired
         logout();
       } else {
         // For other errors (500, 502, 503, 504), keep the current session
-        // but perhaps log it for debugging
         console.warn(`Auth sync failed with status ${response.status}. Keeping session.`);
       }
     } catch (error) {
@@ -136,19 +187,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const login = (token: string, userData: User) => {
-    localStorage.removeItem('logged_out');
-    localStorage.setItem('token', token);
-    localStorage.setItem('user', JSON.stringify(userData));
+    safeRemove('logged_out');
+    safeSet('token', token);
+    safeSet('user', JSON.stringify(userData));
     setUser(userData);
     refreshPlan();
     fetchYears();
   };
 
   const logout = () => {
-    localStorage.setItem('logged_out', 'true');
-    localStorage.removeItem('token');
-    localStorage.removeItem('user');
-    localStorage.removeItem('selected_year_id');
+    safeSet('logged_out', 'true');
+    safeRemove('token');
+    safeRemove('user');
+    safeRemove('selected_year_id');
     setUser(null);
     setSchoolPlan(null);
     setYears([]);
@@ -156,22 +207,43 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   useEffect(() => {
-    const isLoggedOut = localStorage.getItem('logged_out') === 'true';
-    const token = localStorage.getItem('token');
+    const publicRoute = isPublicUnblockedRoute();
+    const isLoggedOut = safeGet('logged_out') === 'true';
+    const token = safeGet('token');
+
+    if (publicRoute) {
+      setLoading(false);
+      // Do not block public forms or pages waiting on auth checks
+      if (!isLoggedOut && token) {
+        refreshUser().catch(() => {});
+      }
+      return;
+    }
 
     if (isLoggedOut || !token) {
       setUser(null);
-      localStorage.removeItem('user');
-      localStorage.removeItem('token');
+      safeRemove('user');
+      safeRemove('token');
       setLoading(false);
       return;
     }
 
+    // Safety guard: never stay stuck in loading screen beyond 6 seconds
+    const safetyTimer = setTimeout(() => {
+      setLoading(false);
+    }, 6000);
+
     // Verify token with backend before granting access
-    refreshUser().then(() => {
-      refreshPlan();
-      fetchYears();
-    });
+    refreshUser()
+      .then(() => {
+        refreshPlan();
+        fetchYears();
+      })
+      .finally(() => {
+        clearTimeout(safetyTimer);
+      });
+
+    return () => clearTimeout(safetyTimer);
   }, []);
 
   // Polling for updates and listening for permission & cross-level sync events
@@ -232,7 +304,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       fetchYears,
       setSelectedYearId
     }}>
-      {!loading && children}
+      {loading && !isPublicUnblockedRoute() ? (
+        <div className="min-h-screen w-full flex items-center justify-center bg-slate-50">
+          <div className="flex flex-col items-center gap-3">
+            <div className="w-10 h-10 border-4 border-teal-600 border-t-transparent rounded-full animate-spin" />
+            <p className="text-sm font-medium text-slate-500">Chargement en cours...</p>
+          </div>
+        </div>
+      ) : (
+        children
+      )}
     </AuthContext.Provider>
   );
 }
