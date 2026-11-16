@@ -245,6 +245,17 @@ export default function SuperAdminLayout() {
     } catch (e) {}
   };
 
+  const superAdminLocation = useLocation();
+  const superAdminContentRef = React.useRef<HTMLDivElement>(null);
+
+  React.useEffect(() => {
+    if (superAdminLocation.hash) return;
+    if (superAdminContentRef.current) {
+      superAdminContentRef.current.scrollTop = 0;
+    }
+    window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+  }, [superAdminLocation.pathname, superAdminLocation.search, superAdminLocation.hash]);
+
   return (
     <div className="min-h-screen bg-slate-50 flex">
       {/* Sidebar */}
@@ -539,7 +550,7 @@ export default function SuperAdminLayout() {
         </header>
 
         {/* Content Area */}
-        <div className="flex-1 overflow-y-auto p-6 scrollbar-hide">
+        <div ref={superAdminContentRef} data-scroll-container="main" className="flex-1 overflow-y-auto p-6 scrollbar-hide">
           <div className="max-w-7xl mx-auto">
             <Outlet />
           </div>

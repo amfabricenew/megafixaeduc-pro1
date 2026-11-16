@@ -46,6 +46,42 @@ function GlobalOverlays() {
   );
 }
 
+// Ensures every page navigation opens at the very top (window + internal main containers)
+function ScrollToTop() {
+  const { pathname, search, hash } = useLocation();
+
+  React.useEffect(() => {
+    if (hash) return;
+
+    const resetScroll = () => {
+      try {
+        window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+        if (document.documentElement) document.documentElement.scrollTop = 0;
+        if (document.body) document.body.scrollTop = 0;
+        document
+          .querySelectorAll<HTMLElement>('main, [data-scroll-container="main"]')
+          .forEach((el) => {
+            el.scrollTop = 0;
+            el.scrollLeft = 0;
+          });
+      } catch {
+        // ignore
+      }
+    };
+
+    resetScroll();
+    const rafId = window.requestAnimationFrame(resetScroll);
+    const timerId = window.setTimeout(resetScroll, 60);
+
+    return () => {
+      window.cancelAnimationFrame(rafId);
+      window.clearTimeout(timerId);
+    };
+  }, [pathname, search, hash]);
+
+  return null;
+}
+
 // Resilient lazy load helper with smooth retry & stale-chunk auto-recovery
 const lazyWithRetry = <T extends React.ComponentType<any>>(
   componentImport: () => Promise<{ default: T }>
@@ -211,6 +247,7 @@ export default function App() {
       <ThemeProvider>
         <ConfirmProvider>
           <Router>
+            <ScrollToTop />
             <NotificationProvider>
               <Toaster position="top-right" />
               <GlobalOverlays />

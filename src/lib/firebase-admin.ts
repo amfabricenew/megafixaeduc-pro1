@@ -1,13 +1,15 @@
+import fs from 'fs';
+import path from 'path';
 import firebaseConfig from '../../firebase-applet-config.json';
-import { OAuth2Client } from 'google-auth-library';
+import { GoogleAuth, OAuth2Client } from 'google-auth-library';
 
 const client = new OAuth2Client(firebaseConfig.oAuthClientId);
 
 export const auth = {
   async verifyIdToken(idToken: string) {
     // 1. Try Firebase Identity Toolkit lookup (authoritative for Firebase ID tokens)
-    try {
-      if (firebaseConfig.apiKey) {
+    if (firebaseConfig.apiKey) {
+      try {
         const res = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${firebaseConfig.apiKey}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -17,57 +19,50 @@ export const auth = {
           const data = await res.json();
           if (data.users && data.users[0]) {
             const u = data.users[0];
+            if (!u.email || u.emailVerified === false) {
+              throw new Error("Adresse email Google non vérifiée.");
+            }
             return {
               uid: u.localId,
               email: u.email,
+              email_verified: true,
               name: u.displayName || u.email?.split('@')[0],
               picture: u.photoUrl,
             };
           }
         }
+      } catch (e: any) {
+        if (e?.message?.includes("non vérifiée")) throw e;
+        console.warn("Identitytoolkit verification failed, trying OAuth client:", e?.message || e);
       }
-    } catch (e) {
-      console.warn("Identitytoolkit verification failed, trying OAuth client:", e);
     }
 
-    // 2. Try Google OAuth2Client verifyIdToken
+    // 2. Try Google OAuth2Client verifyIdToken (cryptographic signature verification)
     try {
+      const audiences = [
+        firebaseConfig.oAuthClientId,
+        firebaseConfig.projectId,
+        process.env.GOOGLE_CLIENT_ID
+      ].filter(Boolean) as string[];
       const ticket = await client.verifyIdToken({
         idToken,
-        audience: [firebaseConfig.oAuthClientId, firebaseConfig.projectId].filter(Boolean) as string[],
+        audience: audiences.length > 0 ? audiences : undefined,
       });
       const payload = ticket.getPayload();
-      if (payload) {
+      if (payload && payload.email && payload.email_verified !== false) {
         return {
           uid: payload.sub,
           email: payload.email,
-          name: payload.name,
+          email_verified: true,
+          name: payload.name || payload.email.split('@')[0],
           picture: payload.picture,
         };
       }
-    } catch (e) {
-      console.warn("OAuth client verification failed, trying JWT decode:", e);
+    } catch (e: any) {
+      console.warn("OAuth client verification failed:", e?.message || e);
     }
 
-    // 3. Fallback to decoding the JWT payload safely
-    try {
-      const parts = idToken.split('.');
-      if (parts.length === 3) {
-        const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
-        if (payload && (payload.email || payload.sub)) {
-          return {
-            uid: payload.user_id || payload.sub,
-            email: payload.email,
-            name: payload.name || payload.email?.split('@')[0],
-            picture: payload.picture,
-          };
-        }
-      }
-    } catch (e) {
-      console.warn("JWT fallback decode failed:", e);
-    }
-
-    throw new Error("Impossible de valider le token Google.");
+    throw new Error("Jeton Google invalide, expiré ou non vérifié.");
   }
 };
 
@@ -136,11 +131,72 @@ export interface DocSnapshot {
 
 export interface DocumentReference {
   get: () => Promise<DocSnapshot>;
-  set: (data: Record<string, any>) => Promise<void>;
+  set: (data: Record<string, any>) => Promise<boolean>;
 }
 
 export interface CollectionReference {
   doc: (docId: string) => DocumentReference;
+}
+
+let cloudSyncStatus: 'unknown' | 'ready' | 'unavailable' = 'unknown';
+let loggedCloudUnavailable = false;
+let cachedGoogleAuth: GoogleAuth | null = null;
+
+function markCloudUnavailable(reason: string) {
+  cloudSyncStatus = 'unavailable';
+  if (!loggedCloudUnavailable) {
+    loggedCloudUnavailable = true;
+    console.info(`[Persistence] Local SQLite persistence active (${reason}).`);
+  }
+}
+
+export function isCloudSyncAvailable(): boolean {
+  return cloudSyncStatus !== 'unavailable';
+}
+
+function getGoogleAuthClient(): GoogleAuth {
+  if (cachedGoogleAuth) return cachedGoogleAuth;
+
+  const scopes = ['https://www.googleapis.com/auth/datastore'];
+
+  if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+    try {
+      const credentials = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+      cachedGoogleAuth = new GoogleAuth({ credentials, scopes });
+      return cachedGoogleAuth;
+    } catch {
+      // Fall through to file/ADC lookup
+    }
+  }
+
+  const saFilePath =
+    process.env.GOOGLE_APPLICATION_CREDENTIALS ||
+    path.join(process.cwd(), 'firebase-service-account.json');
+  if (saFilePath && fs.existsSync(saFilePath)) {
+    cachedGoogleAuth = new GoogleAuth({ keyFilename: saFilePath, scopes });
+    return cachedGoogleAuth;
+  }
+
+  cachedGoogleAuth = new GoogleAuth({ scopes });
+  return cachedGoogleAuth;
+}
+
+async function getAdminAccessToken(): Promise<string | null> {
+  if (cloudSyncStatus === 'unavailable') return null;
+  try {
+    const googleAuth = getGoogleAuthClient();
+    const authClient = await googleAuth.getClient();
+    const tokenRes = await authClient.getAccessToken();
+    const token = typeof tokenRes === 'string' ? tokenRes : tokenRes?.token;
+    if (!token) {
+      markCloudUnavailable('no OAuth access token');
+      return null;
+    }
+    return token;
+  } catch {
+    markCloudUnavailable('no cloud admin credentials');
+    return null;
+  }
 }
 
 async function fetchWithRetry(
@@ -179,21 +235,37 @@ export const adminDb = {
   collection(collectionName: string): CollectionReference {
     return {
       doc(docId: string): DocumentReference {
+        const baseUrl = `https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/${firebaseConfig.firestoreDatabaseId}/documents`;
+        const url = `${baseUrl}/${collectionName}/${docId}`;
+
         return {
           async get(): Promise<DocSnapshot> {
-            const baseUrl = `https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/${firebaseConfig.firestoreDatabaseId}/documents`;
-            const url = `${baseUrl}/${collectionName}/${docId}?key=${firebaseConfig.apiKey}`;
-            const res = await fetchWithRetry(url);
+            if (cloudSyncStatus === 'unavailable') {
+              return { exists: false, data: () => null };
+            }
+            const accessToken = await getAdminAccessToken();
+            if (!accessToken) {
+              return { exists: false, data: () => null };
+            }
+            const res = await fetchWithRetry(url, {
+              headers: { Authorization: `Bearer ${accessToken}` }
+            });
             if (res.status === 404) {
+              cloudSyncStatus = 'ready';
               return {
                 exists: false,
                 data: () => null
               };
             }
+            if (res.status === 401 || res.status === 403) {
+              markCloudUnavailable('cloud backup permissions not configured for this runtime');
+              return { exists: false, data: () => null };
+            }
             if (!res.ok) {
               const errBody = await res.text();
               throw new Error(`Firestore REST GET failed [${res.status}]: ${errBody}`);
             }
+            cloudSyncStatus = 'ready';
             const json = await res.json();
             const data = parseFirestoreFields(json.fields);
             return {
@@ -201,20 +273,34 @@ export const adminDb = {
               data: () => data
             };
           },
-          async set(data: Record<string, any>): Promise<void> {
-            const baseUrl = `https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/${firebaseConfig.firestoreDatabaseId}/documents`;
-            const url = `${baseUrl}/${collectionName}/${docId}?key=${firebaseConfig.apiKey}`;
+          async set(data: Record<string, any>): Promise<boolean> {
+            if (cloudSyncStatus === 'unavailable') {
+              return false;
+            }
+            const accessToken = await getAdminAccessToken();
+            if (!accessToken) {
+              return false;
+            }
             const res = await fetchWithRetry(url, {
               method: 'PATCH',
-              headers: { 'Content-Type': 'application/json' },
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${accessToken}`
+              },
               body: JSON.stringify({
                 fields: toFirestoreFields(data)
               })
             });
+            if (res.status === 401 || res.status === 403) {
+              markCloudUnavailable('cloud backup permissions not configured for this runtime');
+              return false;
+            }
             if (!res.ok) {
               const errBody = await res.text();
               throw new Error(`Firestore REST PATCH failed [${res.status}]: ${errBody}`);
             }
+            cloudSyncStatus = 'ready';
+            return true;
           }
         };
       }

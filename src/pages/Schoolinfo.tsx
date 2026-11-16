@@ -153,7 +153,7 @@ const SafeGoogleMap = ({
   );
 };
 
-const MapComponent = ({ formData, setFormData }: { formData: any, setFormData: React.Dispatch<React.SetStateAction<any>> }) => {
+const MapComponent = ({ formData, setFormData, onDetectPosition }: { formData: any, setFormData: React.Dispatch<React.SetStateAction<any>>, onDetectPosition?: () => void }) => {
   const lat = Number(formData.latitude);
   const lng = Number(formData.longitude);
   const hasValidPos = !isNaN(lat) && !isNaN(lng) && lat !== 0 && lng !== 0;
@@ -163,6 +163,10 @@ const MapComponent = ({ formData, setFormData }: { formData: any, setFormData: R
     : { lat: 6.3654, lng: 2.4183 }), [hasValidPos, lat, lng]);
 
   const handleGetCurrentLocation = () => {
+    if (onDetectPosition) {
+      onDetectPosition();
+      return;
+    }
     if ('geolocation' in navigator) {
       navigator.geolocation.getCurrentPosition(
         (pos) => {
@@ -194,7 +198,7 @@ const MapComponent = ({ formData, setFormData }: { formData: any, setFormData: R
         <button
           type="button"
           onClick={handleGetCurrentLocation}
-          className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-xl shadow-sm transition flex items-center gap-2"
+          className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-xl shadow-sm transition flex items-center gap-2 cursor-pointer"
         >
           <LocateFixed size={14} />
           Détecter ma position GPS
@@ -234,6 +238,13 @@ export default function SchoolInfo() {
   const [selectedYearId, setSelectedYearId] = React.useState<string | number>('all');
   const [yearsList, setYearsList] = React.useState<any[]>([]);
   const [saving, setSaving] = React.useState(false);
+  const [detectingPosition, setDetectingPosition] = React.useState(false);
+  const [detectedLocationModal, setDetectedLocationModal] = React.useState<{
+    latitude: number;
+    longitude: number;
+    accuracy: number | null;
+  } | null>(null);
+  const [confirmingDetectedLocation, setConfirmingDetectedLocation] = React.useState(false);
   const [toast, setToast] = React.useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
   // License & Subscription state
@@ -298,7 +309,10 @@ export default function SchoolInfo() {
     police: 'inter',
     taille_police: 16,
     timezone: 'Africa/Abidjan',
-    periode_active: 1
+    periode_active: 1,
+    latitude: null as number | null,
+    longitude: null as number | null,
+    geofence_radius: 200
   });
 
   const [years, setYears] = React.useState<any[]>([]);
@@ -495,6 +509,7 @@ export default function SchoolInfo() {
       return;
     }
 
+    setDetectingPosition(true);
     showToast("Détection de votre position en cours...");
     
     const options = { 
@@ -505,10 +520,12 @@ export default function SchoolInfo() {
 
     const successCallback = (position: GeolocationPosition) => {
       const { latitude, longitude, accuracy } = position.coords;
-      console.log(`Detected position: ${latitude}, ${longitude} (accuracy: ${accuracy}m)`);
-      
-      setFormData(prev => ({ ...prev, latitude, longitude }));
-      showToast(`Position détectée avec une précision de ${Math.round(accuracy)}m !`);
+      setDetectingPosition(false);
+      setDetectedLocationModal({
+        latitude,
+        longitude,
+        accuracy: Number.isFinite(accuracy) ? Math.round(accuracy) : null
+      });
     };
 
     const errorCallback = (error: GeolocationPositionError) => {
@@ -526,6 +543,7 @@ export default function SchoolInfo() {
     };
 
     const finalErrorCallback = (error: GeolocationPositionError) => {
+      setDetectingPosition(false);
       let msg = "Impossible de détecter votre position.";
       if (error.code === 1) msg = "Accès à la géolocalisation refusé. Veuillez l'autoriser dans votre navigateur.";
       else if (error.code === 2) msg = "Position indisponible. Vérifiez votre signal GPS/réseau.";
@@ -536,6 +554,49 @@ export default function SchoolInfo() {
     };
 
     navigator.geolocation.getCurrentPosition(successCallback, errorCallback, options);
+  };
+
+  const handleConfirmDetectedLocation = async () => {
+    if (!detectedLocationModal) return;
+    const updatedData = {
+      ...formData,
+      latitude: detectedLocationModal.latitude,
+      longitude: detectedLocationModal.longitude
+    };
+    setFormData(updatedData);
+
+    // If school info has already been named, immediately persist & fix coordinates in DB
+    if (!updatedData.nom?.trim()) {
+      setDetectedLocationModal(null);
+      showToast("Position appliquée au formulaire. Pensez à enregistrer avec le nom de l'école.");
+      return;
+    }
+
+    setConfirmingDetectedLocation(true);
+    try {
+      const token = localStorage.getItem('token');
+      const response = await apiFetch('/api/school-info', {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+        },
+        body: JSON.stringify(updatedData)
+      });
+      if (response.ok) {
+        showToast("Position détectée validée et fixée comme localisation de l'école !");
+        window.dispatchEvent(new CustomEvent('schoolInfoChanged'));
+        setDetectedLocationModal(null);
+      } else {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.error || "Erreur lors de l'enregistrement de la localisation");
+      }
+    } catch (err: any) {
+      showToast(err?.message || "Position appliquée mais erreur lors de l'enregistrement.", "error");
+      setDetectedLocationModal(null);
+    } finally {
+      setConfirmingDetectedLocation(false);
+    }
   };
 
   const fetchSchoolInfo = async () => {
@@ -877,10 +938,15 @@ export default function SchoolInfo() {
                       <button
                         type="button"
                         onClick={handleDetectPosition}
-                        className="flex items-center gap-2 px-4 py-2 bg-blue-50 text-blue-600 rounded-xl font-bold text-xs hover:bg-blue-100 transition-all border border-blue-100"
+                        disabled={detectingPosition}
+                        className="flex items-center gap-2 px-4 py-2 bg-blue-50 text-blue-600 rounded-xl font-bold text-xs hover:bg-blue-100 disabled:opacity-60 transition-all border border-blue-100 cursor-pointer"
                       >
-                        <LocateFixed size={16} />
-                        Détecter ma position
+                        {detectingPosition ? (
+                          <Loader2 size={16} className="animate-spin" />
+                        ) : (
+                          <LocateFixed size={16} />
+                        )}
+                        {detectingPosition ? 'Détection en cours...' : 'Détecter ma position'}
                       </button>
                       <div className="text-right">
                         <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Rayon de contrôle (mètres)</label>
@@ -900,7 +966,7 @@ export default function SchoolInfo() {
                     </div>
                   </div>
                   
-                  <MapComponent formData={formData} setFormData={setFormData} />
+                  <MapComponent formData={formData} setFormData={setFormData} onDetectPosition={handleDetectPosition} />
 
                   <div className="grid grid-cols-2 gap-4 mt-4">
                     <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
@@ -1760,6 +1826,117 @@ export default function SchoolInfo() {
                   </button>
                 </div>
               </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Fenêtre de validation de la position GPS détectée pour l'école */}
+      <AnimatePresence>
+        {detectedLocationModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 10 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 10 }}
+              className="bg-white rounded-3xl shadow-2xl border border-slate-200 w-full max-w-md overflow-hidden"
+            >
+              <div className="p-5 bg-gradient-to-r from-emerald-600 to-teal-600 text-white flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-2xl bg-white/20 flex items-center justify-center border border-white/25">
+                    <LocateFixed size={20} className="text-white" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-black leading-tight">Position de l'école détectée</h3>
+                    <p className="text-[11px] text-emerald-100 font-medium">
+                      {detectedLocationModal.accuracy !== null
+                        ? `Précision appareil : ± ${detectedLocationModal.accuracy} m`
+                        : "Signal GPS capté par l'appareil"}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setDetectedLocationModal(null)}
+                  disabled={confirmingDetectedLocation}
+                  className="p-1.5 rounded-xl hover:bg-white/20 text-white/90 transition-colors cursor-pointer"
+                  aria-label="Fermer"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              <div className="p-6 space-y-4">
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  L'appareil a détecté les coordonnées géographiques ci-dessous pour{' '}
+                  <strong className="text-slate-900">{formData.nom || 'votre établissement'}</strong>.
+                  Voulez-vous valider et fixer cette position comme localisation officielle de l'école ?
+                </p>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="p-3 bg-emerald-50/70 rounded-2xl border border-emerald-200">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-700 block mb-0.5">
+                      Latitude détectée
+                    </span>
+                    <code className="text-sm font-mono font-bold text-slate-900">
+                      {detectedLocationModal.latitude.toFixed(6)}
+                    </code>
+                  </div>
+                  <div className="p-3 bg-emerald-50/70 rounded-2xl border border-emerald-200">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-700 block mb-0.5">
+                      Longitude détectée
+                    </span>
+                    <code className="text-sm font-mono font-bold text-slate-900">
+                      {detectedLocationModal.longitude.toFixed(6)}
+                    </code>
+                  </div>
+                </div>
+
+                {formData.latitude && formData.longitude && (
+                  <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-[11px] text-slate-500 flex items-center justify-between">
+                    <span>Ancienne position :</span>
+                    <code className="font-mono font-semibold text-slate-700">
+                      {Number(formData.latitude).toFixed(5)}, {Number(formData.longitude).toFixed(5)}
+                    </code>
+                  </div>
+                )}
+
+                <div className="pt-2 flex flex-wrap items-center gap-2.5">
+                  <button
+                    type="button"
+                    onClick={() => setDetectedLocationModal(null)}
+                    disabled={confirmingDetectedLocation}
+                    className="px-3.5 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold transition-colors cursor-pointer"
+                  >
+                    Annuler
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDetectedLocationModal(null);
+                      handleDetectPosition();
+                    }}
+                    disabled={confirmingDetectedLocation}
+                    className="px-3.5 py-2.5 rounded-xl bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 text-xs font-bold transition-colors flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <RotateCcw size={14} />
+                    Redétecter
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleConfirmDetectedLocation}
+                    disabled={confirmingDetectedLocation}
+                    className="flex-1 px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white text-xs font-black shadow-md shadow-emerald-600/20 transition-all flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                    {confirmingDetectedLocation ? (
+                      <Loader2 size={15} className="animate-spin" />
+                    ) : (
+                      <CheckCircle2 size={15} />
+                    )}
+                    <span>{confirmingDetectedLocation ? 'Enregistrement...' : 'Valider et fixer'}</span>
+                  </button>
+                </div>
+              </div>
             </motion.div>
           </div>
         )}

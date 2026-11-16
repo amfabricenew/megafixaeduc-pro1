@@ -22,7 +22,7 @@ import {
   getWorkspaceAccessToken 
 } from '../../lib/google-workspace';
 import { WorkspaceConfirmDialog } from './WorkspaceConfirmDialog';
-import { getCloudTables } from '../../utils/cloudFallback';
+import { apiFetch } from '../../utils/api';
 import { toast } from 'react-hot-toast';
 
 export const GoogleSheetsView: React.FC = () => {
@@ -107,63 +107,74 @@ export const GoogleSheetsView: React.FC = () => {
       return;
     }
 
-    // Load table data from school state
-    const tables = await getCloudTables();
+    // Load table data exclusively from authenticated, school-scoped API endpoints
     let headers: string[] = [];
     let rows: any[][] = [];
     let rowCount = 0;
 
-    if (exportType === 'eleves') {
-      const eleves = tables['eleves'] || [];
-      const classes = tables['classes'] || [];
-      headers = ['Matricule', 'Nom', 'Prénoms', 'Sexe', 'Classe', 'Date Naissance', 'Téléphone Parent', 'Statut'];
-      rows = eleves.map(el => {
-        const cl = classes.find(c => c.id === el.classe_id);
-        return [
-          el.matricule || 'N/A',
-          el.nom || '',
-          el.prenom || '',
-          el.sexe || '',
-          cl?.nom || el.classe_nom || 'Non assigné',
-          el.date_naissance || '',
-          el.telephone_parent || '',
-          el.statut || 'Inscrit'
-        ];
-      });
-      rowCount = rows.length;
-    } else if (exportType === 'classes') {
-      const classes = tables['classes'] || [];
-      headers = ['Identifiant', 'Nom de la Classe', 'Cycle / Niveau', 'Effectif Estimé', 'Salle'];
-      rows = classes.map(cl => [
-        cl.id,
-        cl.nom || cl.libelle || '',
-        cl.cycle || cl.niveau || 'Secondaire',
-        cl.effectif || 0,
-        cl.salle || 'Bâtiment Principal'
-      ]);
-      rowCount = rows.length;
-    } else if (exportType === 'matieres') {
-      const matieres = tables['matieres'] || [];
-      headers = ['Matière', 'Code', 'Coefficient', 'Pôle d\'Enseignement'];
-      rows = matieres.map(m => [
-        m.nom || m.libelle || '',
-        m.code || '',
-        m.coefficient || 1,
-        m.pole || 'Général'
-      ]);
-      rowCount = rows.length;
-    } else {
-      const paiements = tables['paiements'] || [];
-      headers = ['Date', 'Reçu N°', 'Élève / Matricule', 'Motif', 'Montant Payé (FCFA)', 'Mode de Paiement'];
-      rows = paiements.map(p => [
-        p.date_paiement || p.created_at || '',
-        p.numero_recu || p.id,
-        p.eleve_nom || p.matricule || 'Élève',
-        p.motif || 'Scolarité',
-        p.montant || 0,
-        p.mode_paiement || 'Espèces'
-      ]);
-      rowCount = rows.length;
+    try {
+      if (exportType === 'eleves') {
+        const [elevesRes, classesRes] = await Promise.all([
+          apiFetch('/api/eleves'),
+          apiFetch('/api/classes')
+        ]);
+        const eleves: any[] = elevesRes.ok ? await elevesRes.json() : [];
+        const classes: any[] = classesRes.ok ? await classesRes.json() : [];
+        headers = ['Matricule', 'Nom', 'Prénoms', 'Sexe', 'Classe', 'Date Naissance', 'Téléphone Parent', 'Statut'];
+        rows = (Array.isArray(eleves) ? eleves : []).map(el => {
+          const cl = (Array.isArray(classes) ? classes : []).find(c => c.id === el.classe_id);
+          return [
+            el.matricule || 'N/A',
+            el.nom || '',
+            el.prenom || '',
+            el.sexe || '',
+            cl?.nom || el.classe_nom || 'Non assigné',
+            el.date_naissance || '',
+            el.tel_parent || el.telephone_parent || '',
+            el.statut_scolaire || el.statut || 'Actif'
+          ];
+        });
+        rowCount = rows.length;
+      } else if (exportType === 'classes') {
+        const classesRes = await apiFetch('/api/classes');
+        const classes: any[] = classesRes.ok ? await classesRes.json() : [];
+        headers = ['Identifiant', 'Nom de la Classe', 'Cycle / Niveau', 'Effectif', 'Frais Scolarité'];
+        rows = (Array.isArray(classes) ? classes : []).map(cl => [
+          cl.id,
+          cl.nom || cl.libelle || '',
+          cl.cycle || cl.niveau || 'Secondaire',
+          cl.effectif || 0,
+          cl.frais_scolarite || 0
+        ]);
+        rowCount = rows.length;
+      } else if (exportType === 'matieres') {
+        const matieresRes = await apiFetch('/api/matieres');
+        const matieres: any[] = matieresRes.ok ? await matieresRes.json() : [];
+        headers = ['Matière', 'Code', 'Coefficient', 'Catégorie / Cycle'];
+        rows = (Array.isArray(matieres) ? matieres : []).map(m => [
+          m.nom || m.libelle || '',
+          m.code || '',
+          m.coefficient || 1,
+          m.categorie || m.cycle || 'Général'
+        ]);
+        rowCount = rows.length;
+      } else {
+        const paiementsRes = await apiFetch('/api/paiements');
+        const paiements: any[] = paiementsRes.ok ? await paiementsRes.json() : [];
+        headers = ['Date', 'Reçu N°', 'Élève / Matricule', 'Motif', 'Montant Payé (FCFA)', 'Mode de Paiement'];
+        rows = (Array.isArray(paiements) ? paiements : []).map(p => [
+          p.date_paiement || p.created_at || '',
+          p.numero_recu || p.id,
+          p.eleve_nom || p.matricule || 'Élève',
+          p.type_paiement || p.motif || 'Scolarité',
+          p.montant || 0,
+          p.methode || p.mode_paiement || 'Espèces'
+        ]);
+        rowCount = rows.length;
+      }
+    } catch {
+      toast.error("Impossible de charger les données sécurisées de votre établissement.");
+      return;
     }
 
     setConfirmDialog({

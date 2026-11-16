@@ -2,57 +2,189 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Reusable validation helpers
+
+    // =========================================================================
+    // Default Deny Catch-All (Global Safety Net)
+    // =========================================================================
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // =========================================================================
+    // Helper Functions
+    // =========================================================================
     function isValidId(id) {
-      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_-]+$');
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_-]+$');
+    }
+
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
     }
 
     function incoming() {
       return request.resource.data;
     }
 
-    // Default deny for unhandled collections
-    match /{document=**} {
-      allow read, write: if false;
+    function existing() {
+      return resource.data;
     }
 
-    // Health check & test connectivity
+    function userDocPath() {
+      return /databases/$(database)/documents/users/$(request.auth.uid);
+    }
+
+    function hasUserProfile() {
+      return isSignedIn() && exists(userDocPath());
+    }
+
+    function userProfile() {
+      return get(userDocPath()).data;
+    }
+
+    function isSuperAdmin() {
+      return hasUserProfile() && userProfile().role == 'super_admin';
+    }
+
+    function isSameSchool(schoolId) {
+      return hasUserProfile()
+        && userProfile().school_id != null
+        && string(userProfile().school_id) == string(schoolId);
+    }
+
+    function isSchoolAdmin(schoolId) {
+      return isSameSchool(schoolId)
+        && userProfile().role in ['admin', 'fonde', 'direction'];
+    }
+
+    function hasSchoolField(docData) {
+      return docData.keys().hasAll(['school_id'])
+        && (docData.school_id is int || (docData.school_id is string && docData.school_id.size() > 0 && docData.school_id.size() <= 64));
+    }
+
+    function unchangedSchoolId() {
+      return existing().school_id == incoming().school_id;
+    }
+
+    function isValidSchoolDoc(data) {
+      return data is map
+        && data.keys().hasAll(['nom'])
+        && data.nom is string && data.nom.size() > 0 && data.nom.size() <= 200;
+    }
+
+    function isValidUserDoc(data) {
+      return data is map
+        && data.keys().hasAll(['role', 'email'])
+        && data.role is string && data.role.size() > 0 && data.role.size() <= 40
+        && data.email is string && data.email.size() > 0 && data.email.size() <= 254;
+    }
+
+    function isValidScopedDoc(data) {
+      return data is map && hasSchoolField(data);
+    }
+
+    // =========================================================================
+    // Connectivity Check (Signed-in Only, Read-Only, Single Document Get)
+    // =========================================================================
     match /test/{testId} {
-      allow read: if isValidId(testId);
+      allow get: if isSignedIn() && isValidId(testId);
+      allow list, write: if false;
     }
 
-    // Backups and global cloud state checkpoints
+    // =========================================================================
+    // Global Database Backups & Checkpoints (Strictly Super-Admin Only)
+    // =========================================================================
     match /backups/{checkpointId} {
-      allow read, write: if isValidId(checkpointId);
+      allow get: if isValidId(checkpointId) && isSuperAdmin();
+      allow list: if false;
+      allow create, update: if isValidId(checkpointId) && isSuperAdmin() && incoming() is map;
+      allow delete: if isValidId(checkpointId) && isSuperAdmin();
     }
 
-    // Application entities for cloud data sync
+    // =========================================================================
+    // Multi-Tenant Schools Registry
+    // =========================================================================
     match /schools/{schoolId} {
-      allow read, write: if isValidId(schoolId);
+      allow get: if isValidId(schoolId) && (isSuperAdmin() || isSameSchool(schoolId));
+      allow list: if false;
+      allow create: if isValidId(schoolId) && isValidSchoolDoc(incoming()) && isSuperAdmin();
+      allow update: if isValidId(schoolId) && isValidSchoolDoc(incoming()) && (isSuperAdmin() || isSchoolAdmin(schoolId));
+      allow delete: if isValidId(schoolId) && isSuperAdmin();
     }
 
+    // =========================================================================
+    // User Profiles (Ownership & School-Scoped Admin Access; No Role Escalation)
+    // =========================================================================
     match /users/{userId} {
-      allow read, write: if isValidId(userId);
+      allow get: if isValidId(userId) && isSignedIn() && (
+        request.auth.uid == userId ||
+        isSuperAdmin() ||
+        (resource != null && hasSchoolField(existing()) && isSchoolAdmin(existing().school_id))
+      );
+      allow list: if false;
+      allow create: if isValidId(userId) && isValidUserDoc(incoming()) && isSuperAdmin();
+      allow update: if isValidId(userId) && isSignedIn() && isValidUserDoc(incoming()) && (
+        isSuperAdmin() ||
+        (request.auth.uid == userId && incoming().role == existing().role && unchangedSchoolId())
+      );
+      allow delete: if isValidId(userId) && isSuperAdmin();
     }
 
+    // =========================================================================
+    // School-Scoped Operational Collections
+    // =========================================================================
     match /classes/{classId} {
-      allow read, write: if isValidId(classId);
+      allow get: if isValidId(classId) && isSignedIn() && (
+        isSuperAdmin() ||
+        (resource != null && hasSchoolField(existing()) && isSameSchool(existing().school_id))
+      );
+      allow list: if false;
+      allow create: if isValidId(classId) && isValidScopedDoc(incoming()) && (isSuperAdmin() || isSchoolAdmin(incoming().school_id));
+      allow update: if isValidId(classId) && isValidScopedDoc(incoming()) && hasSchoolField(existing()) && unchangedSchoolId() && (isSuperAdmin() || isSchoolAdmin(existing().school_id));
+      allow delete: if isValidId(classId) && hasSchoolField(existing()) && (isSuperAdmin() || isSchoolAdmin(existing().school_id));
     }
 
     match /students/{studentId} {
-      allow read, write: if isValidId(studentId);
+      allow get: if isValidId(studentId) && isSignedIn() && (
+        isSuperAdmin() ||
+        (resource != null && hasSchoolField(existing()) && isSameSchool(existing().school_id))
+      );
+      allow list: if false;
+      allow create: if isValidId(studentId) && isValidScopedDoc(incoming()) && (isSuperAdmin() || isSchoolAdmin(incoming().school_id));
+      allow update: if isValidId(studentId) && isValidScopedDoc(incoming()) && hasSchoolField(existing()) && unchangedSchoolId() && (isSuperAdmin() || isSchoolAdmin(existing().school_id));
+      allow delete: if isValidId(studentId) && hasSchoolField(existing()) && (isSuperAdmin() || isSchoolAdmin(existing().school_id));
     }
 
     match /grades/{gradeId} {
-      allow read, write: if isValidId(gradeId);
+      allow get: if isValidId(gradeId) && isSignedIn() && (
+        isSuperAdmin() ||
+        (resource != null && hasSchoolField(existing()) && isSameSchool(existing().school_id))
+      );
+      allow list: if false;
+      allow create: if isValidId(gradeId) && isValidScopedDoc(incoming()) && (isSuperAdmin() || isSchoolAdmin(incoming().school_id));
+      allow update: if isValidId(gradeId) && isValidScopedDoc(incoming()) && hasSchoolField(existing()) && unchangedSchoolId() && (isSuperAdmin() || isSchoolAdmin(existing().school_id));
+      allow delete: if isValidId(gradeId) && hasSchoolField(existing()) && (isSuperAdmin() || isSchoolAdmin(existing().school_id));
     }
 
     match /settings/{settingId} {
-      allow read, write: if isValidId(settingId);
+      allow get: if isValidId(settingId) && isSignedIn() && (
+        isSuperAdmin() ||
+        (resource != null && hasSchoolField(existing()) && isSameSchool(existing().school_id))
+      );
+      allow list: if false;
+      allow create: if isValidId(settingId) && isValidScopedDoc(incoming()) && (isSuperAdmin() || isSchoolAdmin(incoming().school_id));
+      allow update: if isValidId(settingId) && isValidScopedDoc(incoming()) && hasSchoolField(existing()) && unchangedSchoolId() && (isSuperAdmin() || isSchoolAdmin(existing().school_id));
+      allow delete: if isValidId(settingId) && hasSchoolField(existing()) && (isSuperAdmin() || isSchoolAdmin(existing().school_id));
     }
 
     match /app_data/{docId} {
-      allow read, write: if isValidId(docId);
+      allow get: if isValidId(docId) && isSignedIn() && (
+        isSuperAdmin() ||
+        (resource != null && hasSchoolField(existing()) && isSameSchool(existing().school_id))
+      );
+      allow list: if false;
+      allow create: if isValidId(docId) && isValidScopedDoc(incoming()) && (isSuperAdmin() || isSchoolAdmin(incoming().school_id));
+      allow update: if isValidId(docId) && isValidScopedDoc(incoming()) && hasSchoolField(existing()) && unchangedSchoolId() && (isSuperAdmin() || isSchoolAdmin(existing().school_id));
+      allow delete: if isValidId(docId) && hasSchoolField(existing()) && (isSuperAdmin() || isSchoolAdmin(existing().school_id));
     }
   }
 }

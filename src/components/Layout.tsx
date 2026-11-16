@@ -98,6 +98,21 @@ export default function Layout() {
 
   const location = useLocation();
   const navigate = useNavigate();
+  const mainRef = React.useRef<HTMLElement>(null);
+
+  React.useEffect(() => {
+    if (location.hash) return;
+    const resetMainScroll = () => {
+      if (mainRef.current) {
+        mainRef.current.scrollTop = 0;
+        mainRef.current.scrollLeft = 0;
+      }
+      window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+    };
+    resetMainScroll();
+    const rafId = window.requestAnimationFrame(resetMainScroll);
+    return () => window.cancelAnimationFrame(rafId);
+  }, [location.pathname, location.search, location.hash]);
 
   const lastSchoolFetchRef = React.useRef<number>(0);
   const fetchSchoolInfo = React.useCallback((force = false) => {
@@ -178,7 +193,28 @@ export default function Layout() {
   };
 
   React.useEffect(() => {
-    if (location.pathname.includes('primaire')) {
+    const syncSpaceFromStorage = () => {
+      try {
+        const stored = localStorage.getItem('activeSpace') as 'all' | 'primaire' | 'secondaire' | null;
+        if (stored && ['all', 'primaire', 'secondaire'].includes(stored)) {
+          setActiveSpace(stored);
+        } else {
+          setActiveSpace('all');
+        }
+      } catch {
+        setActiveSpace('all');
+      }
+    };
+    window.addEventListener('activeSpaceChanged', syncSpaceFromStorage);
+    return () => window.removeEventListener('activeSpaceChanged', syncSpaceFromStorage);
+  }, []);
+
+  React.useEffect(() => {
+    if (location.pathname === '/accueil' || location.pathname === '/tableau-de-bord') {
+      if (activeSpace !== 'all') {
+        updateActiveSpace('all');
+      }
+    } else if (location.pathname.includes('primaire')) {
       if (isPrimaireLocked) {
         setLockedModalInfo({
           spaceName: "Maternelle & Primaire",
@@ -256,17 +292,17 @@ export default function Layout() {
     { group: 'Communication', icon: BookOpenCheck, label: 'Banque d\'Épreuves', path: '/epreuves' },
     { group: 'Communication', icon: PenTool, label: 'Épreuves Compositions', path: '/epreuves-composition' },
     { group: 'Communication', icon: MessageSquare, label: 'Messagerie & SMS', path: '/messagerie' },
+    { group: 'Finance', icon: Receipt, label: 'Paiements Scolarité', path: '/paiements' },
+    { group: 'Finance', icon: DollarSign, label: 'Salaires & Paie', path: '/salaires-enseignants' },
+    { group: 'Finance', icon: ArrowLeftRight, label: 'Trésorerie & Dépenses (Entrées/Sorties)', path: '/finances' },
+    { group: 'Système', icon: History, label: 'Audit Logs', path: '/audit-logs' },
+    { group: 'Système', icon: Settings, label: 'Paramètres', path: '/parametres' },
     { group: 'Google Workspace', icon: Layers, label: 'Suite Google Workspace', path: '/workspace' },
     { group: 'Google Workspace', icon: Calendar, label: 'Google Calendar (Agenda)', path: '/workspace?tab=calendar' },
     { group: 'Google Workspace', icon: CheckSquare, label: 'Google Tasks (Tâches)', path: '/workspace?tab=tasks' },
     { group: 'Google Workspace', icon: FileText, label: 'Google Docs (Rapports)', path: '/workspace?tab=docs' },
     { group: 'Google Workspace', icon: FileSpreadsheet, label: 'Google Sheets (Tableurs)', path: '/workspace?tab=sheets' },
     { group: 'Google Workspace', icon: Mail, label: 'Google Gmail (Boîte)', path: '/workspace?tab=gmail' },
-    { group: 'Finance', icon: Receipt, label: 'Paiements Scolarité', path: '/paiements' },
-    { group: 'Finance', icon: DollarSign, label: 'Salaires & Paie', path: '/salaires-enseignants' },
-    { group: 'Finance', icon: ArrowLeftRight, label: 'Trésorerie & Dépenses (Entrées/Sorties)', path: '/finances' },
-    { group: 'Système', icon: History, label: 'Audit Logs', path: '/audit-logs' },
-    { group: 'Système', icon: Settings, label: 'Paramètres', path: '/parametres' },
     { group: 'Intelligence Artificielle', icon: Sparkles, label: 'Laboratoire IA', path: '/lab-ia' },
   ];
 
@@ -302,12 +338,12 @@ export default function Layout() {
     { group: 'Communication', icon: CalendarClock, label: 'Demandes de modif.', path: '/emploi-du-temps-requests' },
     { group: 'Communication', icon: FileStack, label: 'Documents administratifs', path: '/documents-administratifs' },
     { group: 'Communication', icon: MessageSquare, label: 'Messagerie & SMS', path: '/messagerie' },
+    { group: 'Communication', icon: BellRing, label: 'Alertes', path: '/alertes' },
+    { group: 'Système', icon: UserCheck, label: 'Mon Compte', path: '/mon-compte' },
     { group: 'Google Workspace', icon: Layers, label: 'Suite Google Workspace', path: '/workspace' },
     { group: 'Google Workspace', icon: Calendar, label: 'Google Calendar (Agenda)', path: '/workspace?tab=calendar' },
     { group: 'Google Workspace', icon: CheckSquare, label: 'Google Tasks (Tâches)', path: '/workspace?tab=tasks' },
-    { group: 'Communication', icon: BellRing, label: 'Alertes', path: '/alertes' },
     { group: 'Intelligence Artificielle', icon: Sparkles, label: 'Laboratoire IA', path: '/lab-ia' },
-    { group: 'Système', icon: UserCheck, label: 'Mon Compte', path: '/mon-compte' },
   ].filter(item => !item.hidden);
 
   const itemsParent = [
@@ -357,9 +393,22 @@ export default function Layout() {
     return acc;
   }, {});
 
-  const groupOrder = ['Tableau de Bord', 'Pédagogie', 'Évaluations', 'Administration', 'Finance', 'Communication', 'Système', 'Autres'];
+  const groupOrder = [
+    'Tableau de Bord',
+    'Pédagogie',
+    'Évaluations',
+    'Administration',
+    'Finance',
+    'Communication',
+    'Système',
+    'Autres',
+    'Google Workspace',
+    'Intelligence Artificielle'
+  ];
   const sortedGroupNames = Object.keys(groupedSidebarItems).sort((a, b) => {
-    return groupOrder.indexOf(a) - groupOrder.indexOf(b);
+    const idxA = groupOrder.indexOf(a);
+    const idxB = groupOrder.indexOf(b);
+    return (idxA === -1 ? 999 : idxA) - (idxB === -1 ? 999 : idxB);
   });
 
   // Apply school styles
@@ -637,7 +686,7 @@ export default function Layout() {
       </aside>
 
       {/* Main Content */}
-      <main className="flex-1 overflow-y-auto flex flex-col min-h-screen">
+      <main ref={mainRef} data-scroll-container="main" className="flex-1 overflow-y-auto flex flex-col min-h-screen">
         <TimeSyncWarning />
         <div className="hidden md:flex items-center justify-end px-8 pt-6 gap-3">
           {/* Academic Year Selector */}

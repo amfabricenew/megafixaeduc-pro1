@@ -1,6 +1,12 @@
 import { apiFetch } from '../utils/api';
 import React, { createContext, useContext, useEffect, useState } from 'react';
 
+declare global {
+  interface Window {
+    Brevo?: any;
+  }
+}
+
 interface User {
   id: number;
   nom: string;
@@ -190,16 +196,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     safeRemove('logged_out');
     safeSet('token', token);
     safeSet('user', JSON.stringify(userData));
+    safeSet('activeSpace', 'all');
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new Event('activeSpaceChanged'));
+    }
     setUser(userData);
     refreshPlan();
     fetchYears();
   };
 
   const logout = () => {
+    lastIdentifiedEmailRef.current = null;
     safeSet('logged_out', 'true');
     safeRemove('token');
     safeRemove('user');
     safeRemove('selected_year_id');
+    safeRemove('activeSpace');
     setUser(null);
     setSchoolPlan(null);
     setYears([]);
@@ -248,6 +260,37 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   // Polling for updates and listening for permission & cross-level sync events
   const lastSyncRef = React.useRef<number>(0);
+  const lastIdentifiedEmailRef = React.useRef<string | null>(null);
+
+  useEffect(() => {
+    const email = user?.email?.trim();
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return;
+    if (lastIdentifiedEmailRef.current === email) return;
+    lastIdentifiedEmailRef.current = email;
+
+    try {
+      window.Brevo = window.Brevo || [];
+      window.Brevo.push(function () {
+        if (window.Brevo && typeof window.Brevo.identify === 'function') {
+          const nameParts = (user?.nom || '').trim().split(/\s+/).filter(Boolean);
+          const firstName = nameParts[0] || '';
+          const lastName = nameParts.slice(1).join(' ') || '';
+          window.Brevo.identify({
+            identifiers: {
+              email_id: email,
+            },
+            attributes: {
+              ...(firstName ? { FIRSTNAME: firstName } : {}),
+              ...(lastName ? { LASTNAME: lastName } : {}),
+              ...(user?.role ? { ROLE: user.role } : {}),
+            },
+          });
+        }
+      });
+    } catch {
+      // Ignore tracker failures if blocked by browser privacy extensions
+    }
+  }, [user?.email, user?.nom, user?.role]);
 
   useEffect(() => {
     if (!user) return;

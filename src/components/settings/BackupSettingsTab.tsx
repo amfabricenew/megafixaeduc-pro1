@@ -378,15 +378,34 @@ export default function BackupSettingsTab() {
             <span>Importer & Restaurer un fichier</span>
           </button>
 
-          <a
-            href="/api/code/download-zip"
-            download="megafixaeduc-code.zip"
+          <button
+            type="button"
+            onClick={async () => {
+              try {
+                toast.loading("Génération du ZIP du code...", { id: "backup-code-zip" });
+                const res = await apiFetch('/api/code/download-zip');
+                if (!res.ok) {
+                  const err = await res.json().catch(() => ({}));
+                  throw new Error(err.error || "Accès refusé ou erreur de génération");
+                }
+                const blob = await res.blob();
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'megafixaeduc-code.zip';
+                a.click();
+                window.URL.revokeObjectURL(url);
+                toast.success("Archive ZIP du code téléchargée (< 25 Mo) !", { id: "backup-code-zip" });
+              } catch (e: any) {
+                toast.error(e.message || "Erreur de téléchargement", { id: "backup-code-zip" });
+              }
+            }}
             className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 text-xs font-bold transition-all shadow-sm"
             title="Télécharger l'intégralité du code source compressé (< 25 Mo)"
           >
             <FileCode className="w-4 h-4 text-purple-600" />
             <span>Télécharger le code source (ZIP &lt; 25 Mo)</span>
-          </a>
+          </button>
 
 
         </div>

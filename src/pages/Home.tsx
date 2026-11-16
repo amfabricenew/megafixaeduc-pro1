@@ -52,7 +52,7 @@ import { useTranslation } from '../contexts/TranslationContext';
 import { useNotifications } from '../contexts/NotificationContext';
 import { motion } from 'framer-motion';
 import GettingStartedModal from '../components/GettingStartedModal';
-import { useAppSync } from '../utils/api';
+import { useAppSync, apiFetch } from '../utils/api';
 import { generateUserGuidePDF } from '../utils/userGuidePdfGenerator';
 import toast from 'react-hot-toast';
 import HomeTeacher from './HomeTeacher';
@@ -91,7 +91,7 @@ export default function Home({ cycle = 'all' }: HomeProps) {
   const [lockedModal, setLockedModal] = useState<{ title: string; motif: string } | null>(null);
 
   useEffect(() => {
-    fetch('/api/school-info')
+    apiFetch('/api/school-info')
       .then(res => res.json())
       .then(data => {
         if (data && !data.error) setSchoolInfo(data);

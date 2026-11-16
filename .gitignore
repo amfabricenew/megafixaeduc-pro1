@@ -17,3 +17,6 @@ bun.lock
 bun.lockb
 .env*
 !.env.example
+.jwt_secret
+public/uploads/
+

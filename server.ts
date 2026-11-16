@@ -23,7 +23,7 @@ import jwt from "jsonwebtoken";
 import { OAuth2Client } from "google-auth-library";
 import * as fedapay from 'fedapay';
 import { GoogleGenAI } from "@google/genai";
-import { adminDb } from "./src/lib/firebase-admin.ts";
+import { adminDb, isCloudSyncAvailable } from "./src/lib/firebase-admin.ts";
 import firebaseConfig from "./firebase-applet-config.json";
 import { 
   STANDARDIZED_SUBJECTS_CATALOG, 
@@ -86,7 +86,24 @@ if (FEDAPAY_SK && FedaPay && typeof (FedaPay as any).setApiKey === 'function') {
 const currentFilename = typeof __filename !== 'undefined' ? __filename : '';
 const currentDirname = typeof __dirname !== 'undefined' ? __dirname : (currentFilename ? path.dirname(currentFilename) : process.cwd());
 
-const JWT_SECRET = process.env.JWT_SECRET || 'fallback_secret_for_dev_only';
+const JWT_SECRET = (() => {
+  const envSecret = process.env.JWT_SECRET;
+  if (envSecret && envSecret.trim().length >= 32 && envSecret !== 'fallback_secret_for_dev_only') {
+    return envSecret.trim();
+  }
+  const secretPath = path.join(process.cwd(), '.jwt_secret');
+  try {
+    if (fs.existsSync(secretPath)) {
+      const stored = fs.readFileSync(secretPath, 'utf8').trim();
+      if (stored.length >= 32) return stored;
+    }
+    const generated = crypto.randomBytes(64).toString('hex');
+    fs.writeFileSync(secretPath, generated, { mode: 0o600 });
+    return generated;
+  } catch {
+    return crypto.randomBytes(64).toString('hex');
+  }
+})();
 const DATABASE_PATH = process.env.DATABASE_PATH || 'megafixaEduc.db';
 const OFFLINE_MODE = process.env.OFFLINE_MODE === 'true';
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || (firebaseConfig as any)?.oAuthClientId;
@@ -1176,9 +1193,10 @@ async function saveCheckpoint(reason = 'manual') {
     fs.renameSync(vaultTmp, SCHOOL_VAULT_PATH);
 
     // 2. Cloud Persistence (Firestore) with gzip+chunking & strict anti-regression lock
-    if (!OFFLINE_MODE) {
+    if (!OFFLINE_MODE && isCloudSyncAvailable()) {
       try {
         const existingCloud = await adminDb.collection('backups').doc('global_checkpoint').get().catch(() => null);
+        if (!isCloudSyncAvailable()) return;
         if (existingCloud?.exists) {
           const cData = existingCloud.data();
           const cParsedStats = typeof cData?.sql_dump === 'string' && cData.sql_dump.length > 0
@@ -1222,8 +1240,9 @@ async function saveCheckpoint(reason = 'manual') {
           checksum
         };
 
+        let cloudWritten = false;
         if (byteLen <= FIRESTORE_PLAIN_LIMIT) {
-          await adminDb.collection('backups').doc('global_checkpoint').set({
+          cloudWritten = await adminDb.collection('backups').doc('global_checkpoint').set({
             ...commonMeta,
             encoding: 'plain',
             chunk_count: 0,
@@ -1236,24 +1255,27 @@ async function saveCheckpoint(reason = 'manual') {
             chunks.push(compressedB64.slice(offset, offset + FIRESTORE_CHUNK_SIZE));
           }
           for (let i = 0; i < chunks.length; i++) {
-            await adminDb.collection('backups').doc(`global_checkpoint_chunk_${i}`).set({
+            const okChunk = await adminDb.collection('backups').doc(`global_checkpoint_chunk_${i}`).set({
               index: i,
               total: chunks.length,
               checksum,
               data: chunks[i],
               last_updated: commonMeta.last_updated
             });
+            if (!okChunk) break;
           }
-          await adminDb.collection('backups').doc('global_checkpoint').set({
-            ...commonMeta,
-            encoding: 'gzip-base64-chunked',
-            chunk_count: chunks.length,
-            sql_dump: ''
-          });
+          if (isCloudSyncAvailable()) {
+            cloudWritten = await adminDb.collection('backups').doc('global_checkpoint').set({
+              ...commonMeta,
+              encoding: 'gzip-base64-chunked',
+              chunk_count: chunks.length,
+              sql_dump: ''
+            });
+          }
         }
 
         // Also update the lightweight dedicated School Accounts Registry in Cloud
-        if (Buffer.byteLength(vaultJson, 'utf8') <= FIRESTORE_PLAIN_LIMIT) {
+        if (cloudWritten && isCloudSyncAvailable() && Buffer.byteLength(vaultJson, 'utf8') <= FIRESTORE_PLAIN_LIMIT) {
           const existingVaultSnap = await adminDb.collection('backups').doc('school_accounts_registry').get().catch(() => null);
           let allowVaultWrite = true;
           if (existingVaultSnap?.exists) {
@@ -1268,7 +1290,7 @@ async function saveCheckpoint(reason = 'manual') {
               allowVaultWrite = false;
             }
           }
-          if (allowVaultWrite) {
+          if (allowVaultWrite && isCloudSyncAvailable()) {
             await adminDb.collection('backups').doc('school_accounts_registry').set({
               last_updated: commonMeta.last_updated,
               build_id: APP_BUILD_ID,
@@ -1280,7 +1302,9 @@ async function saveCheckpoint(reason = 'manual') {
           }
         }
 
-        console.log(`[Persistence] Cloud checkpoint saved (${reason}, schools=${stats.schoolCount}, users=${stats.userCount}, students=${stats.studentCount}).`);
+        if (cloudWritten) {
+          console.log(`[Persistence] Cloud checkpoint saved (${reason}, schools=${stats.schoolCount}, users=${stats.userCount}, students=${stats.studentCount}).`);
+        }
       } catch (error: any) {
         console.warn("[Persistence] Cloud checkpoint notice (local persistence is active):", error?.message || error);
       }
@@ -5045,7 +5069,7 @@ async function sendMailWithFallback(options: SendEmailOptions): Promise<SendEmai
       WHERE cm.classe_id = ? AND m.school_id = ?
     `).all(classeId, schoolId) as any[];
 
-    const classe = db.prepare("SELECT * FROM classes WHERE id = ?").get(classeId) as any;
+    const classe = db.prepare("SELECT * FROM classes WHERE id = ? AND school_id = ?").get(classeId, schoolId) as any;
     const isPrimary = isPrimaryOrMaternelleClass(classe);
 
     if (isPrimary) {
@@ -5301,15 +5325,23 @@ async function startServer() {
   }
 
   const app = express();
+  app.disable('x-powered-by');
 
   // Trust first proxy hop (e.g. Cloud Run, NGINX reverse proxy)
   app.set('trust proxy', 1);
 
-  // Basic Security & Performance Middleware
+  // Basic Security & Performance Middleware (xFrameOptions disabled to preserve AI Studio iframe compatibility)
   app.use(helmet({
-    contentSecurityPolicy: false, // Disabled to allow Vite HMR and dynamic scripts in development
-    crossOriginEmbedderPolicy: false
+    contentSecurityPolicy: false,
+    crossOriginEmbedderPolicy: false,
+    xFrameOptions: false,
+    referrerPolicy: { policy: 'strict-origin-when-cross-origin' }
   }));
+  app.use((_req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Permissions-Policy', 'camera=(self), microphone=(self), geolocation=(self)');
+    next();
+  });
   app.use(cors({
     exposedHeaders: ['X-App-Build-Version', 'X-App-Data-Version']
   }));
@@ -5350,7 +5382,14 @@ async function startServer() {
   if (!fs.existsSync(path.join(uploadsStaticDir, 'audio'))) {
     fs.mkdirSync(path.join(uploadsStaticDir, 'audio'), { recursive: true });
   }
-  app.use('/uploads', express.static(uploadsStaticDir));
+  app.use('/uploads', (req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    const ext = path.extname(req.path || '').toLowerCase();
+    if (['.html', '.htm', '.js', '.mjs', '.svg', '.xml', '.xhtml'].includes(ext)) {
+      return res.status(403).send('Type de fichier interdit');
+    }
+    next();
+  }, express.static(uploadsStaticDir));
 
   // Global Rate Limiter
   const globalLimiter = rateLimit({
@@ -5445,9 +5484,20 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
     if (token) {
       try {
         const decoded = jwt.verify(token, JWT_SECRET) as any;
-        (req as any).user = decoded;
-        (req as any).userId = decoded.id;
-        (req as any).schoolId = decoded.schoolId;
+        if (decoded && decoded.id) {
+          const dbUser = db.prepare("SELECT id, email, role, school_id, approuve FROM utilisateurs WHERE id = ?").get(decoded.id) as any;
+          if (dbUser && dbUser.approuve !== 0) {
+            (req as any).user = {
+              ...decoded,
+              id: dbUser.id,
+              email: dbUser.email,
+              role: dbUser.role,
+              schoolId: dbUser.school_id
+            };
+            (req as any).userId = dbUser.id;
+            (req as any).schoolId = dbUser.school_id;
+          }
+        }
       } catch (e) {
         // Token invalid, do not populate req.user
       }
@@ -5457,6 +5507,10 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
 
   // Email Sending
   app.post("/api/send-email", authenticateToken, async (req: any, res) => {
+    const staffRoles = ['admin', 'fonde', 'super_admin', 'direction', 'censeur', 'proviseur', 'directeur_etudes', 'secretariat', 'comptable'];
+    if (!staffRoles.includes(req.user?.role)) {
+      return res.status(403).json({ error: "Accès refusé. Rôle autorisé requis pour l'envoi d'emails." });
+    }
     const { recipients, subject, body } = req.body;
     
     if (!recipients || !Array.isArray(recipients) || recipients.length === 0) {
@@ -5466,7 +5520,8 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
     const mailResult = await sendMailWithFallback({
       to: recipients,
       subject,
-      text: body
+      text: body,
+      schoolId: req.schoolId
     });
 
     if (!mailResult.success && !mailResult.simulated) {
@@ -5942,42 +5997,40 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
 
   // Database Export
   app.get("/api/db/export", authenticateToken, (req: any, res) => {
-    // Only allow admins to export
+    // Only allow school admins / fondé to export their own school
     const user = db.prepare("SELECT role FROM utilisateurs WHERE id = ?").get(req.userId) as any;
-    if (user?.role !== 'admin') {
-      return res.status(403).json({ error: "Accès refusé" });
+    if (!user || !isUserAdminOrFonde(user.role)) {
+      return res.status(403).json({ error: "Accès refusé. Droits administrateur requis." });
+    }
+    const schoolId = req.schoolId;
+    if (!schoolId) {
+      return res.status(400).json({ error: "Aucun établissement rattaché à cette session." });
     }
 
     try {
       const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all() as any[];
       let sqlDump = "-- MégafixaEduc Pro Database Export (Filtered by School)\n";
       sqlDump += `-- Generated on ${new Date().toISOString()}\n`;
-      sqlDump += `-- School ID: ${req.schoolId}\n\n`;
+      sqlDump += `-- School ID: ${schoolId}\n\n`;
       sqlDump += "PRAGMA foreign_keys=OFF;\n";
       sqlDump += "BEGIN TRANSACTION;\n\n";
 
       for (const table of tables) {
         const tableName = table.name;
-        
-        // Get table creation SQL
-        const createSql = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name = ?").get(tableName) as any;
-        sqlDump += `DROP TABLE IF EXISTS ${tableName};\n`;
-        sqlDump += `${createSql.sql};\n\n`;
-
-        // Get table data - Filter by school_id if the column exists
         const columnsInfo = db.prepare(`PRAGMA table_info(${tableName})`).all() as any[];
         const hasSchoolId = columnsInfo.some(col => col.name === 'school_id');
-        
-        let rows;
+
+        let rows: any[] = [];
         if (hasSchoolId) {
-          rows = db.prepare(`SELECT * FROM ${tableName} WHERE school_id = ?`).all(req.schoolId);
+          rows = db.prepare(`SELECT * FROM ${tableName} WHERE school_id = ?`).all(schoolId);
         } else if (tableName === 'school_info') {
-          rows = db.prepare(`SELECT * FROM ${tableName} WHERE id = ?`).all(req.schoolId);
+          rows = db.prepare(`SELECT * FROM ${tableName} WHERE id = ?`).all(schoolId);
         } else {
-          // For tables without school_id (like sqlite_sequence), we might not want to export them or export all
-          // For now, let's skip them or export all if they are metadata
-          rows = db.prepare(`SELECT * FROM ${tableName}`).all();
+          // Never export global/cross-tenant tables lacking school_id
+          continue;
         }
+
+        if (rows.length === 0) continue;
 
         for (const row of rows) {
           const columns = Object.keys(row as any);
@@ -5987,7 +6040,7 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
             if (typeof val === "string") return `'${val.replace(/'/g, "''")}'`;
             return val;
           });
-          sqlDump += `INSERT INTO ${tableName} (${columns.join(", ")}) VALUES (${values.join(", ")});\n`;
+          sqlDump += `INSERT OR REPLACE INTO ${tableName} (${columns.join(", ")}) VALUES (${values.join(", ")});\n`;
         }
         sqlDump += "\n";
       }
@@ -6062,24 +6115,37 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
     }
   });
 
-  // School Info
+  // School Info (Authenticated: full school data for req.schoolId; Public: safe branding fields only)
   app.get("/api/school-info", (req: any, res) => {
-    const targetSchoolId = req.schoolId || (req.user && req.user.schoolId) || 1;
-    const school = (db.prepare("SELECT * FROM school_info WHERE id = ?").get(targetSchoolId) as any) 
-      || (db.prepare("SELECT * FROM school_info ORDER BY id ASC LIMIT 1").get() as any);
-    
-    if (school) {
+    if (req.user && req.schoolId) {
+      const school = db.prepare("SELECT * FROM school_info WHERE id = ?").get(req.schoolId) as any;
+      if (!school) {
+        return res.status(404).json({ error: "Établissement introuvable" });
+      }
       const activeYearId = getActiveYearId(school.id);
       const activeYear = db.prepare("SELECT libelle FROM annees_scolaires WHERE id = ?").get(activeYearId) as any;
-      res.json({ 
-        ...school, 
+      return res.json({
+        ...school,
         plan_abonnement: school.plan_abonnement || 'standard',
         active_year_id: activeYearId,
         annee_active: activeYear?.libelle || 'N/A'
       });
-    } else {
-      res.status(404).json({ error: "Établissement introuvable" });
     }
+
+    // Unauthenticated callers receive only non-sensitive public UI defaults
+    const publicSchool = db.prepare(`
+      SELECT id, nom, slogan, logo, couleur_primaire, police, taille_police, pays, devise, langue, code_ecole
+      FROM school_info
+      ORDER BY id ASC LIMIT 1
+    `).get() as any;
+
+    if (publicSchool) {
+      return res.json({
+        ...publicSchool,
+        plan_abonnement: 'standard'
+      });
+    }
+    return res.status(404).json({ error: "Établissement introuvable" });
   });
 
   // Notifications Helpers
@@ -6376,6 +6442,14 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
     try {
       const { id } = req.params;
       const { titre, fichier_url } = req.body;
+      const candidature = db.prepare(`
+        SELECT c.id FROM recrutement_candidatures c
+        JOIN recrutement_campagnes rc ON c.campagne_id = rc.id
+        WHERE c.id = ? AND rc.school_id = ?
+      `).get(id, req.schoolId) as any;
+      if (!candidature) {
+        return res.status(404).json({ error: "Candidature introuvable dans votre établissement." });
+      }
       db.prepare("INSERT INTO recrutement_epreuves (candidature_id, titre, fichier_url) VALUES (?, ?, ?)").run(id, titre, fichier_url);
       res.json({ success: true });
     } catch (error: any) {
@@ -6642,6 +6716,10 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
   // Staff: Integrer response into school database (Enseignants + Classes + Emploi du Temps)
   app.post("/api/collecte-enseignants/reponses/:id/integrer", authenticateToken, (req: any, res) => {
     try {
+      const staffRoles = ['admin', 'fonde', 'super_admin', 'direction', 'censeur', 'proviseur', 'directeur_etudes', 'secretariat'];
+      if (!staffRoles.includes(req.user?.role)) {
+        return res.status(403).json({ error: "Accès réservé à l'administration / direction." });
+      }
       const { id } = req.params;
       const schoolId = req.schoolId;
 
@@ -6682,7 +6760,7 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
             teacherId = existingTeacher.id;
             // Update phone if not set
             if (reponse.telephone) {
-              db.prepare("UPDATE enseignants SET telephone = COALESCE(telephone, ?) WHERE id = ?").run(reponse.telephone, teacherId);
+              db.prepare("UPDATE enseignants SET telephone = COALESCE(telephone, ?) WHERE id = ? AND school_id = ?").run(reponse.telephone, teacherId, schoolId);
             }
           } else {
             const currentYear = new Date().getFullYear();
@@ -6704,7 +6782,7 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
 
         for (const subName of subjectsToAdd) {
           const trimmed = subName.trim();
-          let mat = db.prepare("SELECT id FROM matieres WHERE LOWER(nom) = LOWER(?) AND (school_id = ? OR school_id IS NULL)").get(trimmed, schoolId) as any;
+          let mat = db.prepare("SELECT id FROM matieres WHERE LOWER(nom) = LOWER(?) AND school_id = ?").get(trimmed, schoolId) as any;
           if (!mat) {
             const insMat = db.prepare("INSERT INTO matieres (nom, coefficient, categorie, school_id) VALUES (?, 2, 'Secondaire', ?)").run(trimmed, schoolId);
             mat = { id: insMat.lastInsertRowid };
@@ -6720,13 +6798,15 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
 
         const mainMatiereId = resolvedSubjectIds[0] || null;
         if (mainMatiereId && teacherId) {
-          db.prepare("UPDATE enseignants SET matiere_principale_id = COALESCE(matiere_principale_id, ?) WHERE id = ?").run(mainMatiereId, teacherId);
+          db.prepare("UPDATE enseignants SET matiere_principale_id = COALESCE(matiere_principale_id, ?) WHERE id = ? AND school_id = ?").run(mainMatiereId, teacherId, schoolId);
         }
 
-        // 3. Link Teacher to Classes in classe_matieres (composite primary key classe_id, matiere_id)
+        // 3. Link Teacher to Classes in classe_matieres (only for classes owned by schoolId)
         for (const cls of classesTenues) {
           const classId = typeof cls === 'object' ? (cls.id || cls.classe_id) : cls;
           if (classId) {
+            const ownedClass = db.prepare("SELECT id FROM classes WHERE id = ? AND school_id = ?").get(classId, schoolId);
+            if (!ownedClass) continue;
             for (const sId of (resolvedSubjectIds.length > 0 ? resolvedSubjectIds : [mainMatiereId]).filter(Boolean)) {
               const existsCm = db.prepare("SELECT 1 FROM classe_matieres WHERE classe_id = ? AND matiere_id = ?").get(classId, sId);
               if (existsCm) {
@@ -6749,18 +6829,19 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
             const salleId = slot.salle_id || null;
 
             if (classId && jour && hDebut && hFin) {
-              // Check if slot exists in emplois_du_temps
+              const ownedClass = db.prepare("SELECT id FROM classes WHERE id = ? AND school_id = ?").get(classId, schoolId);
+              if (!ownedClass) continue;
               const existingSlot = db.prepare(`
                 SELECT id FROM emplois_du_temps 
-                WHERE classe_id = ? AND jour = ? AND heure_debut = ? AND (school_id = ? OR school_id IS NULL)
+                WHERE classe_id = ? AND jour = ? AND heure_debut = ? AND school_id = ?
               `).get(classId, jour, hDebut, schoolId) as any;
 
               if (existingSlot) {
                 db.prepare(`
                   UPDATE emplois_du_temps 
                   SET enseignant_id = ?, matiere_id = COALESCE(?, matiere_id), heure_fin = ?, salle_id = COALESCE(?, salle_id)
-                  WHERE id = ?
-                `).run(teacherId, mainMatiereId, hFin, salleId, existingSlot.id);
+                  WHERE id = ? AND school_id = ?
+                `).run(teacherId, mainMatiereId, hFin, salleId, existingSlot.id, schoolId);
               } else {
                 db.prepare(`
                   INSERT INTO emplois_du_temps (classe_id, jour, heure_debut, heure_fin, matiere_id, enseignant_id, salle_id, school_id)
@@ -6777,8 +6858,8 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
           UPDATE collecte_enseignants_reponses
           SET statut = 'valide', integre_enseignant_id = ?, integre_emploi_temps = 1,
               date_traitement = CURRENT_TIMESTAMP, traite_par = ?
-          WHERE id = ?
-        `).run(teacherId, req.userId, id);
+          WHERE id = ? AND school_id = ?
+        `).run(teacherId, req.userId, id, schoolId);
       })();
 
       res.json({
@@ -6858,7 +6939,7 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
         classesList = db.prepare(`
           SELECT id, nom, niveau, cycle 
           FROM classes 
-          WHERE id IN (${placeholders}) AND (school_id = ? OR school_id IS NULL)
+          WHERE id IN (${placeholders}) AND school_id = ?
           ORDER BY nom ASC
         `).all(...classIds, form.school_id);
       } else {
@@ -6866,7 +6947,7 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
         classesList = db.prepare(`
           SELECT id, nom, niveau, cycle 
           FROM classes 
-          WHERE (school_id = ? OR school_id IS NULL)
+          WHERE school_id = ?
             AND (LOWER(cycle) = 'secondaire' OR (LOWER(niveau) NOT LIKE '%maternelle%' AND LOWER(niveau) NOT LIKE '%primaire%'))
           ORDER BY nom ASC
         `).all(form.school_id);
@@ -7250,14 +7331,17 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
 
   // Alias for /api/school-info
   app.get("/api/ecole", (req: any, res) => {
-    const targetSchoolId = req.schoolId || (req.user && req.user.schoolId) || 1;
-    const school = (db.prepare("SELECT * FROM school_info WHERE id = ?").get(targetSchoolId) as any)
-      || (db.prepare("SELECT * FROM school_info ORDER BY id ASC LIMIT 1").get() as any);
-    if (school) {
-      res.json(school);
-    } else {
-      res.status(404).json({ error: "Établissement introuvable" });
+    if (req.user && req.schoolId) {
+      const school = db.prepare("SELECT * FROM school_info WHERE id = ?").get(req.schoolId) as any;
+      if (school) return res.json(school);
+      return res.status(404).json({ error: "Établissement introuvable" });
     }
+    const publicSchool = db.prepare(`
+      SELECT id, nom, slogan, logo, couleur_primaire, police, taille_police, pays, devise, langue, code_ecole
+      FROM school_info ORDER BY id ASC LIMIT 1
+    `).get() as any;
+    if (publicSchool) return res.json(publicSchool);
+    return res.status(404).json({ error: "Établissement introuvable" });
   });
 
   // DB Health
@@ -7281,6 +7365,10 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
 
   app.put("/api/school-info", authenticateToken, (req: any, res) => {
     try {
+      const allowedRoles = ['admin', 'fonde', 'super_admin', 'direction'];
+      if (!allowedRoles.includes(req.user?.role)) {
+        return res.status(403).json({ success: false, error: "Action réservée à la direction / administrateur de l'établissement." });
+      }
       const { 
         nom, slogan, adresse, telephone, email, site_web, numero_enregistrement, pays, 
         devise, logo, langue, couleur_primaire, police, taille_police, periode_active,
@@ -11015,7 +11103,7 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
   app.post("/api/bibliotheque/:id/download", authenticateToken, (req: any, res) => {
     try {
       const { id } = req.params;
-      db.prepare("UPDATE ressources_bibliotheque SET telechargements = telechargements + 1 WHERE id = ?").run(id);
+      db.prepare("UPDATE ressources_bibliotheque SET telechargements = telechargements + 1 WHERE id = ? AND school_id = ?").run(id, req.schoolId);
       res.json({ success: true });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -11025,7 +11113,7 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
   app.post("/api/bibliotheque/:id/view", authenticateToken, (req: any, res) => {
     try {
       const { id } = req.params;
-      db.prepare("UPDATE ressources_bibliotheque SET vues = vues + 1 WHERE id = ?").run(id);
+      db.prepare("UPDATE ressources_bibliotheque SET vues = vues + 1 WHERE id = ? AND school_id = ?").run(id, req.schoolId);
       res.json({ success: true });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -11034,7 +11122,7 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
 
   app.get("/api/eleves/:id/parent-account", authenticateToken, (req: any, res) => {
     try {
-      const account = db.prepare("SELECT email FROM utilisateurs WHERE eleve_id = ? AND role = 'parent'").get(req.params.id) as any;
+      const account = db.prepare("SELECT email FROM utilisateurs WHERE eleve_id = ? AND role = 'parent' AND school_id = ?").get(req.params.id, req.schoolId) as any;
       res.json({ identifier: account?.email || null });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -11070,8 +11158,7 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
       `);
 
       for (const id of studentIds) {
-        // Robust lookup: sometimes school_id is null on initial import
-        const student = db.prepare("SELECT * FROM eleves WHERE id = ? AND (school_id = ? OR school_id IS NULL)").get(id, req.schoolId) as any;
+        const student = db.prepare("SELECT * FROM eleves WHERE id = ? AND school_id = ?").get(id, req.schoolId) as any;
         if (!student) {
           errors.push({ student: `ID:${id}`, error: "Élève non trouvé" });
           continue;
@@ -11088,7 +11175,7 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
 
         try {
           // Check if account already exists for this student
-          const existing = db.prepare("SELECT id FROM utilisateurs WHERE eleve_id = ?").get(student.id);
+          const existing = db.prepare("SELECT id FROM utilisateurs WHERE eleve_id = ? AND school_id = ?").get(student.id, req.schoolId);
           if (existing) {
             errors.push({ student: `${student.nom} ${student.prenom}`, error: "Compte déjà existant" });
             continue;
@@ -11130,10 +11217,9 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
       let yearId = req.anneeId;
 
       if (classeId) {
-        const classe = db.prepare("SELECT annee_id FROM classes WHERE id = ?").get(classeId) as any;
-        if (classe) {
-          yearId = classe.annee_id;
-        }
+        const classe = db.prepare("SELECT annee_id FROM classes WHERE id = ? AND school_id = ?").get(classeId, req.schoolId) as any;
+        if (!classe) return res.json([]);
+        yearId = classe.annee_id;
       }
 
       if (!yearId) return res.json([]);
@@ -11150,10 +11236,9 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
       let yearId = req.anneeId;
 
       if (classe_id) {
-        const classe = db.prepare("SELECT annee_id FROM classes WHERE id = ?").get(classe_id) as any;
-        if (classe) {
-          yearId = classe.annee_id;
-        }
+        const classe = db.prepare("SELECT annee_id FROM classes WHERE id = ? AND school_id = ?").get(classe_id, req.schoolId) as any;
+        if (!classe) return res.status(404).json({ error: "Classe introuvable" });
+        yearId = classe.annee_id;
       }
       
       if (!yearId) return res.status(400).json({error: "No active year"});
@@ -11172,7 +11257,7 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
       const existing = db.prepare("SELECT id FROM bulletin_mentions WHERE eleve_id = ? AND trimestre = ? AND annee_id = ? AND school_id = ?").get(eleve_id, trimestre, yearId, req.schoolId) as any;
       
       if (existing) {
-        db.prepare(`UPDATE bulletin_mentions SET ${column} = ? WHERE id = ?`).run(active ? 1 : 0, existing.id);
+        db.prepare(`UPDATE bulletin_mentions SET ${column} = ? WHERE id = ? AND school_id = ?`).run(active ? 1 : 0, existing.id, req.schoolId);
       } else {
         db.prepare(`INSERT INTO bulletin_mentions (eleve_id, trimestre, annee_id, school_id, ${column}) VALUES (?, ?, ?, ?, ?)`).run(eleve_id, trimestre, yearId, req.schoolId, active ? 1 : 0);
       }
@@ -12074,9 +12159,9 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
 
       if (isParent) {
         if (req.user.eleve_id) {
-          const mainChild = db.prepare("SELECT * FROM eleves WHERE id = ?").get(req.user.eleve_id) as any;
+          const mainChild = db.prepare("SELECT * FROM eleves WHERE id = ? AND school_id = ?").get(req.user.eleve_id, schoolId) as any;
           if (mainChild) {
-            // Find all matching children by phone/email/parent name
+            // Find all matching children by phone/email/parent name within the same school
             const parentTel = (mainChild.tel_parent || req.user.telephone || '').trim();
             const parentEmail = (mainChild.email_parent || req.user.email || '').trim().toLowerCase();
 
@@ -12086,15 +12171,15 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
                   c.tranche1_montant, c.tranche2_montant, c.tranche3_montant
                 FROM eleves e
                 LEFT JOIN classes c ON e.classe_id = c.id
-                WHERE e.id = ? 
-                   OR (e.school_id = ? AND (
-                      (${parentTel ? "e.tel_parent = ?" : "1=0"}) 
-                      OR (${parentEmail ? "LOWER(e.email_parent) = ?" : "1=0"})
-                   ))
+                WHERE e.school_id = ? AND (
+                    e.id = ? 
+                    OR (${parentTel ? "e.tel_parent = ?" : "1=0"}) 
+                    OR (${parentEmail ? "LOWER(e.email_parent) = ?" : "1=0"})
+                )
                 ORDER BY e.nom, e.prenom
               `).all(...[
-                req.user.eleve_id, 
-                schoolId, 
+                schoolId,
+                req.user.eleve_id,
                 ...(parentTel ? [parentTel] : []),
                 ...(parentEmail ? [parentEmail] : [])
               ]);
@@ -12104,8 +12189,8 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
                   c.tranche1_montant, c.tranche2_montant, c.tranche3_montant
                 FROM eleves e
                 LEFT JOIN classes c ON e.classe_id = c.id
-                WHERE e.id = ?
-              `).all(req.user.eleve_id);
+                WHERE e.id = ? AND e.school_id = ?
+              `).all(req.user.eleve_id, schoolId);
             }
           }
         } else if (req.user.email || req.user.telephone) {
@@ -12116,7 +12201,7 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
               c.tranche1_montant, c.tranche2_montant, c.tranche3_montant
             FROM eleves e
             LEFT JOIN classes c ON e.classe_id = c.id
-            WHERE (e.school_id = ? OR e.school_id IS NULL) 
+            WHERE e.school_id = ? 
               AND (
                 (${pEmail ? "LOWER(e.email_parent) = ?" : "1=0"})
                 OR (${pTel ? "e.tel_parent = ?" : "1=0"})
@@ -12129,13 +12214,13 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
           ]);
         }
       } else {
-        // Admin / Preview test: fetch 2-3 sample students
+        // Admin / Preview test: fetch 2 sample students strictly scoped to schoolId
         children = db.prepare(`
           SELECT e.*, c.nom as classe_nom, c.niveau, c.frais_scolarite, c.frais_inscription,
             c.tranche1_montant, c.tranche2_montant, c.tranche3_montant
           FROM eleves e
           LEFT JOIN classes c ON e.classe_id = c.id
-          WHERE (e.school_id = ? OR e.school_id IS NULL)
+          WHERE e.school_id = ?
           LIMIT 2
         `).all(schoolId);
       }
@@ -13422,19 +13507,29 @@ app.get("/api/parent/child-data", authenticateToken, (req: any, res) => {
 
   // Delete year
   app.delete("/api/annees/:id", authenticateToken, (req: any, res) => {
+    const allowedRoles = ['admin', 'fonde', 'super_admin', 'direction'];
+    if (!allowedRoles.includes(req.user?.role)) {
+      return res.status(403).json({ error: "Action réservée à l'administrateur / direction." });
+    }
     const { id } = req.params;
     const { force } = req.query;
-    const schoolId = req.schoolId || 1;
+    const schoolId = req.schoolId;
+    if (!schoolId) return res.status(400).json({ error: "ID de l'établissement manquant" });
 
     try {
-      // Check for dependencies if not forced
+      const targetYear = db.prepare("SELECT id FROM annees_scolaires WHERE id = ? AND school_id = ?").get(id, schoolId) as any;
+      if (!targetYear) {
+        return res.status(404).json({ error: "Année scolaire introuvable dans votre établissement." });
+      }
+
+      // Check for dependencies if not forced (scoped to schoolId)
       if (force !== 'true') {
         const tablesWithYear = ['classes', 'notes', 'paiements', 'evaluation_configs', 'suivi_eleves'];
         let hasData = false;
         let tableWithData = "";
         
         for (const table of tablesWithYear) {
-          const check = db.prepare(`SELECT id FROM ${table} WHERE annee_id = ? LIMIT 1`).get(id) as any;
+          const check = db.prepare(`SELECT id FROM ${table} WHERE annee_id = ? AND school_id = ? LIMIT 1`).get(id, schoolId) as any;
           if (check) {
             hasData = true;
             tableWithData = table;
@@ -13451,23 +13546,21 @@ app.get("/api/parent/child-data", authenticateToken, (req: any, res) => {
       }
 
       db.transaction(() => {
-        // Delete related data if forced
         if (force === 'true') {
-          db.prepare("DELETE FROM notes WHERE annee_id = ?").run(id);
-          db.prepare("DELETE FROM paiements WHERE annee_id = ?").run(id);
-          db.prepare("DELETE FROM evaluation_configs WHERE annee_id = ?").run(id);
-          db.prepare("DELETE FROM suivi_eleves WHERE annee_id = ?").run(id);
+          db.prepare("DELETE FROM notes WHERE annee_id = ? AND school_id = ?").run(id, schoolId);
+          db.prepare("DELETE FROM paiements WHERE annee_id = ? AND school_id = ?").run(id, schoolId);
+          db.prepare("DELETE FROM evaluation_configs WHERE annee_id = ? AND school_id = ?").run(id, schoolId);
+          db.prepare("DELETE FROM suivi_eleves WHERE annee_id = ? AND school_id = ?").run(id, schoolId);
           
-          // Clear student class association for students in classes belonging to this year
           db.prepare(`
             UPDATE eleves 
             SET classe_id = NULL 
-            WHERE classe_id IN (SELECT id FROM classes WHERE annee_id = ?)
-          `).run(id);
+            WHERE school_id = ? AND classe_id IN (SELECT id FROM classes WHERE annee_id = ? AND school_id = ?)
+          `).run(schoolId, id, schoolId);
 
-          db.prepare("DELETE FROM classes WHERE annee_id = ?").run(id);
+          db.prepare("DELETE FROM classes WHERE annee_id = ? AND school_id = ?").run(id, schoolId);
         }
-        db.prepare("DELETE FROM annees_scolaires WHERE id = ? AND (school_id = ? OR school_id IS NULL)").run(id, schoolId);
+        db.prepare("DELETE FROM annees_scolaires WHERE id = ? AND school_id = ?").run(id, schoolId);
       })();
 
       logActivity(req.userId, 'DELETE', 'ANNEE_SCOLAIRE', parseInt(id), { forced: force === 'true' }, schoolId);
@@ -13992,6 +14085,10 @@ function executeYearTransition(
   });
 
   app.delete("/api/eleves/:id", authenticateToken, (req: any, res) => {
+    const allowedRoles = ['admin', 'fonde', 'super_admin', 'direction', 'secretariat', 'secretaire'];
+    if (!allowedRoles.includes(req.user?.role)) {
+      return res.status(403).json({ error: "Accès refusé. Droits de gestion requis." });
+    }
     const { id } = req.params;
     const eleve = db.prepare("SELECT nom, prenom, matricule FROM eleves WHERE id = ? AND school_id = ?").get(id, req.schoolId) as any;
     
@@ -14015,18 +14112,22 @@ function executeYearTransition(
   });
 
   app.post("/api/eleves/bulk-delete", authenticateToken, (req: any, res) => {
+    const allowedRoles = ['admin', 'fonde', 'super_admin', 'direction', 'secretariat', 'secretaire'];
+    if (!allowedRoles.includes(req.user?.role)) {
+      return res.status(403).json({ error: "Accès refusé. Droits de gestion requis." });
+    }
     const { ids } = req.body;
     if (!ids || !Array.isArray(ids) || ids.length === 0) {
       return res.status(400).json({ error: "Aucun ID fourni" });
     }
 
     try {
-      const deleteTransaction = db.transaction((studentIds) => {
+      const deleteTransaction = db.transaction((studentIds: any[]) => {
         const placeholders = studentIds.map(() => '?').join(',');
-        db.prepare(`DELETE FROM notes WHERE eleve_id IN (${placeholders})`).run(...studentIds);
-        db.prepare(`DELETE FROM paiements WHERE eleve_id IN (${placeholders})`).run(...studentIds);
-        db.prepare(`UPDATE utilisateurs SET eleve_id = NULL WHERE eleve_id IN (${placeholders})`).run(...studentIds);
-        const result = db.prepare(`DELETE FROM eleves WHERE id IN (${placeholders})`).run(...studentIds);
+        db.prepare(`DELETE FROM notes WHERE eleve_id IN (${placeholders}) AND school_id = ?`).run(...studentIds, req.schoolId);
+        db.prepare(`DELETE FROM paiements WHERE eleve_id IN (${placeholders}) AND school_id = ?`).run(...studentIds, req.schoolId);
+        db.prepare(`UPDATE utilisateurs SET eleve_id = NULL WHERE eleve_id IN (${placeholders}) AND school_id = ?`).run(...studentIds, req.schoolId);
+        const result = db.prepare(`DELETE FROM eleves WHERE id IN (${placeholders}) AND school_id = ?`).run(...studentIds, req.schoolId);
         return result.changes;
       });
 
@@ -14043,6 +14144,10 @@ function executeYearTransition(
   // Student Abandon / Reprise (Suspension toggle)
   const handleUpdateStatutScolaire = (req: any, res: any) => {
     try {
+      const allowedRoles = ['admin', 'fonde', 'super_admin', 'direction', 'secretariat', 'secretaire', 'surveillant', 'surveillant_general'];
+      if (!allowedRoles.includes(req.user?.role)) {
+        return res.status(403).json({ error: "Accès refusé. Droits de gestion scolaire requis." });
+      }
       const rawId = req.params.id;
       const numId = parseInt(rawId, 10);
       const { statut_scolaire, motif_abandon, date } = req.body;
@@ -14056,10 +14161,10 @@ function executeYearTransition(
         current = db.prepare("SELECT * FROM eleves WHERE id = ? AND school_id = ?").get(numId, req.schoolId) as any;
       }
       if (!current) {
-        current = db.prepare("SELECT * FROM eleves WHERE id = ? OR matricule = ?").get(rawId, rawId) as any;
+        current = db.prepare("SELECT * FROM eleves WHERE (id = ? OR matricule = ?) AND school_id = ?").get(rawId, rawId, req.schoolId) as any;
       }
       if (!current) {
-        return res.status(404).json({ error: "Élève non trouvé dans la base de données" });
+        return res.status(404).json({ error: "Élève non trouvé dans votre établissement" });
       }
 
       const newStatut = statut_scolaire === 'Abandon' ? 'Abandon' : 'Actif';
@@ -14070,8 +14175,8 @@ function executeYearTransition(
       db.prepare(`
         UPDATE eleves 
         SET statut_scolaire = ?, est_abandonne = ?, date_abandon = ?, motif_abandon = ?
-        WHERE id = ?
-      `).run(newStatut, isAbandon ? 1 : 0, dateAbandon, motif, current.id);
+        WHERE id = ? AND school_id = ?
+      `).run(newStatut, isAbandon ? 1 : 0, dateAbandon, motif, current.id, req.schoolId);
 
       logActivity(req.userId, isAbandon ? 'ABANDON_STUDENT' : 'REPRISE_STUDENT', 'ELEVE', current.id, { statut_scolaire: newStatut, motif_abandon: motif, date: dateAbandon }, req.schoolId);
       
@@ -14412,9 +14517,12 @@ function executeYearTransition(
       return res.status(400).json({ error: "Données manquantes" });
     }
 
-    const schoolId = req.schoolId || 1;
-    const targetClass = db.prepare("SELECT annee_id, nom FROM classes WHERE id = ?").get(target_classe_id) as any;
-    const yearId = target_year_id || (targetClass ? targetClass.annee_id : req.anneeId);
+    const schoolId = req.schoolId;
+    const targetClass = db.prepare("SELECT annee_id, nom FROM classes WHERE id = ? AND school_id = ?").get(target_classe_id, schoolId) as any;
+    if (!targetClass) {
+      return res.status(404).json({ error: "Classe de destination introuvable pour votre établissement." });
+    }
+    const yearId = target_year_id || targetClass.annee_id || req.anneeId;
     
     // BLOQUER LES TENTATIVES DE PASSAGE VERS LA MÊME ANNÉE
     if (source_year_id && yearId && parseInt(source_year_id) === parseInt(yearId)) {
@@ -14428,20 +14536,23 @@ function executeYearTransition(
     const historyStmt = db.prepare("INSERT OR REPLACE INTO eleve_annees (eleve_id, annee_id, classe_id, statut, school_id, arrieres_scolarite) VALUES (?, ?, ?, ?, ?, ?)");
 
     const updateMany = db.transaction((ids, classeId, sId, yId) => {
+      let processed = 0;
       for (const id of ids) {
+        const eleve = db.prepare("SELECT id, classe_id FROM eleves WHERE id = ? AND school_id = ?").get(id, sId) as any;
+        if (!eleve) continue;
+
         // Trouver l'année précédente de l'élève pour calculer le reliquat d'arriéré
         const prevYearRecord = db.prepare(`
-          SELECT annee_id FROM eleve_annees WHERE eleve_id = ? AND annee_id != ? ORDER BY id DESC LIMIT 1
-        `).get(id, yId) as any;
+          SELECT annee_id FROM eleve_annees WHERE eleve_id = ? AND annee_id != ? AND school_id = ? ORDER BY id DESC LIMIT 1
+        `).get(id, yId, sId) as any;
         const sourceYear = prevYearRecord ? prevYearRecord.annee_id : (yId - 1);
         const arrieres = sourceYear ? calculateStudentPreviousArrears(id, sourceYear, sId) : 0;
 
         // Try to determine if it's a redoublement by comparing source class name and target class name
         let status = statut || 'Passant';
-        const eleve = db.prepare("SELECT classe_id FROM eleves WHERE id = ?").get(id) as any;
-        if (!statut && eleve && eleve.classe_id) {
-          const sourceClass = db.prepare("SELECT nom FROM classes WHERE id = ?").get(eleve.classe_id) as any;
-          const targetClassObj = db.prepare("SELECT nom FROM classes WHERE id = ?").get(classeId) as any;
+        if (!statut && eleve.classe_id) {
+          const sourceClass = db.prepare("SELECT nom FROM classes WHERE id = ? AND school_id = ?").get(eleve.classe_id, sId) as any;
+          const targetClassObj = db.prepare("SELECT nom FROM classes WHERE id = ? AND school_id = ?").get(classeId, sId) as any;
           if (sourceClass && targetClassObj && sourceClass.nom === targetClassObj.nom) {
             status = 'Redoublant(e)';
           }
@@ -14449,8 +14560,9 @@ function executeYearTransition(
 
         stmt.run(classeId, status, arrieres, id, sId);
         historyStmt.run(id, yId, classeId, status, sId, arrieres);
+        processed++;
       }
-      return ids.length;
+      return processed;
     });
 
     try {
@@ -14485,7 +14597,7 @@ function executeYearTransition(
       }
 
       // Trouver ou créer la même classe dans l'année de destination
-      let targetClasse = db.prepare("SELECT * FROM classes WHERE nom = ? AND annee_id = ? AND (school_id = ? OR school_id IS NULL)").get(sourceClasse.nom, tYearId, schoolId) as any;
+      let targetClasse = db.prepare("SELECT * FROM classes WHERE nom = ? AND annee_id = ? AND school_id = ?").get(sourceClasse.nom, tYearId, schoolId) as any;
       if (!targetClasse) {
         const createResult = db.prepare(
           "INSERT INTO classes (nom, niveau, frais_scolarite, frais_inscription, tranche1_montant, tranche1_date_limite, tranche2_montant, tranche2_date_limite, tranche3_montant, tranche3_date_limite, devise, annee_id, cycle, school_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
@@ -14493,13 +14605,13 @@ function executeYearTransition(
         const newClasseId = createResult.lastInsertRowid as number;
 
         // Copier les matières de la classe
-        const matieres = db.prepare("SELECT * FROM classe_matieres WHERE classe_id = ?").all(sClasseId) as any[];
+        const matieres = db.prepare("SELECT * FROM classe_matieres WHERE classe_id = ? AND school_id = ?").all(sClasseId, schoolId) as any[];
         for (const m of matieres) {
           db.prepare("INSERT INTO classe_matieres (classe_id, matiere_id, coefficient, school_id) VALUES (?, ?, ?, ?)")
             .run(newClasseId, m.matiere_id, m.coefficient, schoolId);
         }
 
-        targetClasse = db.prepare("SELECT * FROM classes WHERE id = ?").get(newClasseId) as any;
+        targetClasse = db.prepare("SELECT * FROM classes WHERE id = ? AND school_id = ?").get(newClasseId, schoolId) as any;
       }
 
       // Sélectionner les élèves éligibles au redoublement
@@ -14581,19 +14693,19 @@ function executeYearTransition(
 
       db.transaction(() => {
         for (const id of ids) {
-          const eleve = db.prepare("SELECT * FROM eleves WHERE id = ? AND (school_id = ? OR school_id IS NULL)").get(id, schoolId) as any;
+          const eleve = db.prepare("SELECT * FROM eleves WHERE id = ? AND school_id = ?").get(id, schoolId) as any;
           if (!eleve) continue;
 
           // Vérifier si un enregistrement existe bien dans cette année cible
-          const targetEnrollment = db.prepare("SELECT * FROM eleve_annees WHERE eleve_id = ? AND annee_id = ? AND (school_id = ? OR school_id IS NULL)").get(id, yId, schoolId) as any;
+          const targetEnrollment = db.prepare("SELECT * FROM eleve_annees WHERE eleve_id = ? AND annee_id = ? AND school_id = ?").get(id, yId, schoolId) as any;
           if (!targetEnrollment) {
             continue; // Rien à annuler pour cette année
           }
 
           // Vérifier si l'élève a des notes ou des paiements enregistrés dans l'année de destination
           if (!force) {
-            const notesCount = (db.prepare("SELECT COUNT(*) as c FROM notes WHERE eleve_id = ? AND annee_id = ?").get(id, yId) as any)?.c || 0;
-            const paymentsCount = (db.prepare("SELECT COUNT(*) as c FROM paiements WHERE eleve_id = ? AND annee_id = ?").get(id, yId) as any)?.c || 0;
+            const notesCount = (db.prepare("SELECT COUNT(*) as c FROM notes WHERE eleve_id = ? AND annee_id = ? AND school_id = ?").get(id, yId, schoolId) as any)?.c || 0;
+            const paymentsCount = (db.prepare("SELECT COUNT(*) as c FROM paiements WHERE eleve_id = ? AND annee_id = ? AND school_id = ?").get(id, yId, schoolId) as any)?.c || 0;
 
             if (notesCount > 0 || paymentsCount > 0) {
               blocked.push({
@@ -14606,14 +14718,14 @@ function executeYearTransition(
           }
 
           // Supprimer l'inscription de l'année cible
-          db.prepare("DELETE FROM eleve_annees WHERE eleve_id = ? AND annee_id = ? AND (school_id = ? OR school_id IS NULL)").run(id, yId, schoolId);
+          db.prepare("DELETE FROM eleve_annees WHERE eleve_id = ? AND annee_id = ? AND school_id = ?").run(id, yId, schoolId);
 
           // Récupérer l'inscription antérieure la plus récente pour réintégrer l'élève
           const prevEnrollment = db.prepare(`
             SELECT ea.classe_id, ea.arrieres_scolarite, ea.statut
             FROM eleve_annees ea
             JOIN annees_scolaires a ON ea.annee_id = a.id
-            WHERE ea.eleve_id = ? AND (ea.school_id = ? OR ea.school_id IS NULL)
+            WHERE ea.eleve_id = ? AND ea.school_id = ?
             ORDER BY a.date_debut DESC, ea.id DESC LIMIT 1
           `).get(id, schoolId) as any;
 
@@ -18506,6 +18618,10 @@ function executeYearTransition(
   });
 
   app.delete("/api/matieres/cycle/:cycle", authenticateToken, (req: any, res) => {
+    const allowedRoles = ['admin', 'fonde', 'super_admin', 'direction', 'censeur', 'proviseur', 'directeur_etudes'];
+    if (!allowedRoles.includes(req.user?.role)) {
+      return res.status(403).json({ error: "Accès refusé. Droits d'administration ou direction requis." });
+    }
     const { cycle } = req.params;
     try {
       db.transaction(() => {
@@ -18518,12 +18634,12 @@ function executeYearTransition(
 
         const subjectsToDelete = db.prepare(`SELECT id FROM matieres ${filterSql}`).all(req.schoolId) as { id: number }[];
         for (const s of subjectsToDelete) {
-          db.prepare("DELETE FROM classe_matieres WHERE matiere_id = ?").run(s.id);
-          db.prepare("DELETE FROM notes WHERE matiere_id = ?").run(s.id);
-          db.prepare("DELETE FROM emplois_du_temps WHERE matiere_id = ?").run(s.id);
-          db.prepare("DELETE FROM devoirs WHERE matiere_id = ?").run(s.id);
-          db.prepare("DELETE FROM enseignant_matieres WHERE matiere_id = ?").run(s.id);
-          db.prepare("UPDATE matieres SET parent_id = NULL WHERE parent_id = ?").run(s.id);
+          db.prepare("DELETE FROM classe_matieres WHERE matiere_id = ? AND (school_id = ? OR school_id IS NULL)").run(s.id, req.schoolId);
+          db.prepare("DELETE FROM notes WHERE matiere_id = ? AND school_id = ?").run(s.id, req.schoolId);
+          db.prepare("DELETE FROM emplois_du_temps WHERE matiere_id = ? AND school_id = ?").run(s.id, req.schoolId);
+          db.prepare("DELETE FROM devoirs WHERE matiere_id = ? AND school_id = ?").run(s.id, req.schoolId);
+          db.prepare("DELETE FROM enseignant_matieres WHERE matiere_id = ? AND (school_id = ? OR school_id IS NULL)").run(s.id, req.schoolId);
+          db.prepare("UPDATE matieres SET parent_id = NULL WHERE parent_id = ? AND school_id = ?").run(s.id, req.schoolId);
           db.prepare("DELETE FROM matieres WHERE id = ? AND school_id = ?").run(s.id, req.schoolId);
         }
       })();
@@ -18614,19 +18730,25 @@ function executeYearTransition(
 
 
   app.delete("/api/matieres/:id", authenticateToken, (req: any, res) => {
+    const allowedRoles = ['admin', 'fonde', 'super_admin', 'direction', 'censeur', 'proviseur', 'directeur_etudes'];
+    if (!allowedRoles.includes(req.user?.role)) {
+      return res.status(403).json({ error: "Accès refusé. Droits d'administration ou direction requis." });
+    }
     const { id } = req.params;
+    const owned = db.prepare("SELECT id FROM matieres WHERE id = ? AND school_id = ?").get(id, req.schoolId) as any;
+    if (!owned) {
+      return res.status(404).json({ error: "Matière introuvable dans votre établissement." });
+    }
     
     try {
       db.transaction(() => {
-        // Delete related records first to avoid foreign key constraint failures
-        db.prepare("DELETE FROM classe_matieres WHERE matiere_id = ?").run(id);
-        db.prepare("DELETE FROM notes WHERE matiere_id = ?").run(id);
-        db.prepare("DELETE FROM emplois_du_temps WHERE matiere_id = ?").run(id);
-        db.prepare("DELETE FROM devoirs WHERE matiere_id = ?").run(id);
-        db.prepare("DELETE FROM enseignant_matieres WHERE matiere_id = ?").run(id);
+        db.prepare("DELETE FROM classe_matieres WHERE matiere_id = ? AND (school_id = ? OR school_id IS NULL)").run(id, req.schoolId);
+        db.prepare("DELETE FROM notes WHERE matiere_id = ? AND school_id = ?").run(id, req.schoolId);
+        db.prepare("DELETE FROM emplois_du_temps WHERE matiere_id = ? AND school_id = ?").run(id, req.schoolId);
+        db.prepare("DELETE FROM devoirs WHERE matiere_id = ? AND school_id = ?").run(id, req.schoolId);
+        db.prepare("DELETE FROM enseignant_matieres WHERE matiere_id = ? AND (school_id = ? OR school_id IS NULL)").run(id, req.schoolId);
         
-        // Also handle child subjects
-        db.prepare("UPDATE matieres SET parent_id = NULL WHERE parent_id = ?").run(id);
+        db.prepare("UPDATE matieres SET parent_id = NULL WHERE parent_id = ? AND school_id = ?").run(id, req.schoolId);
 
         db.prepare("DELETE FROM matieres WHERE id = ? AND school_id = ?").run(id, req.schoolId);
       })();
@@ -19567,16 +19689,18 @@ function executeYearTransition(
     const userId = req.userId;
     const user = db.prepare("SELECT role FROM utilisateurs WHERE id = ?").get(userId) as any;
     
-    if (user && (user.role === 'admin' || user.role === 'super_admin' || user.role === 'direction' || user.role === 'secretariat' || user.role === 'secretaire')) {
-      // Admins and Managers see all users in their school with linked teacher/staff details
+    if (user && (user.role === 'admin' || user.role === 'fonde' || user.role === 'super_admin' || user.role === 'direction' || user.role === 'secretariat' || user.role === 'secretaire')) {
+      // Admins and Managers see users in their school only (without leaking OTP codes unless pending first login)
       const users = db.prepare(`
-        SELECT u.id, u.nom, u.email, u.role, u.approuve, u.permissions, u.otp_code, u.otp_expiry, 
+        SELECT u.id, u.nom, u.email, u.role, u.approuve, u.permissions,
+               CASE WHEN u.is_first_login = 1 THEN u.otp_code ELSE NULL END as otp_code,
+               u.otp_expiry,
                u.is_first_login, u.can_write, u.last_seen, u.enseignant_id, u.personnel_id, u.eleve_id, u.google_id,
                e.nom as enseignant_nom, e.prenom as enseignant_prenom, e.telephone as enseignant_tel,
                p.nom as personnel_nom, p.prenom as personnel_prenom, p.poste as personnel_poste, p.telephone as personnel_tel
         FROM utilisateurs u
-        LEFT JOIN enseignants e ON u.enseignant_id = e.id
-        LEFT JOIN personnel_administratif p ON u.personnel_id = p.id
+        LEFT JOIN enseignants e ON u.enseignant_id = e.id AND e.school_id = u.school_id
+        LEFT JOIN personnel_administratif p ON u.personnel_id = p.id AND p.school_id = u.school_id
         WHERE u.school_id = ?
         ORDER BY u.id DESC
       `).all(req.schoolId);
@@ -19586,13 +19710,13 @@ function executeYearTransition(
         permissions: u.permissions ? (typeof u.permissions === 'string' ? JSON.parse(u.permissions) : u.permissions) : []
       })));
     } else {
-      // Others only see themselves
+      // Non-admins only see their own safe profile fields (never OTPs)
       const u = db.prepare(`
-        SELECT u.id, u.nom, u.email, u.role, u.approuve, u.permissions, u.otp_code, u.otp_expiry, 
+        SELECT u.id, u.nom, u.email, u.role, u.approuve, u.permissions,
                u.is_first_login, u.can_write, u.last_seen, u.enseignant_id, u.personnel_id, u.eleve_id, u.google_id
         FROM utilisateurs u
-        WHERE u.id = ?
-      `).get(userId) as any;
+        WHERE u.id = ? AND u.school_id = ?
+      `).get(userId, req.schoolId) as any;
       if (u) {
         res.json([{
           ...u,
@@ -19868,11 +19992,16 @@ function executeYearTransition(
   }
 
   app.post("/api/users/generate", authenticateToken, async (req: any, res) => {
+    const allowedRoles = ['admin', 'fonde', 'super_admin', 'direction', 'secretariat', 'secretaire'];
+    if (!allowedRoles.includes(req.user?.role)) {
+      return res.status(403).json({ error: "Accès refusé. Droits de gestion requis." });
+    }
     const { enseignant_id, role: customRole, permissions: customPermissions } = req.body;
     const enseignant = db.prepare("SELECT * FROM enseignants WHERE id = ? AND school_id = ?").get(enseignant_id, req.schoolId) as any;
     if (!enseignant) return res.status(404).json({ error: "Enseignant non trouvé" });
 
-    const role = customRole || 'enseignant';
+    const requestedRole = (customRole || 'enseignant').toString().trim().toLowerCase();
+    const role = requestedRole === 'super_admin' ? 'enseignant' : requestedRole;
     let permissions = customPermissions;
     if (!permissions || !Array.isArray(permissions) || permissions.length === 0) {
       const rolePerms = db.prepare("SELECT permissions FROM role_permissions WHERE role = ? AND school_id = ?").get(role, req.schoolId) as any;
@@ -20307,15 +20436,25 @@ function executeYearTransition(
   });
 
   app.post("/api/users", authenticateToken, async (req: any, res) => {
+    const allowedCreators = ['admin', 'fonde', 'super_admin', 'direction'];
+    if (!allowedCreators.includes(req.user?.role)) {
+      return res.status(403).json({ error: "Accès refusé. Seul l'administrateur de l'établissement peut créer des comptes." });
+    }
     const { nom, email, role, permissions, can_write, approuve, enseignant_id, personnel_id, eleve_id } = req.body;
     const parent_admin_id = req.userId;
     
-    // Generate random password and OTP
-    const password = Math.random().toString(36).slice(-8);
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    // Never allow assigning super_admin from school workspace
+    const rawRole = (role || 'enseignant').toString().trim().toLowerCase();
+    if (rawRole === 'super_admin' && req.user?.role !== 'super_admin') {
+      return res.status(403).json({ error: "Attribution du rôle Super Admin interdite." });
+    }
+    const assignedRole = rawRole || 'enseignant';
+
+    // Generate cryptographically random password and OTP
+    const password = crypto.randomBytes(6).toString('base64url');
+    const otp = String(crypto.randomInt(100000, 999999));
     const otp_expiry = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(); // 24h
     
-    const assignedRole = role || 'enseignant';
     let userPermissions = permissions;
     if (!userPermissions || !Array.isArray(userPermissions) || userPermissions.length === 0) {
       userPermissions = getDefaultRolePermissions(assignedRole);
@@ -20354,7 +20493,8 @@ function executeYearTransition(
         subject: "Activation de votre compte MégafixaEduc Pro",
         text: textBody,
         html: htmlBody,
-        otp
+        otp,
+        schoolId: req.schoolId
       });
 
       const schoolInfo = db.prepare("SELECT id, nom, code_ecole FROM school_info WHERE id = ?").get(req.schoolId) as any;
@@ -20384,8 +20524,21 @@ function executeYearTransition(
   });
 
   app.put("/api/users/:id", authenticateToken, (req: any, res) => {
+    const allowedUpdaters = ['admin', 'fonde', 'super_admin', 'direction'];
+    if (!allowedUpdaters.includes(req.user?.role)) {
+      return res.status(403).json({ error: "Accès refusé. Droits administrateur requis." });
+    }
     const { id } = req.params;
     const { nom, email, role, approuve, permissions, mot_de_passe, can_write, enseignant_id, personnel_id, eleve_id } = req.body;
+
+    const targetUser = db.prepare("SELECT id, role FROM utilisateurs WHERE id = ? AND school_id = ?").get(id, req.schoolId) as any;
+    if (!targetUser) {
+      return res.status(404).json({ error: "Utilisateur introuvable dans votre établissement." });
+    }
+    if ((role === 'super_admin' || targetUser.role === 'super_admin') && req.user?.role !== 'super_admin') {
+      return res.status(403).json({ error: "Modification du rôle Super Admin interdite." });
+    }
+
     const permissionsStr = permissions ? JSON.stringify(permissions) : null;
     
     if (mot_de_passe) {
@@ -20407,22 +20560,29 @@ function executeYearTransition(
   });
 
   app.patch("/api/users/:id/approve", authenticateToken, async (req: any, res) => {
+    const allowedApprovers = ['admin', 'fonde', 'super_admin', 'direction'];
+    if (!allowedApprovers.includes(req.user?.role)) {
+      return res.status(403).json({ error: "Accès refusé. Droits administrateur requis." });
+    }
     const { id } = req.params;
     const { approuve, role, permissions } = req.body;
+    const assignedRole = (role === 'super_admin' && req.user?.role !== 'super_admin') ? 'enseignant' : (role || 'enseignant');
+
+    const user = db.prepare("SELECT email, nom FROM utilisateurs WHERE id = ? AND school_id = ?").get(id, req.schoolId) as any;
+    if (!user) {
+      return res.status(404).json({ error: "Utilisateur introuvable dans votre établissement." });
+    }
     
     if (approuve) {
-      // Generate OTP
-      const otp = Math.floor(100000 + Math.random() * 900000).toString();
+      const otp = String(crypto.randomInt(100000, 999999));
       const expiry = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(); // 24h
       const permissionsStr = permissions ? JSON.stringify(permissions) : null;
       
       db.prepare("UPDATE utilisateurs SET approuve = 1, role = ?, permissions = ?, otp_code = ?, otp_expiry = ?, is_first_login = 1 WHERE id = ? AND school_id = ?")
-        .run(role || 'enseignant', permissionsStr, otp, expiry, id, req.schoolId);
+        .run(assignedRole, permissionsStr, otp, expiry, id, req.schoolId);
       
-      // Send Email
-      const user = db.prepare("SELECT email, nom FROM utilisateurs WHERE id = ? AND school_id = ?").get(id, req.schoolId) as any;
       const setupLink = `${APP_URL}/setup-password?email=${encodeURIComponent(user.email)}&otp=${otp}`;
-      const textBody = `Bonjour ${user.nom},\n\nVotre compte MégafixaEduc Pro a été approuvé par l'administrateur avec le rôle "${(role || 'enseignant').toUpperCase()}".\n\nPour activer votre compte et configurer votre mot de passe, veuillez cliquer sur le lien ci-dessous :\n${setupLink}\n\nCode de confirmation (OTP) : ${otp}\n\nCe lien expire dans 24 heures.`;
+      const textBody = `Bonjour ${user.nom},\n\nVotre compte MégafixaEduc Pro a été approuvé par l'administrateur avec le rôle "${assignedRole.toUpperCase()}".\n\nPour activer votre compte et configurer votre mot de passe, veuillez cliquer sur le lien ci-dessous :\n${setupLink}\n\nCode de confirmation (OTP) : ${otp}\n\nCe lien expire dans 24 heures.`;
       const htmlBody = textBody.replace(/\n/g, '<br>').replace(setupLink, `<a href="${setupLink}" style="display: inline-block; padding: 10px 20px; background-color: #10b981; color: white; text-decoration: none; border-radius: 8px; font-weight: bold;">Activer mon compte</a>`);
 
       const mailResult = await sendMailWithFallback({
@@ -20430,13 +20590,14 @@ function executeYearTransition(
         subject: "Votre compte MégafixaEduc Pro a été approuvé",
         text: textBody,
         html: htmlBody,
-        otp
+        otp,
+        schoolId: req.schoolId
       });
       
-      logActivity(req.userId, 'APPROVE', 'USER', parseInt(id), { email: user.email, role: role || 'enseignant' }, req.schoolId);
+      logActivity(req.userId, 'APPROVE', 'USER', parseInt(id), { email: user.email, role: assignedRole }, req.schoolId);
       res.json({ 
         success: true, 
-        otp,
+        otp: mailResult.simulated ? otp : undefined,
         setupLink,
         simulated: mailResult.simulated,
         message: mailResult.simulated 
@@ -20450,17 +20611,27 @@ function executeYearTransition(
   });
 
   app.delete("/api/users/:id", authenticateToken, (req: any, res) => {
+    const allowedDeleters = ['admin', 'fonde', 'super_admin', 'direction'];
+    if (!allowedDeleters.includes(req.user?.role)) {
+      return res.status(403).json({ error: "Accès refusé. Droits administrateur requis." });
+    }
     const { id } = req.params;
-    const user = db.prepare("SELECT email, nom FROM utilisateurs WHERE id = ? AND school_id = ?").get(id, req.schoolId) as any;
+    if (Number(id) === Number(req.userId)) {
+      return res.status(400).json({ error: "Vous ne pouvez pas supprimer votre propre compte." });
+    }
+    const user = db.prepare("SELECT email, nom, role FROM utilisateurs WHERE id = ? AND school_id = ?").get(id, req.schoolId) as any;
     
     if (!user) return res.status(404).json({ error: "Utilisateur non trouvé" });
+    if (user.role === 'super_admin' && req.user?.role !== 'super_admin') {
+      return res.status(403).json({ error: "Suppression du compte Super Admin interdite." });
+    }
 
     try {
       db.transaction(() => {
-        // Clear references
-        db.prepare("UPDATE utilisateurs SET parent_admin_id = NULL WHERE parent_admin_id = ?").run(id);
-        db.prepare("DELETE FROM notifications WHERE utilisateur_id = ?").run(id);
-        db.prepare("UPDATE audit_logs SET utilisateur_id = NULL WHERE utilisateur_id = ?").run(id);
+        // Clear references safely inside school
+        db.prepare("UPDATE utilisateurs SET parent_admin_id = NULL WHERE parent_admin_id = ? AND school_id = ?").run(id, req.schoolId);
+        db.prepare("DELETE FROM notifications WHERE utilisateur_id = ? AND school_id = ?").run(id, req.schoolId);
+        db.prepare("UPDATE audit_logs SET utilisateur_id = NULL WHERE utilisateur_id = ? AND school_id = ?").run(id, req.schoolId);
         
         db.prepare("DELETE FROM utilisateurs WHERE id = ? AND school_id = ?").run(id, req.schoolId);
       })();
@@ -20536,58 +20707,40 @@ function executeYearTransition(
     }
   });
 
-  // Auth - Google Authentication
-  app.post("/api/auth/google", async (req, res) => {
+  // Auth - Google Authentication (Strictly Verified ID Token Only)
+  app.post("/api/auth/google", loginRateLimiter, async (req, res) => {
     try {
-      const { idToken, email: bodyEmail, nom: bodyNom, name: bodyName, google_id: bodyGoogleId, uid: bodyUid } = req.body;
-      
-      let email = bodyEmail;
-      let name = bodyNom || bodyName;
-      let uid = bodyGoogleId || bodyUid;
-
-      if (idToken || req.body.credential) {
-        const rawToken = idToken || req.body.credential;
-        try {
-          // Direct base64 JWT payload decode for GIS credential
-          const parts = rawToken.split('.');
-          if (parts.length === 3) {
-            const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
-            if (payload.email) email = payload.email;
-            if (payload.name) name = payload.name;
-            if (payload.sub) uid = payload.sub;
-          }
-        } catch (jwtErr) {
-          console.warn("Direct JWT credential parse fallback:", jwtErr);
-        }
-
-        if (idToken) {
-          try {
-            const { auth: adminAuth } = await import("./src/lib/firebase-admin.ts");
-            const decoded = await adminAuth.verifyIdToken(idToken);
-            if (decoded.email) email = decoded.email;
-            if (decoded.name) name = decoded.name;
-            if (decoded.uid) uid = decoded.uid;
-          } catch (tokenErr) {
-            console.warn("Token verification fallback to decoded attributes:", tokenErr);
-          }
-        }
+      const rawToken = req.body?.idToken || req.body?.credential;
+      if (!rawToken || typeof rawToken !== 'string') {
+        return res.status(401).json({ success: false, error: "Jeton d'authentification Google manquant." });
       }
 
-      if (!email && !uid) {
-        return res.status(400).json({ success: false, error: "Identifiants Google requis (email ou token)" });
+      let verified: { uid?: string; email?: string; name?: string } | null = null;
+      try {
+        const { auth: adminAuth } = await import("./src/lib/firebase-admin.ts");
+        verified = await adminAuth.verifyIdToken(rawToken);
+      } catch (tokenErr: any) {
+        return res.status(401).json({
+          success: false,
+          error: tokenErr?.message || "Jeton Google invalide ou expiré. Veuillez vous reconnecter."
+        });
       }
 
-      const cleanEmail = email ? email.toString().trim().toLowerCase() : null;
-      const cleanNom = name || cleanEmail?.split('@')[0] || "Utilisateur Google";
-      const cleanUid = uid || cleanEmail;
+      if (!verified?.email) {
+        return res.status(401).json({ success: false, error: "Email Google introuvable ou non vérifié dans le jeton." });
+      }
 
-      // Find user in SQLite by email or google_id
-      let user = db.prepare(`
+      const cleanEmail = verified.email.toString().trim().toLowerCase();
+      const cleanNom = verified.name || cleanEmail.split('@')[0] || "Utilisateur Google";
+      const cleanUid = verified.uid || cleanEmail;
+
+      // Find user in SQLite strictly by verified email (or verified UID if already linked to that email)
+      const user = db.prepare(`
         SELECT * FROM utilisateurs 
-        WHERE (google_id IS NOT NULL AND google_id = ?) 
-           OR (? IS NOT NULL AND LOWER(TRIM(email)) = ?)
+        WHERE LOWER(TRIM(email)) = ?
+           OR (google_id IS NOT NULL AND google_id = ? AND LOWER(TRIM(email)) = ?)
         LIMIT 1
-      `).get(cleanUid, cleanEmail, cleanEmail) as any;
+      `).get(cleanEmail, cleanUid, cleanEmail) as any;
 
       if (!user) {
         return res.status(200).json({
@@ -20666,27 +20819,39 @@ function executeYearTransition(
 
   app.post("/api/auth/profile/update", authenticateToken, (req: any, res) => {
     const { id, nom, email, question, answer } = req.body;
-    if (!id || !nom || !email) return res.status(400).json({ error: "Données manquantes" });
+    const requestedId = id ? Number(id) : req.userId;
+    if (!nom || !email) return res.status(400).json({ error: "Données manquantes" });
+
+    // Only allow updating one's own profile (strictly prevent IDOR overwrite of other accounts)
+    if (requestedId !== Number(req.userId)) {
+      return res.status(403).json({ error: "Vous ne pouvez modifier que votre propre profil." });
+    }
 
     try {
-      db.prepare("UPDATE utilisateurs SET nom = ?, email = ?, question_secrete = ?, reponse_secrete = ? WHERE id = ? AND school_id = ?")
-        .run(nom, email, question || null, answer || null, id, req.schoolId);
-      const user = db.prepare("SELECT * FROM utilisateurs WHERE id = ? AND school_id = ?").get(id, req.schoolId) as any;
+      const hashedAnswer = answer ? bcrypt.hashSync(answer.toString().toLowerCase().trim(), 10) : null;
+      if (req.schoolId) {
+        db.prepare("UPDATE utilisateurs SET nom = ?, email = ?, question_secrete = COALESCE(?, question_secrete), reponse_secrete = COALESCE(?, reponse_secrete) WHERE id = ? AND school_id = ?")
+          .run(nom, email, question || null, hashedAnswer, req.userId, req.schoolId);
+      } else {
+        db.prepare("UPDATE utilisateurs SET nom = ?, email = ?, question_secrete = COALESCE(?, question_secrete), reponse_secrete = COALESCE(?, reponse_secrete) WHERE id = ?")
+          .run(nom, email, question || null, hashedAnswer, req.userId);
+      }
+      const user = db.prepare("SELECT * FROM utilisateurs WHERE id = ?").get(req.userId) as any;
       if (!user) return res.status(404).json({ error: "Utilisateur non trouvé" });
-      const { mot_de_passe, otp_code, otp_expiry, ...userWithoutSensitive } = user;
-      logActivity(req.userId, 'UPDATE_PROFILE', 'USER', parseInt(id), { nom, email }, req.schoolId);
+      const { mot_de_passe, mot_de_passe_initial, otp_code, otp_expiry, reponse_secrete, ...userWithoutSensitive } = user;
+      logActivity(req.userId, 'UPDATE_PROFILE', 'USER', req.userId, { nom, email }, req.schoolId);
       res.json({ success: true, user: userWithoutSensitive });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
   });
 
-  app.post("/api/auth/password/request-reset", async (req, res) => {
+  app.post("/api/auth/password/request-reset", loginRateLimiter, async (req, res) => {
     const { email } = req.body;
-    const user = db.prepare("SELECT * FROM utilisateurs WHERE email = ?").get(email) as any;
+    const user = db.prepare("SELECT * FROM utilisateurs WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))").get((email || '').toString()) as any;
     if (!user) return res.status(404).json({ error: "Utilisateur non trouvé" });
 
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const code = String(crypto.randomInt(100000, 999999));
     const expiry = new Date(Date.now() + 15 * 60 * 1000).toISOString();
     db.prepare("UPDATE utilisateurs SET otp_code = ?, otp_expiry = ? WHERE id = ?").run(code, expiry, user.id);
 
@@ -20695,7 +20860,8 @@ function executeYearTransition(
       to: email,
       subject: "Code de confirmation de changement de mot de passe",
       text: textBody,
-      otp: code
+      otp: code,
+      schoolId: user.school_id
     });
 
     res.json({ 
@@ -20706,12 +20872,13 @@ function executeYearTransition(
     });
   });
 
-  app.post("/api/auth/password/reset", (req, res) => {
+  app.post("/api/auth/password/reset", loginRateLimiter, (req, res) => {
     const { email, code, newPassword } = req.body;
-    const user = db.prepare("SELECT * FROM utilisateurs WHERE email = ?").get(email) as any;
+    if (!email || !code || !newPassword) return res.status(400).json({ error: "Champs manquants" });
+    const user = db.prepare("SELECT * FROM utilisateurs WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))").get(email.toString()) as any;
     if (!user) return res.status(404).json({ error: "Utilisateur non trouvé" });
 
-    if (user.otp_code !== code || new Date() > new Date(user.otp_expiry)) {
+    if (!user.otp_code || user.otp_code !== code || new Date() > new Date(user.otp_expiry)) {
       return res.status(400).json({ error: "Code invalide ou expiré" });
     }
 
@@ -20721,60 +20888,73 @@ function executeYearTransition(
     res.json({ success: true });
   });
 
-  app.get("/api/auth/password/get-question", (req, res) => {
+  app.get("/api/auth/password/get-question", loginRateLimiter, (req, res) => {
     const { email } = req.query;
     if (!email) return res.status(400).json({ error: "Email requis" });
-    const user = db.prepare("SELECT question_secrete FROM utilisateurs WHERE email = ?").get(email) as any;
+    const user = db.prepare("SELECT question_secrete FROM utilisateurs WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))").get(email.toString()) as any;
     if (!user) return res.status(404).json({ error: "Utilisateur non trouvé" });
     if (!user.question_secrete) return res.status(400).json({ error: "Aucune question de sécurité configurée pour ce compte." });
     res.json({ question: user.question_secrete });
   });
 
-  app.post("/api/auth/password/reset-with-question", (req, res) => {
+  app.post("/api/auth/password/reset-with-question", loginRateLimiter, (req, res) => {
     const { email, answer, newPassword } = req.body;
     if (!email || !answer || !newPassword) return res.status(400).json({ error: "Champs manquants" });
     
-    const user = db.prepare("SELECT * FROM utilisateurs WHERE email = ?").get(email) as any;
+    const user = db.prepare("SELECT * FROM utilisateurs WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))").get(email.toString()) as any;
     if (!user) return res.status(404).json({ error: "Utilisateur non trouvé" });
     if (!user.reponse_secrete) return res.status(400).json({ error: "Aucune question de sécurité configurée" });
 
-    // Normalize answer (lowercase, trim)
-    const normalizedStored = user.reponse_secrete.toLowerCase().trim();
-    const normalizedInput = answer.toLowerCase().trim();
+    const normalizedInput = answer.toString().toLowerCase().trim();
+    let isAnswerValid = false;
+    if (user.reponse_secrete.startsWith('$2a$') || user.reponse_secrete.startsWith('$2b$')) {
+      try {
+        isAnswerValid = bcrypt.compareSync(normalizedInput, user.reponse_secrete);
+      } catch {
+        isAnswerValid = false;
+      }
+    } else {
+      isAnswerValid = user.reponse_secrete.toLowerCase().trim() === normalizedInput;
+    }
 
-    if (normalizedStored !== normalizedInput) {
+    if (!isAnswerValid) {
       return res.status(400).json({ error: "Réponse incorrecte" });
     }
 
     const hashedPassword = bcrypt.hashSync(newPassword, 10);
-    db.prepare("UPDATE utilisateurs SET mot_de_passe = ? WHERE id = ?").run(hashedPassword, user.id);
+    const hashedAnswer = bcrypt.hashSync(normalizedInput, 10);
+    db.prepare("UPDATE utilisateurs SET mot_de_passe = ?, reponse_secrete = ? WHERE id = ?").run(hashedPassword, hashedAnswer, user.id);
     logActivity(user.id, 'PASSWORD_RESET_QUESTION', 'USER', user.id, { email }, user.school_id);
     res.json({ success: true });
   });
 
-  app.post("/api/auth/password/update-question", (req, res) => {
+  app.post("/api/auth/password/update-question", authenticateToken, (req: any, res) => {
     const { userId, question, answer } = req.body;
-    if (!userId || !question || !answer) return res.status(400).json({ error: "Champs manquants" });
-    
-    db.prepare("UPDATE utilisateurs SET question_secrete = ?, reponse_secrete = ? WHERE id = ?").run(question, answer, userId);
+    if (!question || !answer) return res.status(400).json({ error: "Champs manquants" });
+    if (userId && Number(userId) !== Number(req.userId)) {
+      return res.status(403).json({ error: "Vous ne pouvez modifier que votre propre question de sécurité." });
+    }
+    const hashedAnswer = bcrypt.hashSync(answer.toString().toLowerCase().trim(), 10);
+    db.prepare("UPDATE utilisateurs SET question_secrete = ?, reponse_secrete = ? WHERE id = ?").run(question, hashedAnswer, req.userId);
     res.json({ success: true });
   });
 
-  app.post("/api/auth/setup-password", (req, res) => {
+  app.post("/api/auth/setup-password", loginRateLimiter, (req, res) => {
     const { email, otp, password, question, answer } = req.body;
-    const user = db.prepare("SELECT * FROM utilisateurs WHERE email = ?").get(email) as any;
+    const user = db.prepare("SELECT * FROM utilisateurs WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))").get((email || '').toString()) as any;
 
     if (!user) {
       return res.status(404).json({ success: false, error: "Utilisateur non trouvé" });
     }
 
-    if (user.otp_code !== otp || new Date() > new Date(user.otp_expiry)) {
+    if (!user.otp_code || user.otp_code !== otp || new Date() > new Date(user.otp_expiry)) {
       return res.status(400).json({ success: false, error: "Code OTP invalide ou expiré" });
     }
 
     const hashedPassword = bcrypt.hashSync(password, 10);
+    const hashedAnswer = answer ? bcrypt.hashSync(answer.toString().toLowerCase().trim(), 10) : null;
     db.prepare("UPDATE utilisateurs SET mot_de_passe = ?, question_secrete = ?, reponse_secrete = ?, otp_code = NULL, otp_expiry = NULL, is_first_login = 0 WHERE id = ?")
-      .run(hashedPassword, question || null, answer || null, user.id);
+      .run(hashedPassword, question || null, hashedAnswer, user.id);
 
     logActivity(user.id, 'SETUP_PASSWORD', 'USER', user.id, { email }, user.school_id);
     res.json({ success: true });
@@ -20811,63 +20991,23 @@ function executeYearTransition(
       });
       const profile = userInfoRes.data as any;
 
-      if (!profile.email) {
-        return res.status(400).send("Email non fourni par Google");
+      if (!profile.email || profile.email_verified === false) {
+        return res.status(400).send("Email Google non vérifié ou manquant");
       }
 
-      // Check if user exists
-      let user = db.prepare("SELECT * FROM utilisateurs WHERE email = ?").get(profile.email) as any;
+      const cleanEmail = String(profile.email).trim().toLowerCase();
+      // Only authenticate accounts already registered in an existing school (never auto-enroll unknown users into School 1)
+      const user = db.prepare("SELECT * FROM utilisateurs WHERE LOWER(TRIM(email)) = ? LIMIT 1").get(cleanEmail) as any;
 
       if (!user) {
-        // Create user if not exists (default as admin for first user or based on your logic)
-        // For now, let's just create as admin if it's the first user, otherwise maybe a default role?
-        // Actually, let's check if any user exists
-        const userCount = (db.prepare("SELECT COUNT(*) as count FROM utilisateurs").get() as any).count;
-        const role = userCount === 0 ? 'admin' : 'enseignant'; 
-        
-        let schoolId;
-        if (userCount === 0) {
-          const schoolInfo = db.prepare("INSERT INTO school_info (nom) VALUES (?)").run("Ma Première École");
-          schoolId = schoolInfo.lastInsertRowid;
-          
-          // Seed defaults for first school
-          const allPaths = ['/', '/classes', '/eleves', '/promotions', '/enseignants', '/matieres', '/notes', '/paiements', '/emploi-du-temps', '/ecole', '/parametres', '/audit-logs', '/alertes'];
-          const defaultPermissions = {
-            admin: allPaths.map(path => ({ path, can_write: true })),
-            secretariat: [{ path: '/', can_write: true }, { path: '/classes', can_write: true }, { path: '/eleves', can_write: true }, { path: '/promotions', can_write: true }, { path: '/enseignants', can_write: false }, { path: '/matieres', can_write: false }, { path: '/notes', can_write: true }, { path: '/emploi-du-temps', can_write: true }, { path: '/alertes', can_write: true }],
-            enseignant: [{ path: '/', can_write: false }, { path: '/eleves', can_write: false }, { path: '/notes', can_write: true }, { path: '/emploi-du-temps', can_write: false }],
-            comptable: [{ path: '/', can_write: false }, { path: '/eleves', can_write: false }, { path: '/paiements', can_write: true }]
-          };
-          const insertRolePerm = db.prepare("INSERT INTO role_permissions (role, permissions, school_id) VALUES (?, ?, ?)");
-          Object.entries(defaultPermissions).forEach(([r, perms]) => insertRolePerm.run(r, JSON.stringify(perms), schoolId));
-          
-          const currentLibelle = getCurrentAcademicYearLibelle();
-          const now = new Date();
-          const dateDebut = new Date(now.getFullYear(), 8, 1).toISOString().split('T')[0];
-          const dateFin = new Date(now.getFullYear() + 1, 6, 31).toISOString().split('T')[0];
-          db.prepare("INSERT INTO annees_scolaires (libelle, date_debut, date_fin, est_active, school_id) VALUES (?, ?, ?, 1, ?)").run(currentLibelle, dateDebut, dateFin, schoolId);
-        } else {
-          const firstSchool = db.prepare("SELECT id FROM school_info ORDER BY id ASC LIMIT 1").get() as any;
-          schoolId = firstSchool ? firstSchool.id : null;
-        }
-
-        const randomPass = Math.random().toString(36).slice(-10);
-        const hashedPass = bcrypt.hashSync(randomPass, 10);
-        
-        const info = db.prepare(`
-          INSERT INTO utilisateurs (nom, email, mot_de_passe, role, approuve, google_id, is_first_login, school_id)
-          VALUES (?, ?, ?, ?, 1, ?, 0, ?)
-        `).run(profile.name || profile.given_name || 'Utilisateur Google', profile.email, hashedPass, role, profile.sub, schoolId);
-        
-        user = db.prepare("SELECT * FROM utilisateurs WHERE id = ?").get(info.lastInsertRowid);
-        logActivity(user.id, 'SIGNUP_GOOGLE', 'USER', user.id, { email: user.email }, user.school_id);
-      } else {
-        // Update google_id if not set
-        if (!user.google_id) {
-          db.prepare("UPDATE utilisateurs SET google_id = ?, approuve = 1 WHERE id = ?").run(profile.sub, user.id);
-        }
-        logActivity(user.id, 'LOGIN_GOOGLE', 'USER', user.id, { email: user.email }, user.school_id);
+        const redirectTarget = `/signup?email=${encodeURIComponent(cleanEmail)}&nom=${encodeURIComponent(profile.name || '')}&from=google`;
+        return res.redirect(redirectTarget);
       }
+
+      if (!user.google_id) {
+        db.prepare("UPDATE utilisateurs SET google_id = ?, approuve = 1 WHERE id = ?").run(profile.sub, user.id);
+      }
+      logActivity(user.id, 'LOGIN_GOOGLE', 'USER', user.id, { email: user.email }, user.school_id);
 
       const token = jwt.sign(
         { 
@@ -21063,9 +21203,6 @@ function executeYearTransition(
     if (!isPasswordCorrect && user.mot_de_passe_initial === cleanPassword) {
       isPasswordCorrect = true;
     }
-    if (!isPasswordCorrect && user.role === 'super_admin' && (cleanPassword === 'SuperAdmin2026!' || cleanPassword === 'password')) {
-      isPasswordCorrect = true;
-    }
 
     if (!isPasswordCorrect) {
       return res.status(401).json({ success: false, error: "Identifiants incorrects" });
@@ -21169,9 +21306,18 @@ function executeYearTransition(
     });
   });
 
-  // One-click demo / test school login endpoint
+  // One-click demo / test school login endpoint (disabled in deployed/production environments)
   app.post("/api/auth/test-school-login", (req: any, res: any) => {
     try {
+      const host = String(req.get('x-forwarded-host') || req.get('host') || '').toLowerCase();
+      const isDeployedEnv = process.env.NODE_ENV === 'production' || host.startsWith('ais-pre-');
+      if (isDeployedEnv && process.env.ALLOW_TEST_SCHOOL_LOGIN !== 'true') {
+        return res.status(403).json({
+          success: false,
+          error: "La connexion au compte école test est désactivée en environnement déployé."
+        });
+      }
+
       const requestedRole = String(req.body?.role || 'admin').trim().toLowerCase();
       const allowedDemoRoles = ['admin', 'direction', 'secretariat', 'enseignant', 'comptable', 'parent', 'eleve'];
       const targetRole = allowedDemoRoles.includes(requestedRole) ? requestedRole : 'admin';
@@ -23796,17 +23942,17 @@ Cette clé servira lors du premier accès de votre établissement au système po
     }
   });
 
-  app.post("/api/auth/resend-otp", async (req, res) => {
+  app.post("/api/auth/resend-otp", loginRateLimiter, async (req, res) => {
     const { email } = req.body;
     if (!email) {
       return res.status(400).json({ success: false, error: "L'adresse email est requise" });
     }
     try {
-      const user = db.prepare("SELECT * FROM utilisateurs WHERE email = ?").get(email) as any;
+      const user = db.prepare("SELECT * FROM utilisateurs WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))").get(email.toString()) as any;
       if (!user) {
         return res.status(404).json({ success: false, error: "Aucun compte associé à cet email" });
       }
-      const otp = Math.floor(100000 + Math.random() * 900000).toString();
+      const otp = String(crypto.randomInt(100000, 999999));
       const otp_expiry = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 
       db.prepare("UPDATE utilisateurs SET otp_code = ?, otp_expiry = ? WHERE id = ?").run(otp, otp_expiry, user.id);
@@ -23815,12 +23961,13 @@ Cette clé servira lors du premier accès de votre établissement au système po
         to: email,
         subject: "Votre nouveau code de confirmation MégafixaEduc Pro",
         text: `Bonjour ${user.nom},\n\nVoici votre nouveau code de confirmation (OTP) : ${otp}\n\nCe code expire dans 24 heures.`,
-        otp
+        otp,
+        schoolId: user.school_id
       });
 
       res.json({
         success: true,
-        otp: otp,
+        otp: mailResult.simulated ? otp : undefined,
         simulated: mailResult.simulated,
         message: mailResult.simulated 
           ? `Nouveau code généré : ${otp}` 
@@ -26040,12 +26187,19 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
     }
   });
 
-  // Generic File Upload for Messaging
-  app.post("/api/messagerie/upload-file", async (req: any, res) => {
+  // Generic File Upload for Messaging (Authenticated + Safe Extension & Size Guard)
+  app.post("/api/messagerie/upload-file", authenticateToken, async (req: any, res) => {
     try {
       const { fileData, fileName } = req.body || {};
       if (!fileData || typeof fileData !== 'string') {
         return res.status(400).json({ error: "Données du fichier manquantes ou invalides." });
+      }
+
+      const allowedFileExts = new Set(['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt', 'csv', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'mp3', 'wav', 'ogg', 'webm', 'm4a', 'aac', 'mp4']);
+      const baseName = path.basename(String(fileName || 'file'));
+      const rawExt = baseName.includes('.') ? String(baseName.split('.').pop() || '').toLowerCase().replace(/[^a-z0-9]/g, '') : 'bin';
+      if (!allowedFileExts.has(rawExt)) {
+        return res.status(400).json({ error: `Type de fichier (.${rawExt}) non autorisé pour des raisons de sécurité.` });
       }
 
       const uploadsDir = path.join(process.cwd(), 'public', 'uploads', 'files');
@@ -26054,10 +26208,12 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       }
 
       const randomSuffix = crypto.randomBytes(6).toString('hex');
-      const safeExt = (fileName && fileName.includes('.')) ? fileName.split('.').pop() : 'bin';
-      const originalName = fileName ? fileName.split('.')[0] : 'file';
-      const name = `${originalName.replace(/[^a-zA-Z0-9_-]/g, '_')}_${randomSuffix}.${safeExt}`;
-      const filePath = path.join(uploadsDir, name);
+      const originalName = baseName.includes('.') ? baseName.slice(0, baseName.lastIndexOf('.')) : baseName;
+      const name = `${originalName.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 60) || 'file'}_${randomSuffix}.${rawExt}`;
+      const filePath = path.resolve(uploadsDir, name);
+      if (!filePath.startsWith(path.resolve(uploadsDir) + path.sep)) {
+        return res.status(400).json({ error: "Nom de fichier invalide." });
+      }
       
       const base64Data = fileData.includes(',') ? fileData.split(',')[1] : fileData;
       const cleanBase64 = (base64Data || '').replace(/\s+/g, '');
@@ -26065,6 +26221,9 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       
       if (buffer.length === 0) {
         return res.status(400).json({ error: "Le fichier envoyé est vide." });
+      }
+      if (buffer.length > 15 * 1024 * 1024) {
+        return res.status(413).json({ error: "Le fichier dépasse la taille maximale autorisée (15 Mo)." });
       }
 
       fs.writeFileSync(filePath, buffer);
@@ -26079,20 +26238,25 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       }
 
       const fileUrl = `/uploads/files/${name}`;
-      res.json({ success: true, url: fileUrl, fileName: fileName || name });
+      res.json({ success: true, url: fileUrl, fileName: baseName || name });
     } catch (err: any) {
       console.error("File upload error:", err);
       res.status(500).json({ error: "Erreur lors de l'enregistrement du fichier: " + err.message });
     }
   });
 
-  // Audio Upload for Voice Messages (Legacy / Dedicated)
-  app.post("/api/messagerie/upload-audio", async (req: any, res) => {
+  // Audio Upload for Voice Messages (Authenticated + Safe Audio Extension Guard)
+  app.post("/api/messagerie/upload-audio", authenticateToken, async (req: any, res) => {
     try {
       const { audioData, fileName } = req.body || {};
       if (!audioData || typeof audioData !== 'string') {
         return res.status(400).json({ error: "Données audio manquantes ou invalides." });
       }
+
+      const allowedAudioExts = new Set(['webm', 'mp3', 'wav', 'ogg', 'm4a', 'aac', 'mp4']);
+      const baseName = path.basename(String(fileName || 'voice.webm'));
+      const rawExt = baseName.includes('.') ? String(baseName.split('.').pop() || '').toLowerCase().replace(/[^a-z0-9]/g, '') : 'webm';
+      const safeExt = allowedAudioExts.has(rawExt) ? rawExt : 'webm';
 
       const uploadsDir = path.join(process.cwd(), 'public', 'uploads', 'audio');
       if (!fs.existsSync(uploadsDir)) {
@@ -26100,11 +26264,12 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       }
 
       const randomSuffix = crypto.randomBytes(6).toString('hex');
-      const safeExt = (fileName && fileName.includes('.')) ? fileName.split('.').pop() : 'webm';
-      const name = fileName 
-        ? `${fileName.split('.')[0].replace(/[^a-zA-Z0-9_-]/g, '_')}_${randomSuffix}.${safeExt}`
-        : `voice_${randomSuffix}_${Date.now()}.${safeExt}`;
-      const filePath = path.join(uploadsDir, name);
+      const stem = baseName.includes('.') ? baseName.slice(0, baseName.lastIndexOf('.')) : baseName;
+      const name = `${stem.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 60) || 'voice'}_${randomSuffix}_${Date.now()}.${safeExt}`;
+      const filePath = path.resolve(uploadsDir, name);
+      if (!filePath.startsWith(path.resolve(uploadsDir) + path.sep)) {
+        return res.status(400).json({ error: "Nom de fichier audio invalide." });
+      }
       
       // Remove data URL prefix if present (any audio MIME type or parameter)
       const base64Data = audioData.includes(',') ? audioData.split(',')[1] : audioData;
@@ -26113,6 +26278,9 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       
       if (audioBuffer.length === 0) {
         return res.status(400).json({ error: "Le fichier audio envoyé est vide." });
+      }
+      if (audioBuffer.length > 15 * 1024 * 1024) {
+        return res.status(413).json({ error: "Le message vocal dépasse la taille maximale autorisée (15 Mo)." });
       }
 
       fs.writeFileSync(filePath, audioBuffer);
@@ -26221,10 +26389,13 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
     }
   });
 
-  // Get and Update SMS configuration
+  // Get and Update SMS configuration (Admin / Fondé / Direction only; secrets masked for others)
   app.get("/api/sms/config", authenticateToken, (req: any, res) => {
     try {
       const schoolId = req.schoolId || 1;
+      if (!isUserAdminOrFonde(req.user?.role) && req.user?.role !== 'direction') {
+        return res.status(403).json({ error: "Accès réservé à l'administrateur / direction." });
+      }
       let config = db.prepare("SELECT * FROM sms_configs WHERE school_id = ?").get(schoolId) as any;
       if (!config) {
         db.prepare("INSERT INTO sms_configs (school_id, provider, is_active, credit_balance) VALUES (?, 'simulation', 1, 1000)").run(schoolId);
@@ -26315,6 +26486,9 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
 
   app.get("/api/whatsapp/config", authenticateToken, async (req: any, res) => {
     try {
+      if (!isUserAdminOrFonde(req.user?.role) && req.user?.role !== 'direction') {
+        return res.status(403).json({ error: "Accès réservé à l'administrateur / direction." });
+      }
       const schoolId = req.schoolId || 1;
       let config = db.prepare("SELECT * FROM whatsapp_configs WHERE school_id = ?").get(schoolId) as any;
       if (!config) {
@@ -27489,9 +27663,9 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
     const snapshotId = Number(result.lastInsertRowid);
 
     // Reinforce: Sync metadata to Firebase if available
-    if (adminDb) {
+    if (adminDb && isCloudSyncAvailable()) {
       try {
-        await adminDb.collection('backups').doc(`school_${schoolId}_${snapshotId}`).set({
+        const synced = await adminDb.collection('backups').doc(`school_${schoolId}_${snapshotId}`).set({
           school_id: schoolId,
           snapshot_id: snapshotId,
           filename,
@@ -27504,7 +27678,9 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
           status: 'completed',
           storage_location: 'local_server'
         });
-        console.log(`[Backup] Snapshot ${snapshotId} synced to Cloud Firestore.`);
+        if (synced) {
+          console.log(`[Backup] Snapshot ${snapshotId} synced to Cloud Firestore.`);
+        }
       } catch (cloudErr) {
         console.warn("[Backup] Cloud sync notice:", cloudErr);
       }
@@ -27732,8 +27908,11 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
     }
   });
 
-  // GET download compressed code ZIP (< 25MB)
-  app.get("/api/code/download-zip", (req: any, res) => {
+  // GET download compressed code ZIP (< 25MB) - Admin / Super Admin only
+  app.get("/api/code/download-zip", authenticateToken, (req: any, res) => {
+    if (!isUserAdminOrFonde(req.user?.role)) {
+      return res.status(403).json({ error: "Accès réservé à l'administrateur." });
+    }
     try {
       const zipPath = path.join(process.cwd(), "megafixaeduc-code.zip");
       const scriptPath = path.join(process.cwd(), "scripts", "create-zip.py");
@@ -27749,10 +27928,8 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         fs.createReadStream(zipPath).pipe(res);
       };
 
-      if (!fs.existsSync(zipPath)) {
-        const { execSync } = require('child_process');
-        execSync(`python3 "${scriptPath}"`, { stdio: 'inherit' });
-      }
+      const { execSync } = require('child_process');
+      execSync(`python3 "${scriptPath}"`, { stdio: 'inherit' });
       sendZip();
     } catch (err: any) {
       console.error("Error sending zip:", err);
@@ -27760,8 +27937,11 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
     }
   });
 
-  // POST direct 1-click push to GitHub with auto-creation of repo
-  app.post("/api/github/push-direct", async (req: any, res) => {
+  // POST direct 1-click push to GitHub - Strictly Super Admin / Admin
+  app.post("/api/github/push-direct", authenticateToken, async (req: any, res) => {
+    if (!isUserAdminOrFonde(req.user?.role)) {
+      return res.status(403).json({ success: false, error: "Accès réservé à l'administrateur." });
+    }
     try {
       const { token, repoName = "megafixaeduc-pro", isPrivate = false } = req.body;
       const cleanToken = (token || "").trim();
@@ -27924,13 +28104,16 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
     }
   });
 
-  // POST upload & restore backup file
+  // POST upload & restore backup file (Strictly isolated to req.schoolId)
   app.post("/api/backups/upload-restore", authenticateToken, (req: any, res) => {
     try {
       if (!isUserAdminOrFonde(req.user?.role)) {
         return res.status(403).json({ error: "Accès réservé exclusivement à l'administrateur (Fondé)" });
       }
-      const schoolId = req.schoolId || 1;
+      const schoolId = req.schoolId;
+      if (!schoolId) {
+        return res.status(400).json({ error: "ID de l'établissement manquant." });
+      }
       const { file_content, file_name, file_format } = req.body;
 
       if (!file_content) {
@@ -27948,23 +28131,47 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         const restoreTransaction = db.transaction(() => {
           for (const [table, rows] of Object.entries(parsed.entities) as [string, any[]][]) {
             if (!Array.isArray(rows) || rows.length === 0) continue;
+            if (!/^[a-zA-Z0-9_]+$/.test(table)) continue;
+            const tableExistsRow = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = ?").get(table);
+            if (!tableExistsRow) continue;
+            const colsInfo = db.prepare(`PRAGMA table_info(${table})`).all() as any[];
+            const hasSchoolId = colsInfo.some(c => c.name === 'school_id');
+            if (!hasSchoolId && table !== 'school_info') continue;
+
             for (const row of rows) {
-              const cols = Object.keys(row);
+              const safeRow = { ...row };
+              if (hasSchoolId) safeRow.school_id = schoolId;
+              if (table === 'school_info' && Number(safeRow.id) !== Number(schoolId)) continue;
+              if (table === 'utilisateurs' && safeRow.role === 'super_admin' && req.user?.role !== 'super_admin') {
+                safeRow.role = 'admin';
+              }
+              const cols = Object.keys(safeRow).filter(c => /^[a-zA-Z0-9_]+$/.test(c));
               const placeholders = cols.map(() => '?').join(', ');
-              const values = cols.map(c => row[c]);
+              const values = cols.map(c => safeRow[c]);
               db.prepare(`INSERT OR REPLACE INTO ${table} (${cols.join(', ')}) VALUES (${placeholders})`).run(...values);
             }
           }
         });
         restoreTransaction();
       } else {
-        const statements = file_content
+        // SQL restore: strict tenant-safe filter when invoked by school admin
+        const statements = String(file_content)
           .split(';\n')
           .map((s: string) => s.trim())
           .filter((s: string) => s.length > 0 && !s.startsWith('--') && !s.startsWith('PRAGMA') && !s.startsWith('BEGIN') && !s.startsWith('COMMIT'));
 
         const restoreTransaction = db.transaction(() => {
           for (const stmt of statements) {
+            const upper = stmt.toUpperCase().replace(/\s+/g, ' ').trim();
+            if (req.user?.role !== 'super_admin') {
+              // Block destructive DDL or cross-tenant mutations
+              if (!/^INSERT\s+(OR\s+REPLACE\s+|OR\s+IGNORE\s+)?INTO\s+/i.test(upper)) {
+                continue;
+              }
+              if (/\bDROP\b|\bALTER\b|\bATTACH\b|\bDETACH\b|\bVACUUM\b/i.test(upper)) {
+                continue;
+              }
+            }
             try {
               db.exec(stmt);
             } catch (stmtErr: any) {
@@ -28004,7 +28211,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         }
       }
 
-      db.prepare("DELETE FROM backup_snapshots WHERE id = ?").run(snapshot.id);
+      db.prepare("DELETE FROM backup_snapshots WHERE id = ? AND school_id = ?").run(snapshot.id, schoolId);
       logActivity(req.userId, 'DELETE_BACKUP', 'backup_snapshots', snapshot.id, { filename: snapshot.filename }, schoolId);
       res.json({ success: true, message: "Sauvegarde supprimée avec succès." });
     } catch (err: any) {
@@ -28037,17 +28244,18 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
     }
   });
 
-  // GET export users only
+  // GET export users only (Strictly isolated to req.schoolId)
   app.get("/api/backups/export-users", authenticateToken, (req: any, res) => {
     try {
       if (!isUserAdminOrFonde(req.user?.role)) {
         return res.status(403).json({ error: "Accès réservé exclusivement à l'administrateur (Fondé)" });
       }
-      const schoolId = req.schoolId || 1;
+      const schoolId = req.schoolId;
+      if (!schoolId) return res.status(400).json({ error: "ID de l'établissement manquant" });
       const users = db.prepare(`
-        SELECT id, nom, email, role, telephone, permissions, approuve, can_write, last_seen, created_at
+        SELECT id, nom, email, role, telephone, permissions, approuve, can_write, school_id, last_seen, created_at
         FROM utilisateurs
-        WHERE school_id = ? OR school_id IS NULL
+        WHERE school_id = ?
         ORDER BY role, nom
       `).all(schoolId);
 
@@ -28297,7 +28505,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
     const { classeId } = req.params;
     
     // Get the year associated with this class to ensure strict isolation
-    const classe = db.prepare("SELECT annee_id FROM classes WHERE id = ?").get(classeId) as any;
+    const classe = db.prepare("SELECT annee_id FROM classes WHERE id = ? AND school_id = ?").get(classeId, req.schoolId) as any;
     if (!classe) return res.json([]);
     const anneeId = classe.annee_id;
 
@@ -28348,7 +28556,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       }
 
       // Get the year associated with this class to ensure strict isolation
-      const classe = db.prepare("SELECT annee_id FROM classes WHERE id = ?").get(classe_id) as any;
+      const classe = db.prepare("SELECT annee_id FROM classes WHERE id = ? AND school_id = ?").get(classe_id, schoolId) as any;
       if (!classe) return res.json([]);
       const anneeId = classe.annee_id;
 
@@ -28494,13 +28702,16 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
     // Check if the school has locked notes insertion
     const school = db.prepare("SELECT notes_verrouillees, notes_verrouillees_primaire, notes_verrouillees_secondaire FROM school_info WHERE id = ?").get(req.schoolId) as any;
     
-    // Determine student cycle
+    // Determine student cycle & verify school ownership
     const eleve = db.prepare(`
       SELECT e.id, c.cycle 
       FROM eleves e
       LEFT JOIN classes c ON e.classe_id = c.id
-      WHERE e.id = ?
-    `).get(eleve_id) as any;
+      WHERE e.id = ? AND e.school_id = ?
+    `).get(eleve_id, req.schoolId) as any;
+    if (!eleve) {
+      return res.status(404).json({ error: "Élève introuvable dans votre établissement." });
+    }
     
     const studentCycle = (eleve?.cycle || '').toLowerCase();
     const isPrimary = studentCycle.includes('primaire') || studentCycle.includes('maternelle');
@@ -28595,18 +28806,28 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
     // Check if the school has locked notes insertion
     const school = db.prepare("SELECT notes_verrouillees, notes_verrouillees_primaire, notes_verrouillees_secondaire FROM school_info WHERE id = ?").get(req.schoolId) as any;
     
-    // Determine cycle from the first student in bulk data
+    // Determine cycle from the first student & verify all students belong to req.schoolId
     let isPrimary = false;
-    if (data && data.length > 0) {
+    if (Array.isArray(data) && data.length > 0) {
       const firstEleveId = data[0].eleve_id;
       const eleve = db.prepare(`
         SELECT e.id, c.cycle 
         FROM eleves e
         LEFT JOIN classes c ON e.classe_id = c.id
-        WHERE e.id = ?
-      `).get(firstEleveId) as any;
+        WHERE e.id = ? AND e.school_id = ?
+      `).get(firstEleveId, req.schoolId) as any;
+      if (!eleve) {
+        return res.status(404).json({ error: "Élève introuvable dans votre établissement." });
+      }
       const studentCycle = (eleve?.cycle || '').toLowerCase();
       isPrimary = studentCycle.includes('primaire') || studentCycle.includes('maternelle');
+
+      for (const item of data) {
+        const ownedStudent = db.prepare("SELECT id FROM eleves WHERE id = ? AND school_id = ?").get(item.eleve_id, req.schoolId);
+        if (!ownedStudent) {
+          return res.status(403).json({ error: "Accès refusé : un élève n'appartient pas à votre établissement." });
+        }
+      }
     }
     
     const isNotesLocked = isPrimary ? (school?.notes_verrouillees_primaire === 1) : (school?.notes_verrouillees_secondaire === 1);
@@ -28688,6 +28909,10 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
   // Classes Delete
   app.delete("/api/classes/:id", authenticateToken, (req: any, res) => {
     const { id } = req.params;
+    const existingClass = db.prepare("SELECT id FROM classes WHERE id = ? AND school_id = ?").get(id, req.schoolId) as any;
+    if (!existingClass) {
+      return res.status(404).json({ error: "Classe introuvable dans votre établissement." });
+    }
     
     // Check if class has students
     const elevesCount = db.prepare("SELECT COUNT(*) as count FROM eleves WHERE classe_id = ? AND school_id = ?").get(id, req.schoolId) as any;
@@ -28697,13 +28922,13 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
 
     try {
       db.transaction(() => {
-        // Delete related records
-        db.prepare("DELETE FROM classe_matieres WHERE classe_id = ?").run(id);
-        db.prepare("DELETE FROM emplois_du_temps WHERE classe_id = ?").run(id);
-        db.prepare("DELETE FROM devoirs WHERE classe_id = ?").run(id);
-        db.prepare("DELETE FROM evaluations WHERE classe_id = ?").run(id);
-        db.prepare("DELETE FROM eleve_annees WHERE classe_id = ?").run(id);
-        db.prepare("DELETE FROM sessions_cours WHERE emploi_du_temps_id IN (SELECT id FROM emplois_du_temps WHERE classe_id = ?)").run(id);
+        // Delete related records strictly scoped by school_id
+        db.prepare("DELETE FROM sessions_cours WHERE school_id = ? AND emploi_du_temps_id IN (SELECT id FROM emplois_du_temps WHERE classe_id = ? AND school_id = ?)").run(req.schoolId, id, req.schoolId);
+        db.prepare("DELETE FROM classe_matieres WHERE classe_id = ? AND school_id = ?").run(id, req.schoolId);
+        db.prepare("DELETE FROM emplois_du_temps WHERE classe_id = ? AND school_id = ?").run(id, req.schoolId);
+        db.prepare("DELETE FROM devoirs WHERE classe_id = ? AND school_id = ?").run(id, req.schoolId);
+        db.prepare("DELETE FROM evaluations WHERE classe_id = ? AND school_id = ?").run(id, req.schoolId);
+        db.prepare("DELETE FROM eleve_annees WHERE classe_id = ? AND school_id = ?").run(id, req.schoolId);
         
         db.prepare("DELETE FROM classes WHERE id = ? AND school_id = ?").run(id, req.schoolId);
       })();
@@ -28817,11 +29042,11 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
     const currentYearId = req.anneeId || getActiveYearId(schoolId);
 
     try {
-      const eleve = db.prepare("SELECT * FROM eleves WHERE id = ? AND (school_id = ? OR school_id IS NULL)").get(eleveId, schoolId) as any;
+      const eleve = db.prepare("SELECT * FROM eleves WHERE id = ? AND school_id = ?").get(eleveId, schoolId) as any;
       if (!eleve) return res.status(404).json({ error: "Élève non trouvé" });
 
       // Toutes les années scolaires enregistrées de l'école
-      const allYears = db.prepare("SELECT * FROM annees_scolaires WHERE (school_id = ? OR school_id IS NULL) ORDER BY date_debut DESC, id DESC").all(schoolId) as any[];
+      const allYears = db.prepare("SELECT * FROM annees_scolaires WHERE school_id = ? ORDER BY date_debut DESC, id DESC").all(schoolId) as any[];
 
       // Années antérieures (non actives ou différentes de l'année courante)
       const pastYears = allYears.filter(y => y.id !== currentYearId);
@@ -28839,7 +29064,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         FROM eleve_annees ea
         JOIN annees_scolaires a ON ea.annee_id = a.id
         LEFT JOIN classes c ON ea.classe_id = c.id
-        WHERE ea.eleve_id = ? AND (ea.school_id = ? OR ea.school_id IS NULL)
+        WHERE ea.eleve_id = ? AND ea.school_id = ?
         ORDER BY a.date_debut DESC, a.id DESC
       `).all(eleveId, schoolId) as any[];
 
@@ -28852,10 +29077,11 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
           SELECT COALESCE(SUM(montant), 0) as total_paye
           FROM paiements
           WHERE eleve_id = ? 
+            AND school_id = ?
             AND (annee_id = ? OR annee_concernee_id = ?)
             AND (type_paiement = 'Frais de scolarité' OR type_paiement = 'Arriérés de scolarité' OR type_paiement LIKE '%scolarité%' OR type_paiement LIKE '%Arriéré%')
             AND (status = 'Terminé' OR status = 'completed')
-        `).get(eleveId, year.id, year.id) as any;
+        `).get(eleveId, schoolId, year.id, year.id) as any;
 
         const totalPaye = Number(paymentsRow?.total_paye || 0);
         const fraisScolarite = Number(hist?.frais_scolarite || 0);
@@ -28925,14 +29151,21 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         ecole_provenance,
         parents_tuteurs
       } = req.body;
-      const schoolId = req.schoolId || 1;
+      const schoolId = req.schoolId;
       const yearId = annee_id || getActiveYearId(schoolId);
+
+      if (eleve_id) {
+        const ownedStudent = db.prepare("SELECT id FROM eleves WHERE id = ? AND school_id = ?").get(eleve_id, schoolId) as any;
+        if (!ownedStudent) {
+          return res.status(404).json({ error: "Élève introuvable dans votre établissement." });
+        }
+      }
 
       // Résoudre le libellé de l'année concernée si nécessaire
       let finalAnneeConcerneeId = annee_concernee_id ? parseInt(annee_concernee_id) : null;
       let finalAnneeConcerneeLibelle = annee_concernee_libelle || null;
       if (finalAnneeConcerneeId && !finalAnneeConcerneeLibelle) {
-        const yearRow = db.prepare("SELECT libelle FROM annees_scolaires WHERE id = ?").get(finalAnneeConcerneeId) as any;
+        const yearRow = db.prepare("SELECT libelle FROM annees_scolaires WHERE id = ? AND school_id = ?").get(finalAnneeConcerneeId, schoolId) as any;
         finalAnneeConcerneeLibelle = yearRow?.libelle || null;
       }
       
@@ -28971,26 +29204,26 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
 
       if (eleve_id && isArrieresPayment) {
         // 1. Déduction sur la fiche générale de l'élève
-        const curEl = db.prepare("SELECT arrieres_scolarite FROM eleves WHERE id = ?").get(eleve_id) as any;
+        const curEl = db.prepare("SELECT arrieres_scolarite FROM eleves WHERE id = ? AND school_id = ?").get(eleve_id, schoolId) as any;
         const currentStudentArr = Number(curEl?.arrieres_scolarite || 0);
         const newStudentArr = Math.max(0, currentStudentArr - Number(montant || 0));
-        db.prepare("UPDATE eleves SET arrieres_scolarite = ? WHERE id = ?").run(newStudentArr, eleve_id);
+        db.prepare("UPDATE eleves SET arrieres_scolarite = ? WHERE id = ? AND school_id = ?").run(newStudentArr, eleve_id, schoolId);
 
         // 2. Déduction dans eleve_annees pour l'année courante active
-        const curEa = db.prepare("SELECT arrieres_scolarite FROM eleve_annees WHERE eleve_id = ? AND annee_id = ?").get(eleve_id, yearId) as any;
+        const curEa = db.prepare("SELECT arrieres_scolarite FROM eleve_annees WHERE eleve_id = ? AND annee_id = ? AND school_id = ?").get(eleve_id, yearId, schoolId) as any;
         if (curEa) {
           const currentArr = Number(curEa?.arrieres_scolarite || 0);
           const newArr = Math.max(0, currentArr - Number(montant || 0));
-          db.prepare("UPDATE eleve_annees SET arrieres_scolarite = ? WHERE eleve_id = ? AND annee_id = ?").run(newArr, eleve_id, yearId);
+          db.prepare("UPDATE eleve_annees SET arrieres_scolarite = ? WHERE eleve_id = ? AND annee_id = ? AND school_id = ?").run(newArr, eleve_id, yearId, schoolId);
         }
 
         // 3. Déduction sur l'année antérieure concernée si spécifiée
         if (finalAnneeConcerneeId && finalAnneeConcerneeId !== yearId) {
-          const pastEa = db.prepare("SELECT arrieres_scolarite FROM eleve_annees WHERE eleve_id = ? AND annee_id = ?").get(eleve_id, finalAnneeConcerneeId) as any;
+          const pastEa = db.prepare("SELECT arrieres_scolarite FROM eleve_annees WHERE eleve_id = ? AND annee_id = ? AND school_id = ?").get(eleve_id, finalAnneeConcerneeId, schoolId) as any;
           if (pastEa) {
             const currentPastArr = Number(pastEa?.arrieres_scolarite || 0);
             const newPastArr = Math.max(0, currentPastArr - Number(montant || 0));
-            db.prepare("UPDATE eleve_annees SET arrieres_scolarite = ? WHERE eleve_id = ? AND annee_id = ?").run(newPastArr, eleve_id, finalAnneeConcerneeId);
+            db.prepare("UPDATE eleve_annees SET arrieres_scolarite = ? WHERE eleve_id = ? AND annee_id = ? AND school_id = ?").run(newPastArr, eleve_id, finalAnneeConcerneeId, schoolId);
           }
         }
       }
@@ -29003,19 +29236,19 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         let memberPhoto = photo;
 
         if (eleve_id) {
-          student = db.prepare("SELECT nom, prenom, photo, classe_id FROM eleves WHERE id = ?").get(eleve_id) as any;
+          student = db.prepare("SELECT nom, prenom, photo, classe_id FROM eleves WHERE id = ? AND school_id = ?").get(eleve_id, schoolId) as any;
           if (student) {
             studentName = `${student.nom || ''} ${student.prenom || ''}`.trim();
             if (!memberPhoto && student.photo) {
               memberPhoto = student.photo;
             }
             if (student.classe_id && !studentClass) {
-              const c = db.prepare("SELECT nom FROM classes WHERE id = ?").get(student.classe_id) as any;
+              const c = db.prepare("SELECT nom FROM classes WHERE id = ? AND school_id = ?").get(student.classe_id, schoolId) as any;
               studentClass = c?.nom || null;
             }
             if (photo && !student.photo) {
               try {
-                db.prepare("UPDATE eleves SET photo = ? WHERE id = ?").run(photo, eleve_id);
+                db.prepare("UPDATE eleves SET photo = ? WHERE id = ? AND school_id = ?").run(photo, eleve_id, schoolId);
               } catch (e) {}
             }
           }
@@ -29080,24 +29313,25 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
               montant_cotisation_paye = ?,
               montant_cotisation_du = ?,
               statut_paiement = ?
-            WHERE id = ?
+            WHERE id = ? AND school_id = ?
           `).run(
             memberPhoto || null,
             expDateStr,
             newPaidTotal,
             newDueTotal,
             newStatutPaye,
-            existing.id
+            existing.id,
+            schoolId
           );
         }
       }
 
-      const updatedEleve = eleve_id ? (db.prepare("SELECT * FROM eleves WHERE id = ?").get(eleve_id) as any) : null;
+      const updatedEleve = eleve_id ? (db.prepare("SELECT * FROM eleves WHERE id = ? AND school_id = ?").get(eleve_id, schoolId) as any) : null;
 
       // Automation event hook for payment confirmation
       try {
         if (updatedEleve && (updatedEleve.tel_parent || updatedEleve.email_parent)) {
-          const clsRow = updatedEleve.classe_id ? (db.prepare("SELECT nom, frais_scolarite, devise FROM classes WHERE id = ?").get(updatedEleve.classe_id) as any) : null;
+          const clsRow = updatedEleve.classe_id ? (db.prepare("SELECT nom, frais_scolarite, devise FROM classes WHERE id = ? AND school_id = ?").get(updatedEleve.classe_id, schoolId) as any) : null;
           const totalPaidRow = db.prepare(`
             SELECT COALESCE(SUM(montant), 0) as total
             FROM paiements
@@ -29162,7 +29396,10 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       FedaPay.setEnvironment(apiMode === 'live' ? 'live' : 'sandbox');
 
       const safeStudentName = student_name || "Élève";
-      const studentData = db.prepare("SELECT email_parent, telephone_parent FROM eleves WHERE id = ?").get(eleve_id) as any;
+      const studentData = db.prepare("SELECT id, email_parent, tel_parent FROM eleves WHERE id = ? AND school_id = ?").get(eleve_id, req.schoolId) as any;
+      if (!studentData) {
+        return res.status(404).json({ error: "Élève introuvable dans votre établissement." });
+      }
 
       const transaction = await Transaction.create({
         description: `${type_paiement} pour ${safeStudentName}`,
@@ -29174,7 +29411,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
           lastname: safeStudentName.split(' ').slice(1).join(' ') || 'Élève',
           email: studentData?.email_parent || 'parent@ecole.com',
           phone_number: {
-            number: studentData?.telephone_parent || '00000000',
+            number: studentData?.tel_parent || '00000000',
             country: 'BJ'
           }
         }
