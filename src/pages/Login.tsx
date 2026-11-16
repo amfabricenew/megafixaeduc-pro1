@@ -23,8 +23,7 @@ import {
   Crown,
   Copy,
   Globe,
-  Search,
-  FlaskConical
+  Search
 } from 'lucide-react';
 import { apiFetch } from '../utils/api';
 import toast from 'react-hot-toast';
@@ -65,41 +64,6 @@ export default function Login() {
   const [showUnauthorizedDomainModal, setShowUnauthorizedDomainModal] = useState(false);
   const [detectedHost, setDetectedHost] = useState('');
   const [domainCopied, setDomainCopied] = useState(false);
-
-  // Test School 1-Click Login State (only visible in development, hidden when deployed)
-  const isTestSchoolAvailable =
-    import.meta.env.DEV &&
-    typeof window !== 'undefined' &&
-    !window.location.hostname.startsWith('ais-pre-');
-  const [demoRole, setDemoRole] = useState<'admin' | 'direction' | 'enseignant' | 'secretariat' | 'comptable' | 'parent' | 'eleve'>('admin');
-  const [loggingTestSchool, setLoggingTestSchool] = useState(false);
-
-  const handleTestSchoolLogin = async (roleOverride?: string) => {
-    if (!isTestSchoolAvailable) return;
-    const selectedRole = roleOverride || demoRole;
-    setError(null);
-    setLoggingTestSchool(true);
-    try {
-      const response = await apiFetch('/api/auth/test-school-login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ role: selectedRole })
-      });
-      const data = await response.json();
-      if (!response.ok || !data.success || !data.token) {
-        throw new Error(data.error || "Impossible de se connecter à l'école test.");
-      }
-      toast.success(`Connexion École Test réussie (${data.user?.nom || selectedRole}) !`);
-      login(data.token, data.user);
-      navigate('/accueil');
-    } catch (err: any) {
-      const msg = err?.message || "Erreur lors de la connexion à l'école test.";
-      setError(msg);
-      toast.error(msg);
-    } finally {
-      setLoggingTestSchool(false);
-    }
-  };
 
   const handleActivateSubscriptionKey = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -909,50 +873,6 @@ export default function Login() {
                 </svg>
                 <span>Se connecter avec Google</span>
               </button>
-
-              {/* Option: Connexion directe École Test (uniquement en développement, masqué au déploiement) */}
-              {isTestSchoolAvailable && (
-                <div className="pt-2 p-3 rounded-2xl bg-slate-900/70 border border-cyan-500/30 space-y-2.5">
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-1.5 text-[11px] font-bold text-cyan-300 uppercase tracking-wider">
-                      <FlaskConical className="w-3.5 h-3.5 text-cyan-400" />
-                      <span>Environnement de Démonstration</span>
-                    </div>
-                    <select
-                      value={demoRole}
-                      onChange={(e) => setDemoRole(e.target.value as any)}
-                      disabled={loading || loggingTestSchool}
-                      aria-label="Profil de test"
-                      className="px-2.5 py-1 rounded-lg bg-slate-800 border border-slate-700 text-xs font-semibold text-slate-200 focus:outline-none focus:ring-1 focus:ring-cyan-500 cursor-pointer"
-                    >
-                      <option value="admin">Administrateur</option>
-                      <option value="direction">Direction</option>
-                      <option value="enseignant">Enseignant</option>
-                      <option value="secretariat">Secrétaire</option>
-                      <option value="comptable">Comptable</option>
-                      <option value="parent">Parent</option>
-                      <option value="eleve">Élève</option>
-                    </select>
-                  </div>
-                  <button
-                    type="button"
-                    id="btn-test-school-login"
-                    onClick={() => handleTestSchoolLogin()}
-                    disabled={loading || loggingTestSchool}
-                    className="w-full py-2.5 px-4 bg-gradient-to-r from-cyan-600 to-sky-600 hover:from-cyan-500 hover:to-sky-500 disabled:opacity-50 text-white font-bold text-xs rounded-xl transition-all shadow-md shadow-cyan-950/40 flex items-center justify-center gap-2 cursor-pointer"
-                  >
-                    {loggingTestSchool ? (
-                      <span className="inline-block animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent" />
-                    ) : (
-                      <>
-                        <FlaskConical size={15} />
-                        <span>Connexion École Test</span>
-                        <ArrowRight size={14} />
-                      </>
-                    )}
-                  </button>
-                </div>
-              )}
 
               {/* Option: Premier Accès avec Clé d'Abonnement */}
               <div className="pt-1">
