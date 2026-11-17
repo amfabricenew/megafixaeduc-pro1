@@ -1,5 +1,5 @@
 # Dockerfile pour MégafixaEduc Pro
-FROM node:20-slim AS builder
+FROM node:22-slim AS builder
 
 WORKDIR /app
 
@@ -7,7 +7,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y python3 make g++ gcc && rm -rf /var/lib/apt/lists/*
 
 COPY package*.json ./
-RUN npm ci
+RUN npm ci --omit=dev --no-audit --no-fund
 
 COPY . .
 
@@ -15,7 +15,7 @@ COPY . .
 RUN npm run build && mkdir -p /app/backups
 
 # Image de production finale ultra-légère
-FROM node:20-slim AS runner
+FROM node:22-slim AS runner
 
 WORKDIR /app
 
