@@ -213,7 +213,19 @@ export default function SchoolMessagingModal({
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`
         },
-        body: JSON.stringify({ testEmail })
+        body: JSON.stringify({
+          testEmail,
+          overrideConfig: smtpForm.custom_smtp_enabled ? {
+            email_provider: smtpForm.email_provider,
+            brevo_api_key: smtpForm.brevo_api_key,
+            smtp_host: smtpForm.smtp_host,
+            smtp_port: smtpForm.smtp_port,
+            smtp_user: smtpForm.smtp_user,
+            smtp_pass: smtpForm.smtp_pass,
+            smtp_secure: smtpForm.smtp_secure,
+            email_from: smtpForm.email_from
+          } : undefined
+        })
       });
 
       const data = await res.json();
@@ -542,7 +554,14 @@ export default function SchoolMessagingModal({
                               type="text"
                               placeholder="587"
                               value={smtpForm.smtp_port}
-                              onChange={(e) => setSmtpForm({ ...smtpForm, smtp_port: e.target.value })}
+                              onChange={(e) => {
+                                const portVal = e.target.value;
+                                setSmtpForm({
+                                  ...smtpForm,
+                                  smtp_port: portVal,
+                                  smtp_secure: portVal.trim() === '465' ? 'true' : 'false'
+                                });
+                              }}
                               className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-xs focus:ring-2 focus:ring-indigo-500/20 outline-none"
                             />
                           </div>

@@ -290,7 +290,19 @@ export default function SuperAdminSettings() {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${localStorage.getItem('token')}`
         },
-        body: JSON.stringify({ toEmail: testEmailAddress || undefined })
+        body: JSON.stringify({
+          toEmail: testEmailAddress || undefined,
+          overrideConfig: {
+            email_provider: settings.email_provider,
+            brevo_api_key: settings.brevo_api_key,
+            smtp_host: settings.smtp_host,
+            smtp_port: settings.smtp_port,
+            smtp_user: settings.smtp_user,
+            smtp_pass: settings.smtp_pass,
+            smtp_secure: settings.smtp_secure,
+            email_from: settings.email_from
+          }
+        })
       });
       const data = await response.json();
       if (response.ok && data.success) {
@@ -1157,7 +1169,7 @@ export default function SuperAdminSettings() {
                     <div className="space-y-1.5">
                       <label className="text-xs font-bold text-slate-600">Mode d'envoi Email</label>
                       <select
-                        value={settings.email_provider || 'smtp'}
+                        value={settings.email_provider || (settings.brevo_api_key && (!settings.smtp_host || settings.smtp_host === 'smtp.gmail.com') ? 'brevo_api' : 'smtp')}
                         onChange={(e) => handleChange('email_provider', e.target.value)}
                         className="w-full px-4 py-2.5 bg-white border border-emerald-200 rounded-xl text-sm focus:ring-2 focus:ring-emerald-500/20 font-medium"
                       >
@@ -1170,7 +1182,19 @@ export default function SuperAdminSettings() {
                       <input
                         type="password"
                         value={settings.brevo_api_key || ''}
-                        onChange={(e) => handleChange('brevo_api_key', e.target.value)}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setSettings((prev: any) => {
+                            const isDefaultHost = !prev.smtp_host || prev.smtp_host === 'smtp.gmail.com';
+                            return {
+                              ...prev,
+                              brevo_api_key: val,
+                              ...(val.trim().startsWith('xkeysib-') && isDefaultHost && (!prev.email_provider || prev.email_provider === 'smtp')
+                                ? { email_provider: 'brevo_api' }
+                                : {})
+                            };
+                          });
+                        }}
                         placeholder="xkeysib-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
                         className="w-full px-4 py-2.5 bg-white border border-emerald-200 rounded-xl text-sm font-mono focus:ring-2 focus:ring-emerald-500/20"
                       />
@@ -1178,7 +1202,7 @@ export default function SuperAdminSettings() {
                   </div>
                 </div>
 
-                {(settings.email_provider || 'smtp') === 'smtp' ? (
+                {(settings.email_provider || (settings.brevo_api_key && (!settings.smtp_host || settings.smtp_host === 'smtp.gmail.com') ? 'brevo_api' : 'smtp')) === 'smtp' ? (
                   <>
                     <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200/60 text-xs text-slate-600 space-y-1">
                       <p className="font-semibold text-slate-800">💡 Astuce Brevo Relais SMTP / Gmail :</p>
@@ -1203,7 +1227,14 @@ export default function SuperAdminSettings() {
                         <input 
                           type="text" 
                           value={settings.smtp_port || '587'} 
-                          onChange={(e) => handleChange('smtp_port', e.target.value)}
+                          onChange={(e) => {
+                            const portVal = e.target.value;
+                            setSettings((prev: any) => ({
+                              ...prev,
+                              smtp_port: portVal,
+                              smtp_secure: portVal.trim() === '465' ? 'true' : 'false'
+                            }));
+                          }}
                           placeholder="587"
                           className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 font-medium" 
                         />

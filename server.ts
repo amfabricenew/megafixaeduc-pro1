@@ -15,8 +15,14 @@ import Database from "better-sqlite3";
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
+import dns from "dns";
 import zlib from "zlib";
 import { fileURLToPath } from "url";
+
+// Force IPv4 resolution first to avoid ENETUNREACH on IPv6-disabled containers (Cloud Run / Render / Docker)
+try {
+  dns.setDefaultResultOrder('ipv4first');
+} catch {}
 import bcrypt from "bcryptjs";
 import XLSX from "xlsx";
 import jwt from "jsonwebtoken";
@@ -2218,12 +2224,12 @@ async function initializeDatabase() {
     { key: 'smtp_secure', value: 'true' },
     { key: 'smtp_user', value: 'megafixaservices01@gmail.com' },
     { key: 'smtp_pass', value: 'abeyjblqzjjybsif' },
-    { key: 'email_from', value: '"MégafixaEduc Pro" <megafixaservices01@gmail.com>' }
+    { key: 'email_from', value: '"MégafixaEduc Pro" <megafixaservices01@gmail.com>' },
+    { key: 'email_provider', value: 'smtp' }
   ];
 
   const checkSetting = db.prepare("SELECT count(*) as count FROM super_admin_settings WHERE key = ?");
   const insertSetting = db.prepare("INSERT INTO super_admin_settings (key, value) VALUES (?, ?)");
-  const upsertSmtp = db.prepare("INSERT OR REPLACE INTO super_admin_settings (key, value) VALUES (?, ?)");
 
   seedSettings.forEach(s => {
     try {
@@ -2235,16 +2241,6 @@ async function initializeDatabase() {
       console.warn(`Could not seed setting ${s.key}:`, e);
     }
   });
-
-  // Always ensure certified Gmail SMTP credentials are ready for real email dispatch
-  try {
-    upsertSmtp.run('smtp_host', 'smtp.gmail.com');
-    upsertSmtp.run('smtp_port', '465');
-    upsertSmtp.run('smtp_secure', 'true');
-    upsertSmtp.run('smtp_user', 'megafixaservices01@gmail.com');
-    upsertSmtp.run('smtp_pass', 'abeyjblqzjjybsif');
-    upsertSmtp.run('email_from', '"MégafixaEduc Pro" <megafixaservices01@gmail.com>');
-  } catch (e) {}
 
   db.exec(`
   CREATE TABLE IF NOT EXISTS annees_scolaires (
@@ -4757,7 +4753,16 @@ function parseEmailSender(fromHeader: string, fallbackUser: string) {
   return { name: 'MégafixaEduc Pro', email: (fallbackUser || 'noreply@megafixaeduc.com').trim() };
 }
 
-async function getSmtpConfig(schoolId?: number) {
+async function getSmtpConfig(schoolId?: number, overrideConfig?: Partial<{
+  email_provider: string;
+  brevo_api_key: string;
+  smtp_host: string;
+  smtp_port: string;
+  smtp_user: string;
+  smtp_pass: string;
+  smtp_secure: string;
+  email_from: string;
+}>) {
   let dbProvider = '';
   let dbBrevoApiKey = '';
   let dbHost = '';
@@ -4808,14 +4813,57 @@ async function getSmtpConfig(schoolId?: number) {
     } catch (err) {}
   }
 
+  // Apply temporary test overrides (e.g. unsaved values in admin UI) while preserving saved secrets if left blank
+  if (overrideConfig && typeof overrideConfig === 'object') {
+    if (overrideConfig.email_provider !== undefined && String(overrideConfig.email_provider).trim() !== '') {
+      dbProvider = String(overrideConfig.email_provider).trim();
+    }
+    if (overrideConfig.brevo_api_key !== undefined && String(overrideConfig.brevo_api_key).trim() !== '') {
+      dbBrevoApiKey = String(overrideConfig.brevo_api_key).trim();
+    }
+    if (overrideConfig.smtp_host !== undefined && String(overrideConfig.smtp_host).trim() !== '') {
+      dbHost = String(overrideConfig.smtp_host).trim();
+    }
+    if (overrideConfig.smtp_port !== undefined && String(overrideConfig.smtp_port).trim() !== '') {
+      dbPort = String(overrideConfig.smtp_port).trim();
+    }
+    if (overrideConfig.smtp_user !== undefined && String(overrideConfig.smtp_user).trim() !== '') {
+      dbUser = String(overrideConfig.smtp_user).trim();
+    }
+    if (overrideConfig.smtp_pass !== undefined && String(overrideConfig.smtp_pass).trim() !== '') {
+      dbPass = String(overrideConfig.smtp_pass).trim();
+    }
+    if (overrideConfig.smtp_secure !== undefined && String(overrideConfig.smtp_secure).trim() !== '') {
+      dbSecure = String(overrideConfig.smtp_secure).trim();
+    }
+    if (overrideConfig.email_from !== undefined && String(overrideConfig.email_from).trim() !== '') {
+      dbFrom = String(overrideConfig.email_from).trim();
+    }
+  }
+
   const host = (dbHost || process.env.SMTP_HOST || 'smtp.gmail.com').trim();
-  const port = parseInt(dbPort || process.env.SMTP_PORT || (host.includes('gmail') ? '465' : '587'), 10);
-  const secure = dbSecure ? dbSecure === 'true' : (port === 465 || process.env.SMTP_SECURE === 'true');
+  const isGmailHost = host.toLowerCase().includes('gmail');
+  const rawPort = (dbPort || process.env.SMTP_PORT || (isGmailHost ? '465' : '587')).trim();
+  const port = parseInt(rawPort, 10) || (isGmailHost ? 465 : 587);
+  // Enforce standard SMTP TLS rules: 465 => implicit SSL/TLS (true); 587/25/2525 => STARTTLS (false)
+  const secure = port === 465
+    ? true
+    : ((port === 587 || port === 25 || port === 2525)
+        ? false
+        : (dbSecure ? dbSecure === 'true' : process.env.SMTP_SECURE === 'true'));
   const user = (dbUser || process.env.SMTP_USER || 'megafixaservices01@gmail.com').trim();
   const pass = (dbPass || process.env.SMTP_PASS || 'abeyjblqzjjybsif').trim();
   const from = (dbFrom || process.env.EMAIL_FROM || `"MégafixaEduc Pro" <${user}>`).trim();
   const brevoApiKey = (dbBrevoApiKey || process.env.BREVO_API_KEY || '').trim();
-  const provider = (dbProvider || (host === 'api.brevo.com' ? 'brevo_api' : 'smtp')).trim();
+
+  const isSeededGmailDefault = host === 'smtp.gmail.com' && user === 'megafixaservices01@gmail.com' && !process.env.SMTP_HOST;
+  const shouldAutoPreferBrevoApi = Boolean(brevoApiKey) && (
+    dbProvider === 'brevo_api' ||
+    host === 'api.brevo.com' ||
+    !dbProvider ||
+    (dbProvider === 'smtp' && isSeededGmailDefault)
+  );
+  const provider = (shouldAutoPreferBrevoApi ? 'brevo_api' : (dbProvider || 'smtp')).trim();
 
   return { provider, brevoApiKey, host, port, secure, user, pass, from, isCustom };
 }
@@ -4845,9 +4893,9 @@ async function getGlobalSmsConfig() {
   return { provider, apiKey, authToken, senderId, brevoApiKey };
 }
 
-async function createMailTransporter(schoolId?: number) {
+async function createMailTransporter(schoolId?: number, preloadedCfg?: Awaited<ReturnType<typeof getSmtpConfig>>) {
   const nodemailer = await import('nodemailer');
-  const cfg = await getSmtpConfig(schoolId);
+  const cfg = preloadedCfg || await getSmtpConfig(schoolId);
 
   if (!cfg.user || !cfg.pass || !isValidSmtpHost(cfg.host)) {
     if (cfg.user && cfg.pass && !isValidSmtpHost(cfg.host)) {
@@ -4862,6 +4910,7 @@ async function createMailTransporter(schoolId?: number) {
     host: cfg.host,
     port: cfg.port,
     secure: cfg.secure,
+    family: 4, // Force IPv4 to prevent connect ENETUNREACH ::0 on IPv6-disabled runtimes
     auth: { user: cfg.user, pass: cleanPass },
     connectionTimeout: 15000,
     greetingTimeout: 15000,
@@ -4869,7 +4918,7 @@ async function createMailTransporter(schoolId?: number) {
     tls: {
       rejectUnauthorized: false
     }
-  });
+  } as any);
 }
 
 interface SendEmailOptions {
@@ -4879,6 +4928,16 @@ interface SendEmailOptions {
   html?: string;
   otp?: string;
   schoolId?: number;
+  overrideConfig?: Partial<{
+    email_provider: string;
+    brevo_api_key: string;
+    smtp_host: string;
+    smtp_port: string;
+    smtp_user: string;
+    smtp_pass: string;
+    smtp_secure: string;
+    email_from: string;
+  }>;
   attachments?: Array<{
     filename: string;
     content: Buffer | string;
@@ -5144,16 +5203,80 @@ async function sendWhatsAppSimulation(options: { to: string, message: string, re
   return { success: result.success, simulated: result.simulated };
 }
 
+async function sendViaBrevoHttpApi(
+  cfg: Awaited<ReturnType<typeof getSmtpConfig>>,
+  recipientArray: string[],
+  recipientStr: string,
+  subject: string,
+  text: string,
+  formattedHtml: string,
+  attachments?: SendEmailOptions['attachments']
+): Promise<SendEmailResult> {
+  if (!cfg.brevoApiKey) {
+    return { success: false, simulated: false, isCustom: cfg.isCustom, error: "Clé API Brevo manquante (ex: xkeysib-...)." };
+  }
+
+  const senderObj = parseEmailSender(cfg.from, cfg.user);
+  const brevoPayload: any = {
+    sender: senderObj,
+    to: recipientArray.map(email => ({ email })),
+    subject,
+    htmlContent: formattedHtml,
+    textContent: text
+  };
+
+  if (attachments && attachments.length > 0) {
+    brevoPayload.attachment = attachments.map(att => ({
+      name: att.filename,
+      content: Buffer.isBuffer(att.content)
+        ? att.content.toString('base64')
+        : Buffer.from(String(att.content)).toString('base64')
+    }));
+  }
+
+  try {
+    const brevoRes = await fetch('https://api.brevo.com/v3/smtp/email', {
+      method: 'POST',
+      headers: {
+        'api-key': cfg.brevoApiKey,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      },
+      body: JSON.stringify(brevoPayload),
+      signal: AbortSignal.timeout(15000)
+    });
+
+    if (brevoRes.ok) {
+      const resJson = await brevoRes.json().catch(() => ({}));
+      console.log(`[BREVO EMAIL SUCCESS] Sent to ${recipientStr} (MessageId: ${resJson?.messageId || 'ok'}) [Mode: ${cfg.isCustom ? 'Custom' : 'Platform'}]`);
+      return { success: true, simulated: false, isCustom: cfg.isCustom };
+    } else {
+      const errData = await brevoRes.json().catch(() => ({}));
+      let errMsg = errData?.message || `Erreur API Brevo Email (HTTP ${brevoRes.status})`;
+      if (typeof errMsg === 'string' && errMsg.toLowerCase().includes('sender')) {
+        errMsg = `${errMsg} — Vérifiez que l'adresse expéditeur (${senderObj.email}) est bien validée dans votre compte Brevo (Expéditeurs & IP).`;
+      } else if (brevoRes.status === 401) {
+        errMsg = "Clé API Brevo (xkeysib-...) invalide ou refusée par Brevo.";
+      }
+      console.warn(`[BREVO EMAIL ERROR] ${errMsg}`);
+      return { success: false, simulated: false, isCustom: cfg.isCustom, error: errMsg };
+    }
+  } catch (err: any) {
+    const errMsg = `Impossible de joindre l'API Brevo (https://api.brevo.com) : ${err?.message || err}`;
+    console.warn(`[BREVO EMAIL NETWORK ERROR] ${errMsg}`);
+    return { success: false, simulated: false, isCustom: cfg.isCustom, error: errMsg };
+  }
+}
+
 async function sendMailWithFallback(options: SendEmailOptions): Promise<SendEmailResult> {
-  const { to, subject, text, html, otp, schoolId, attachments } = options;
+  const { to, subject, text, html, otp, schoolId, overrideConfig, attachments } = options;
   const recipientArray = (Array.isArray(to) ? to : String(to || '').split(','))
     .map(e => e.trim())
     .filter(Boolean);
   const recipientStr = recipientArray.join(", ");
 
-  try {
-    const cfg = await getSmtpConfig(schoolId);
-    const formattedHtml = html || `
+  const cfg = await getSmtpConfig(schoolId, overrideConfig);
+  const formattedHtml = html || `
       <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 16px;">
         <div style="border-bottom: 2px solid #013efb; padding-bottom: 12px; margin-bottom: 20px;">
           <h2 style="color: #0f172a; margin: 0; font-size: 20px;">Mégafixa<span style="color: #013efb;">Educ</span> <span style="color: #fb5c03;">Pro</span></h2>
@@ -5175,56 +5298,19 @@ async function sendMailWithFallback(options: SendEmailOptions): Promise<SendEmai
       </div>
     `;
 
-    // Option A: Brevo Transactional Email HTTP API v3
+  try {
+    // Option A: Brevo Transactional Email HTTP API v3 (HTTPS port 443 - immune to cloud SMTP port blocks & IPv6 routing issues)
     if (cfg.provider === 'brevo_api' || cfg.host === 'api.brevo.com') {
-      if (!cfg.brevoApiKey) {
-        return { success: false, simulated: true, isCustom: cfg.isCustom, error: "Clé API Brevo manquante (ex: xkeysib-...)." };
-      }
-
-      const senderObj = parseEmailSender(cfg.from, cfg.user);
-      const brevoPayload: any = {
-        sender: senderObj,
-        to: recipientArray.map(email => ({ email })),
-        subject,
-        htmlContent: formattedHtml,
-        textContent: text
-      };
-
-      if (attachments && attachments.length > 0) {
-        brevoPayload.attachment = attachments.map(att => ({
-          name: att.filename,
-          content: Buffer.isBuffer(att.content)
-            ? att.content.toString('base64')
-            : Buffer.from(String(att.content)).toString('base64')
-        }));
-      }
-
-      const brevoRes = await fetch('https://api.brevo.com/v3/smtp/email', {
-        method: 'POST',
-        headers: {
-          'api-key': cfg.brevoApiKey,
-          'Content-Type': 'application/json',
-          'Accept': 'application/json'
-        },
-        body: JSON.stringify(brevoPayload)
-      });
-
-      if (brevoRes.ok) {
-        const resJson = await brevoRes.json().catch(() => ({}));
-        console.log(`[BREVO EMAIL SUCCESS] Sent to ${recipientStr} (MessageId: ${resJson?.messageId || 'ok'}) [Mode: ${cfg.isCustom ? 'Custom' : 'Platform'}]`);
-        return { success: true, simulated: false, isCustom: cfg.isCustom };
-      } else {
-        const errData = await brevoRes.json().catch(() => ({}));
-        const errMsg = errData?.message || `Erreur API Brevo Email (HTTP ${brevoRes.status})`;
-        console.warn(`[BREVO EMAIL ERROR] ${errMsg}`);
-        return { success: false, simulated: false, isCustom: cfg.isCustom, error: errMsg };
-      }
+      return await sendViaBrevoHttpApi(cfg, recipientArray, recipientStr, subject, text, formattedHtml, attachments);
     }
 
-    // Option B: Standard SMTP (supports Gmail, Brevo SMTP Relay smtp-relay.brevo.com, custom SMTP)
-    const transporter = await createMailTransporter(schoolId);
+    // Option B: Standard SMTP (supports Brevo SMTP Relay smtp-relay.brevo.com:587, Gmail, custom SMTP) over IPv4
+    const transporter = await createMailTransporter(schoolId, cfg);
 
     if (!transporter) {
+      if (cfg.brevoApiKey) {
+        return await sendViaBrevoHttpApi(cfg, recipientArray, recipientStr, subject, text, formattedHtml, attachments);
+      }
       console.log(`
       --------------------------------------------------
       [EMAIL SIMULATION - NO VALID SMTP CREDENTIALS]
@@ -5248,19 +5334,30 @@ async function sendMailWithFallback(options: SendEmailOptions): Promise<SendEmai
       attachments: attachments && attachments.length > 0 ? attachments : undefined
     });
 
-    console.log(`[SMTP SUCCESS] Real email successfully sent to ${recipientStr} (ID: ${info.messageId}) [Mode: ${cfg.isCustom ? 'Custom' : 'Platform'}]`);
+    console.log(`[SMTP SUCCESS] Real email successfully sent to ${recipientStr} (ID: ${info.messageId}) [Mode: ${cfg.isCustom ? 'Custom' : 'Platform'}, Host: ${cfg.host}:${cfg.port}]`);
     return { success: true, simulated: false, isCustom: cfg.isCustom };
   } catch (error: any) {
-    console.warn(`[SMTP Warning] Could not send email via SMTP to ${recipientStr}: ${error.message}`);
-    
-    let errorMessage = error.message;
-    if (errorMessage && errorMessage.includes('535-5.7.8')) {
+    console.warn(`[SMTP Warning] Could not send email via SMTP (${cfg.host}:${cfg.port}) to ${recipientStr}: ${error.message}`);
+
+    // Automatic resilient fallback to Brevo HTTP API v3 if an API key is configured (e.g. cloud container blocks port 465/587 or IPv6 unreachable)
+    if (cfg.brevoApiKey) {
+      console.log(`[SMTP->BREVO API FALLBACK] Retrying email delivery via Brevo HTTP API v3 (HTTPS 443)...`);
+      const fallbackRes = await sendViaBrevoHttpApi(cfg, recipientArray, recipientStr, subject, text, formattedHtml, attachments);
+      if (fallbackRes.success) {
+        return fallbackRes;
+      }
+    }
+
+    let errorMessage = error.message || "Erreur d'envoi SMTP";
+    if (errorMessage.includes('535-5.7.8')) {
       errorMessage = "Erreur d'authentification SMTP : Identifiants incorrects ou mot de passe d'application requis.";
-    } else if (errorMessage && (errorMessage.includes('getaddrinfo') || errorMessage.includes('ENOTFOUND') || errorMessage.includes('EAI_AGAIN'))) {
+    } else if (errorMessage.includes('ENETUNREACH') || errorMessage.includes('ETIMEDOUT') || errorMessage.includes('ECONNREFUSED')) {
+      errorMessage = `Connexion SMTP (${cfg.host}:${cfg.port}) bloquée ou inaccessible depuis le serveur (${errorMessage}). Utilisez le mode "Brevo API Transactionnelle v3 (HTTPS)" avec votre clé API xkeysib-... pour contourner les blocages réseau SMTP.`;
+    } else if (errorMessage.includes('getaddrinfo') || errorMessage.includes('ENOTFOUND') || errorMessage.includes('EAI_AGAIN')) {
       errorMessage = "Hôte SMTP introuvable ou erreur de réseau.";
     }
 
-    return { success: false, simulated: true, error: errorMessage };
+    return { success: false, simulated: false, isCustom: cfg.isCustom, error: errorMessage };
   }
 }
 
@@ -31572,15 +31669,16 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
 
   app.post("/api/super-admin/test-email", authenticateToken, requireSuperAdmin, async (req: any, res) => {
     try {
-      const { toEmail } = req.body;
+      const { toEmail, overrideConfig } = req.body;
       const target = toEmail || req.user?.email || 'admin@megafixa.com';
       const result = await sendMailWithFallback({
         to: target,
+        overrideConfig,
         subject: "✅ Test de configuration d'envoi d'email - MégafixaEduc Pro",
-        text: `Bonjour,\n\nCeci est un email de confirmation confirmant que le serveur d'envoi SMTP / Gmail fonctionne avec succès sur MégafixaEduc Pro.\n\nDate : ${new Date().toLocaleString('fr-FR')}\n\nL'équipe MégafixaEduc`,
+        text: `Bonjour,\n\nCeci est un email de confirmation confirmant que le service d'envoi d'email (Brevo / SMTP) fonctionne avec succès sur MégafixaEduc Pro.\n\nDate : ${new Date().toLocaleString('fr-FR')}\n\nL'équipe MégafixaEduc`,
         html: `<div style="font-family:sans-serif;padding:24px;border-radius:16px;background:#f8fafc;border:1px solid #e2e8f0;max-width:550px;margin:auto;">
           <h2 style="color:#0f172a;margin-top:0;">Configuration Email Opérationnelle ✅</h2>
-          <p style="color:#334155;font-size:14px;line-height:1.6;">Votre serveur d'envoi d'emails (SMTP / Gmail) est correctement configuré et communique activement avec MégafixaEduc Pro.</p>
+          <p style="color:#334155;font-size:14px;line-height:1.6;">Votre passerelle d'envoi d'emails (Brevo / SMTP) est correctement configurée et communique activement avec MégafixaEduc Pro.</p>
           <div style="background:#ffffff;border:1px solid #cbd5e1;padding:12px 16px;border-radius:8px;font-size:12px;color:#64748b;margin:16px 0;">
             <strong>Destinataire :</strong> ${target}<br/>
             <strong>Date :</strong> ${new Date().toLocaleString('fr-FR')}
@@ -31589,18 +31687,19 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         </div>`
       });
 
+      if (!result.success) {
+        return res.status(400).json({
+          success: false,
+          simulated: result.simulated,
+          error: result.error || "Échec de l'envoi de l'email de test."
+        });
+      }
+
       if (result.simulated) {
-        if (result.error) {
-          return res.status(400).json({ 
-            success: false, 
-            simulated: true, 
-            error: result.error 
-          });
-        }
         return res.json({ 
           success: true, 
           simulated: true, 
-          message: "Mode simulation : Aucun serveur SMTP réel (Gmail/Host) n'est actif. Enregistrez vos identifiants SMTP pour l'envoi réel." 
+          message: "Mode simulation : Aucun serveur SMTP réel (Brevo/Gmail/Host) n'est actif. Enregistrez vos identifiants pour l'envoi réel." 
         });
       }
 
@@ -32045,22 +32144,23 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       const school = db.prepare("SELECT id, nom, email FROM school_info WHERE id = ?").get(schoolId) as any;
       if (!school) return res.status(404).json({ error: "Établissement introuvable." });
 
-      const { testEmail } = req.body;
+      const { testEmail, overrideConfig } = req.body;
       const target = testEmail || school.email || req.user?.email || 'admin@megafixa.com';
 
-      const smtpConfig = await getSmtpConfig(schoolId);
+      const smtpConfig = await getSmtpConfig(schoolId, overrideConfig);
 
       const result = await sendMailWithFallback({
         to: target,
         schoolId,
+        overrideConfig,
         subject: `✅ Test Passerelle Email - ${school.nom}`,
-        text: `Bonjour,\n\nCeci est un test de passerelle SMTP pour l'établissement "${school.nom}".\n\nMode utilisé : ${smtpConfig.isCustom ? "Identifiants SMTP personnalisés de l'école" : "Valeurs par défaut globales (Plateforme)"}\nServeur SMTP : ${smtpConfig.host}:${smtpConfig.port}\nExpéditeur : ${smtpConfig.from}\nDate : ${new Date().toLocaleString('fr-FR')}\n\nTout est opérationnel !`,
+        text: `Bonjour,\n\nCeci est un test de passerelle email pour l'établissement "${school.nom}".\n\nMode utilisé : ${smtpConfig.isCustom ? "Identifiants personnalisés de l'école" : "Valeurs par défaut globales (Plateforme)"}\nFournisseur : ${smtpConfig.provider === 'brevo_api' ? 'Brevo API v3 (HTTPS)' : `${smtpConfig.host}:${smtpConfig.port}`}\nExpéditeur : ${smtpConfig.from}\nDate : ${new Date().toLocaleString('fr-FR')}\n\nTout est opérationnel !`,
         html: `<div style="font-family:sans-serif;padding:24px;border-radius:16px;background:#f8fafc;border:1px solid #e2e8f0;max-width:550px;margin:auto;">
           <h2 style="color:#0f172a;margin-top:0;">Test Passerelle Email Opérationnel ✅</h2>
           <p style="color:#334155;font-size:14px;line-height:1.6;">Le test d'envoi d'email pour l'établissement <strong>${school.nom}</strong> a abouti avec succès.</p>
           <div style="background:#ffffff;border:1px solid #cbd5e1;padding:12px 16px;border-radius:8px;font-size:12px;color:#64748b;margin:16px 0;">
-            <strong>Mode d'envoi :</strong> ${smtpConfig.isCustom ? "⚙️ Identifiants SMTP personnalisés de l'école" : "🌐 Valeurs par défaut globales de la plateforme"}<br/>
-            <strong>Serveur :</strong> ${smtpConfig.host}:${smtpConfig.port}<br/>
+            <strong>Mode d'envoi :</strong> ${smtpConfig.isCustom ? "⚙️ Identifiants personnalisés de l'école" : "🌐 Valeurs par défaut globales de la plateforme"}<br/>
+            <strong>Passerelle :</strong> ${smtpConfig.provider === 'brevo_api' ? 'Brevo API Transactionnelle v3 (HTTPS)' : `${smtpConfig.host}:${smtpConfig.port}`}<br/>
             <strong>Expéditeur :</strong> ${smtpConfig.from}<br/>
             <strong>Destinataire :</strong> ${target}<br/>
             <strong>Date :</strong> ${new Date().toLocaleString('fr-FR')}
@@ -32069,10 +32169,16 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         </div>`
       });
 
+      if (!result.success) {
+        return res.status(400).json({
+          success: false,
+          simulated: result.simulated,
+          isCustom: smtpConfig.isCustom,
+          error: result.error || "Échec du test d'envoi d'email."
+        });
+      }
+
       if (result.simulated) {
-        if (result.error) {
-          return res.status(400).json({ success: false, simulated: true, isCustom: smtpConfig.isCustom, error: result.error });
-        }
         return res.json({
           success: true,
           simulated: true,
@@ -32085,7 +32191,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         success: true,
         simulated: false,
         isCustom: smtpConfig.isCustom,
-        message: `Email réel délivré avec succès à ${target} ! (${smtpConfig.isCustom ? "Serveur de l'école" : "Serveur par défaut plateforme"})`
+        message: `Email réel délivré avec succès à ${target} ! (${smtpConfig.isCustom ? "Passerelle de l'école" : "Passerelle par défaut plateforme"})`
       });
     } catch (err: any) {
       console.error("School test SMTP error:", err);
