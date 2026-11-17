@@ -41,8 +41,13 @@ service cloud.firestore {
       return get(userDocPath()).data;
     }
 
+    function isBootstrappedSuperAdmin() {
+      return isSignedIn()
+        && request.auth.token.email in ['ayedeguef@gmail.com', 'amfabricenew@gmail.com'];
+    }
+
     function isSuperAdmin() {
-      return hasUserProfile() && userProfile().role == 'super_admin';
+      return isBootstrappedSuperAdmin() || (hasUserProfile() && userProfile().role == 'super_admin');
     }
 
     function isSameSchool(schoolId) {
@@ -63,6 +68,14 @@ service cloud.firestore {
 
     function unchangedSchoolId() {
       return existing().school_id == incoming().school_id;
+    }
+
+    function isValidBackupDoc(data) {
+      return data is map
+        && data.keys().hasAll(['last_updated'])
+        && data.last_updated is string
+        && data.last_updated.size() > 0
+        && data.last_updated.size() <= 64;
     }
 
     function isValidSchoolDoc(data) {
@@ -96,7 +109,7 @@ service cloud.firestore {
     match /backups/{checkpointId} {
       allow get: if isValidId(checkpointId) && isSuperAdmin();
       allow list: if false;
-      allow create, update: if isValidId(checkpointId) && isSuperAdmin() && incoming() is map;
+      allow create, update: if isValidId(checkpointId) && isSuperAdmin() && isValidBackupDoc(incoming());
       allow delete: if isValidId(checkpointId) && isSuperAdmin();
     }
 

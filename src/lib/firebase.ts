@@ -105,21 +105,27 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
   return errInfo;
 }
 
-// Test Firestore connection gracefully if invoked
+// Test Firestore connection gracefully on boot using getDocFromServer
 export async function testFirestoreConnection() {
   try {
     if (typeof navigator !== 'undefined' && !navigator.onLine) {
       return;
     }
-    const timeout = new Promise((_, reject) => 
-      setTimeout(() => reject(new Error('Connection check timeout')), 2000)
+    const timeout = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('Connection check timeout')), 3000)
     );
     await Promise.race([
-      getDoc(doc(db, 'test', 'connection')),
+      getDocFromServer(doc(db, 'test', 'connection')),
       timeout
     ]);
   } catch (error: any) {
-    // Softly handle offline state without raising uncaught errors
+    if (error instanceof Error && error.message.includes('the client is offline')) {
+      console.error("Please check your Firebase configuration.");
+    }
   }
+}
+
+if (typeof window !== 'undefined') {
+  testFirestoreConnection().catch(() => {});
 }
 

@@ -33,6 +33,7 @@ import {
 import toast from 'react-hot-toast';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
+import { syncCloudVaultWithFirestore } from '../../utils/cloudVaultSync';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -129,6 +130,13 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
 
   useEffect(() => {
     fetchData();
+    const handleCloudReconciled = () => {
+      fetchData();
+    };
+    window.addEventListener('megafixa-cloud-reconciled', handleCloudReconciled);
+    return () => {
+      window.removeEventListener('megafixa-cloud-reconciled', handleCloudReconciled);
+    };
   }, []);
 
   const copyToClipboard = (text: string, label: string) => {
@@ -159,6 +167,7 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
       setNotifyingRequest(null);
       setNoticeMotif('');
       fetchData();
+      syncCloudVaultWithFirestore().catch(() => {});
     } catch (err: any) {
       toast.error(err.message);
     } finally {
@@ -185,6 +194,7 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
         setResolvingComplaint(null);
         setComplaintResponse('');
         fetchData();
+        syncCloudVaultWithFirestore().catch(() => {});
       }
     } catch (err) {
       toast.error("Erreur de traitement.");
@@ -241,6 +251,7 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
       setApprovedCredentialsResult(data.credentials);
       fetchData();
       if (onSchoolApproved) onSchoolApproved();
+      syncCloudVaultWithFirestore().catch(() => {});
     } catch (err: any) {
       toast.error(err.message || "Erreur lors de la validation");
     } finally {
@@ -272,6 +283,7 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
       setRejectingRequest(null);
       setRejectReason('');
       fetchData();
+      syncCloudVaultWithFirestore().catch(() => {});
     } catch (err: any) {
       toast.error(err.message || "Erreur lors du rejet");
     } finally {
@@ -293,6 +305,7 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
         toast.success("Dossier de demande supprimé.");
         setDeletingRequestId(null);
         fetchData();
+        syncCloudVaultWithFirestore({ allowShrink: true }).catch(() => {});
       }
     } catch (err) {
       toast.error("Erreur de suppression.");

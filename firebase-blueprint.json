@@ -2,10 +2,16 @@
   "entities": {
     "CloudSnapshot": {
       "title": "Cloud Snapshot",
-      "description": "Stores server-managed database backups restricted to super_admin.",
+      "description": "Stores server-managed database backups and account/request vaults restricted to super_admin.",
       "type": "object",
       "properties": {
         "sql_dump": { "type": "string", "description": "Serialized backup payload." },
+        "vault_json": { "type": "string", "description": "Serialized school accounts and requests registry payload." },
+        "school_count": { "type": "integer" },
+        "non_default_school_count": { "type": "integer" },
+        "non_test_user_count": { "type": "integer" },
+        "request_count": { "type": "integer" },
+        "build_id": { "type": "string" },
         "last_updated": { "type": "string", "format": "date-time" },
         "version": { "type": "integer" }
       },

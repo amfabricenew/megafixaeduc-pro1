@@ -38,6 +38,9 @@ import { useAuth } from '../../contexts/AuthContext';
 import { toggleAIAssistant } from '../AIAssistantWidget';
 import logo from '../../LOGO_MEGFIXAEDEUC_PRO.png';
 import { LanguageSelector } from '../LanguageSelector';
+import { onAuthStateChanged } from 'firebase/auth';
+import { auth } from '../../lib/firebase';
+import { syncCloudVaultWithFirestore } from '../../utils/cloudVaultSync';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -237,6 +240,35 @@ export default function SuperAdminLayout() {
     }, 20000);
     return () => clearInterval(interval);
   }, [fetchNotifications]);
+
+  // Mirror and reconcile persisted requests/accounts vault with Firestore when Super Admin has an active Firebase session
+  React.useEffect(() => {
+    if (user?.role !== 'super_admin') return;
+    let active = true;
+
+    const runCloudSync = () => {
+      syncCloudVaultWithFirestore()
+        .then((res) => {
+          if (!active || !res) return;
+          if (res.reconciled > 0) {
+            fetchNotifications();
+            window.dispatchEvent(new CustomEvent('megafixa-cloud-reconciled', { detail: res }));
+          }
+        })
+        .catch(() => {});
+    };
+
+    const unsubscribe = onAuthStateChanged(auth, (fbUser) => {
+      if (active && fbUser?.emailVerified) {
+        runCloudSync();
+      }
+    });
+
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [user?.role, fetchNotifications]);
 
   const markNotificationsAsRead = async (id?: number) => {
     try {

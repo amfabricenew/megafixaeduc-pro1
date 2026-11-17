@@ -12,7 +12,7 @@ RUN npm ci
 COPY . .
 
 # Construction du frontend Vite et du backend Node.js
-RUN npm run build
+RUN npm run build && mkdir -p /app/backups
 
 # Image de production finale ultra-légère
 FROM node:20-slim AS runner
@@ -30,9 +30,7 @@ COPY --from=builder /app/package*.json ./
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/.env.example ./.env.example
-
-# Création du répertoire de données et de sauvegardes
-RUN mkdir -p /app/backups
+COPY --from=builder /app/backups ./backups
 
 EXPOSE 3000
 
