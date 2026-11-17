@@ -1633,13 +1633,13 @@ function ensureDefaultBuildingsAndRooms(schoolId: number) {
       const batA = db.prepare(`
         INSERT INTO batiments (nom, code, description, nombre_etages, couleur, school_id)
         VALUES (?, ?, ?, ?, ?, ?)
-      `).run("Bâtiment A - Principal", "BAT-A", "Bâtiment administratif et salles de cours principales", 2, "#10b981", schoolId);
+      `).run("Bâtiment A - Principal", "BAT-A", "Bâtiment administratif et salles de cours principales", 2, "#013efb", schoolId);
       const batAId = batA.lastInsertRowid;
 
       const batB = db.prepare(`
         INSERT INTO batiments (nom, code, description, nombre_etages, couleur, school_id)
         VALUES (?, ?, ?, ?, ?, ?)
-      `).run("Bâtiment B - Sciences & Labos", "BAT-B", "Laboratoires scientifiques et salle informatique", 1, "#3b82f6", schoolId);
+      `).run("Bâtiment B - Sciences & Labos", "BAT-B", "Laboratoires scientifiques et salle informatique", 1, "#049ffb", schoolId);
       const batBId = batB.lastInsertRowid;
 
       const batC = db.prepare(`
@@ -2090,7 +2090,7 @@ async function initializeDatabase() {
     devise TEXT DEFAULT 'FCFA',
     logo TEXT,
     langue TEXT DEFAULT 'fr',
-    couleur_primaire TEXT DEFAULT '#10b981',
+    couleur_primaire TEXT DEFAULT '#013efb',
     police TEXT DEFAULT 'inter',
     taille_police INTEGER DEFAULT 16,
     frais_adhesion_bibliotheque REAL DEFAULT 1000,
@@ -3024,7 +3024,7 @@ db.exec(`
     nom_directeur TEXT DEFAULT '',
     signature_tampon TEXT DEFAULT '',
     devise_ecole TEXT DEFAULT '',
-    couleur_principale TEXT DEFAULT '#10b981',
+    couleur_principale TEXT DEFAULT '#013efb',
     afficher_logo INTEGER DEFAULT 1,
     afficher_drapeau INTEGER DEFAULT 1,
     afficher_ministere INTEGER DEFAULT 1,
@@ -3665,7 +3665,7 @@ db.exec(`
     code TEXT,
     description TEXT,
     nombre_etages INTEGER DEFAULT 1,
-    couleur TEXT DEFAULT '#10b981',
+    couleur TEXT DEFAULT '#013efb',
     school_id INTEGER NOT NULL,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(school_id) REFERENCES school_info(id) ON DELETE CASCADE
@@ -4133,6 +4133,42 @@ try {
     console.log("SaaS settings seeded.");
   }
 } catch (e) {}
+
+// One-time idempotent migration: transition untouched legacy default brand colors (#10b981 / #059669)
+// to the official app logo initial color (#013efb), without ever overwriting customized school themes.
+try {
+  const migratedLogoColors = db.prepare("SELECT value FROM saas_settings WHERE key = 'logo_colors_v1_migrated'").get() as any;
+  if (!migratedLogoColors) {
+    db.prepare(`
+      UPDATE school_info
+      SET couleur_primaire = '#013efb'
+      WHERE couleur_primaire IS NULL
+         OR TRIM(couleur_primaire) = ''
+         OR LOWER(TRIM(couleur_primaire)) = '#10b981'
+    `).run();
+
+    db.prepare(`
+      UPDATE bulletin_headers
+      SET couleur_principale = '#013efb'
+      WHERE couleur_principale IS NULL
+         OR TRIM(couleur_principale) = ''
+         OR LOWER(TRIM(couleur_principale)) IN ('#10b981', '#059669')
+    `).run();
+
+    db.prepare(`
+      UPDATE batiments
+      SET couleur = '#013efb'
+      WHERE couleur IS NULL
+         OR TRIM(couleur) = ''
+         OR LOWER(TRIM(couleur)) = '#10b981'
+    `).run();
+
+    db.prepare("INSERT OR REPLACE INTO saas_settings (key, value) VALUES ('logo_colors_v1_migrated', 'true')").run();
+    console.log("Migrated untouched default brand colors to official logo color (#013efb).");
+  }
+} catch (e) {
+  console.error("Logo colors migration error:", e);
+}
 
 // Seed role permissions if empty
 const rolePermsCount = db.prepare("SELECT COUNT(*) as count FROM role_permissions").get() as any;
@@ -5035,8 +5071,8 @@ async function sendMailWithFallback(options: SendEmailOptions): Promise<SendEmai
     const cfg = await getSmtpConfig(schoolId);
     const formattedHtml = html || `
       <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 16px;">
-        <div style="border-bottom: 2px solid #10b981; padding-bottom: 12px; margin-bottom: 20px;">
-          <h2 style="color: #0f172a; margin: 0; font-size: 20px;">Mégafixa<span style="color: #10b981;">Educ</span> Pro</h2>
+        <div style="border-bottom: 2px solid #013efb; padding-bottom: 12px; margin-bottom: 20px;">
+          <h2 style="color: #0f172a; margin: 0; font-size: 20px;">Mégafixa<span style="color: #013efb;">Educ</span> <span style="color: #fb5c03;">Pro</span></h2>
           <p style="color: #64748b; font-size: 12px; margin: 4px 0 0 0;">Plateforme Numérique de Gestion Éducative</p>
         </div>
         <div style="color: #334155; font-size: 14px; line-height: 1.6;">
@@ -6194,7 +6230,7 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
         nom: school.nom,
         slogan: school.slogan || '',
         logo: school.logo || null,
-        couleur_primaire: school.couleur_primaire || '#10b981',
+        couleur_primaire: school.couleur_primaire || '#013efb',
         adresse: school.adresse || '',
         telephone: school.telephone || '',
         email: school.email || '',
@@ -7853,7 +7889,7 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
           nom_directeur: school?.nom_fondateur || '',
           signature_tampon: school?.signature || '',
           devise_ecole: school?.slogan || school?.devise || '',
-          couleur_principale: school?.couleur_primaire || '#059669',
+          couleur_principale: school?.couleur_primaire || '#013efb',
           position_tutelle: 'gauche',
           alignement_tutelle: 'center',
           position_etablissement: 'droite',
@@ -8083,7 +8119,7 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
         schoolId, cycle, nom_pays || 'RÉPUBLIQUE DU BÉNIN', devise_pays || '', ministere_tutelle || '', direction_departementale || '', inspection_zone || '',
         nom_ecole || '', statut_ecole || slogan_ecole || '', slogan_ecole || statut_ecole || devise_ecole || '', adresse || '', telephone || '', email || '', boite_postale || '', logo || '', drapeau_pays || '',
         titre_bulletin || 'BULLETIN DE NOTES', sous_titre || '', titre_directeur || '', nom_directeur || '', titre_prof_principal || 'LE PROFESSEUR PRINCIPAL', nom_prof_principal || '',
-        signature_tampon || '', devise_ecole || slogan_ecole || '', couleur_principale || '#059669',
+        signature_tampon || '', devise_ecole || slogan_ecole || '', couleur_principale || '#013efb',
         position_tutelle || 'gauche', alignement_tutelle || 'center', position_etablissement || 'droite', alignement_etablissement || 'center', position_logo || 'centre',
         afficher_nom_pays ? 1 : 0, afficher_devise_pays ? 1 : 0, afficher_direction_departementale ? 1 : 0, afficher_inspection_zone ? 1 : 0,
         afficher_nom_ecole ? 1 : 0, (afficher_statut_ecole ?? afficher_slogan_ecole) ? 1 : 0, (afficher_slogan_ecole ?? afficher_statut_ecole) ? 1 : 0, afficher_adresse ? 1 : 0, afficher_telephone ? 1 : 0, afficher_email ? 1 : 0, afficher_boite_postale ? 1 : 0,
@@ -8612,7 +8648,7 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
         code ? code.trim().toUpperCase() : null,
         description || '',
         nombre_etages ? parseInt(nombre_etages, 10) : 1,
-        couleur || '#10b981',
+        couleur || '#013efb',
         req.schoolId
       );
 
@@ -8646,7 +8682,7 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
         code ? code.trim().toUpperCase() : null,
         description || '',
         nombre_etages ? parseInt(nombre_etages, 10) : 1,
-        couleur || '#10b981',
+        couleur || '#013efb',
         id,
         req.schoolId
       );
@@ -16344,7 +16380,7 @@ function executeYearTransition(
         nom_directeur: school?.nom_fondateur || '',
         signature_tampon: school?.signature || '',
         devise_ecole: school?.devise || 'Discipline - Travail - Succès',
-        couleur_principale: isPrimaryCycle ? '#059669' : '#4f46e5',
+        couleur_principale: isPrimaryCycle ? '#013efb' : '#049ffb',
         afficher_logo: 1,
         afficher_drapeau: 1,
         afficher_ministere: 1,
@@ -16415,7 +16451,7 @@ function executeYearTransition(
         adresse || '', telephone || '', email || '', boite_postale || '',
         logo || '', drapeau_pays || '', titre_bulletin || 'BULLETIN DE NOTES',
         sous_titre || '', titre_directeur || '', nom_directeur || '', signature_tampon || '',
-        devise_ecole || '', couleur_principale || '#059669',
+        devise_ecole || '', couleur_principale || '#013efb',
         afficher_logo ? 1 : 0, afficher_drapeau ? 1 : 0,
         afficher_ministere ? 1 : 0, afficher_inspection ? 1 : 0, afficher_signature ? 1 : 0, afficher_observations ? 1 : 0,
         show_photo_eleve ? 1 : 0, show_statistiques ? 1 : 0, show_appreciation ? 1 : 0, show_rang ? 1 : 0,
@@ -16439,7 +16475,7 @@ function executeYearTransition(
         adresse || '', telephone || '', email || '', boite_postale || '',
         logo || '', drapeau_pays || '', titre_bulletin || 'BULLETIN DE NOTES',
         sous_titre || '', titre_directeur || '', nom_directeur || '', signature_tampon || '',
-        devise_ecole || '', couleur_principale || '#059669',
+        devise_ecole || '', couleur_principale || '#013efb',
         afficher_logo ? 1 : 0, afficher_drapeau ? 1 : 0,
         afficher_ministere ? 1 : 0, afficher_inspection ? 1 : 0, afficher_signature ? 1 : 0, afficher_observations ? 1 : 0,
         show_photo_eleve ? 1 : 0, show_statistiques ? 1 : 0, show_appreciation ? 1 : 0, show_rang ? 1 : 0
@@ -19909,7 +19945,7 @@ function executeYearTransition(
 
     const setupLink = `${APP_URL}/setup-password?email=${encodeURIComponent(staff.email)}&otp=${otp}`;
     const textBody = `Bonjour ${staff.prenom} ${staff.nom},\n\nUn compte d'accès pour le poste de "${staff.poste}" (Rôle: ${role.toUpperCase()}) a été configuré pour vous sur MégafixaEduc Pro.\n\nEmail de connexion : ${staff.email}\nCode OTP d'activation : ${otp}\nMot de passe temporaire : ${password}\n\nPour activer votre compte et définir votre mot de passe personnel, veuillez cliquer sur le lien ci-dessous :\n${setupLink}\n\nCe lien expire dans 24 heures.`;
-    const htmlBody = textBody.replace(/\n/g, '<br>').replace(setupLink, `<a href="${setupLink}" style="display: inline-block; padding: 10px 20px; background-color: #10b981; color: white; text-decoration: none; border-radius: 8px; font-weight: bold;">Activer mon compte</a>`);
+    const htmlBody = textBody.replace(/\n/g, '<br>').replace(setupLink, `<a href="${setupLink}" style="display: inline-block; padding: 10px 20px; background-color: #013efb; color: white; text-decoration: none; border-radius: 8px; font-weight: bold;">Activer mon compte</a>`);
 
     const mailResult = await sendMailWithFallback({
       to: staff.email,
@@ -19994,7 +20030,7 @@ function executeYearTransition(
 
           const setupLink = `${APP_URL}/setup-password?email=${encodeURIComponent(member.email)}&otp=${otpCode}`;
           const body = `Bonjour ${member.prenom} ${member.nom},\n\nUn compte d'accès MégafixaEduc Pro (${member.poste}) a été créé pour vous.\n\nIdentifiants :\nEmail : ${member.email}\nCode OTP : ${otpCode}\n\nPour activer votre compte et définir votre mot de passe personnel, veuillez cliquer sur le lien suivant :\n${setupLink}\n\nCe lien expire dans 24 heures.`;
-          const htmlBody = body.replace(/\n/g, '<br>').replace(setupLink, `<a href="${setupLink}" style="display: inline-block; padding: 10px 20px; background-color: #10b981; color: white; text-decoration: none; border-radius: 8px; font-weight: bold;">Activer mon compte</a>`);
+          const htmlBody = body.replace(/\n/g, '<br>').replace(setupLink, `<a href="${setupLink}" style="display: inline-block; padding: 10px 20px; background-color: #013efb; color: white; text-decoration: none; border-radius: 8px; font-weight: bold;">Activer mon compte</a>`);
 
           const mailRes = await sendMailWithFallback({
             to: member.email,
@@ -20585,7 +20621,7 @@ function executeYearTransition(
       // Send email with credentials
       const setupLink = `${APP_URL}/setup-password?email=${encodeURIComponent(email)}&otp=${otp}`;
       const textBody = `Bonjour ${nom},\n\nUn compte d'accès (Rôle : ${assignedRole.toUpperCase()}) a été créé pour vous par votre administrateur sur MégafixaEduc Pro.\n\nEmail : ${email}\nCode de confirmation (OTP) : ${otp}\nMot de passe temporaire : ${password}\n\nPour activer votre compte et configurer votre mot de passe, veuillez cliquer sur le lien ci-dessous :\n${setupLink}\n\nCe lien expire dans 24 heures.`;
-      const htmlBody = textBody.replace(/\n/g, '<br>').replace(setupLink, `<a href="${setupLink}" style="display: inline-block; padding: 10px 20px; background-color: #10b981; color: white; text-decoration: none; border-radius: 8px; font-weight: bold;">Activer mon compte</a>`);
+      const htmlBody = textBody.replace(/\n/g, '<br>').replace(setupLink, `<a href="${setupLink}" style="display: inline-block; padding: 10px 20px; background-color: #013efb; color: white; text-decoration: none; border-radius: 8px; font-weight: bold;">Activer mon compte</a>`);
 
       const mailResult = await sendMailWithFallback({
         to: email,
@@ -20682,7 +20718,7 @@ function executeYearTransition(
       
       const setupLink = `${APP_URL}/setup-password?email=${encodeURIComponent(user.email)}&otp=${otp}`;
       const textBody = `Bonjour ${user.nom},\n\nVotre compte MégafixaEduc Pro a été approuvé par l'administrateur avec le rôle "${assignedRole.toUpperCase()}".\n\nPour activer votre compte et configurer votre mot de passe, veuillez cliquer sur le lien ci-dessous :\n${setupLink}\n\nCode de confirmation (OTP) : ${otp}\n\nCe lien expire dans 24 heures.`;
-      const htmlBody = textBody.replace(/\n/g, '<br>').replace(setupLink, `<a href="${setupLink}" style="display: inline-block; padding: 10px 20px; background-color: #10b981; color: white; text-decoration: none; border-radius: 8px; font-weight: bold;">Activer mon compte</a>`);
+      const htmlBody = textBody.replace(/\n/g, '<br>').replace(setupLink, `<a href="${setupLink}" style="display: inline-block; padding: 10px 20px; background-color: #013efb; color: white; text-decoration: none; border-radius: 8px; font-weight: bold;">Activer mon compte</a>`);
 
       const mailResult = await sendMailWithFallback({
         to: user.email,
@@ -22420,14 +22456,14 @@ function executeYearTransition(
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #f8fafc; margin: 0; padding: 24px; color: #0f172a; }
     .container { max-width: 680px; margin: 0 auto; background: #ffffff; border-radius: 20px; border: 1px solid #e2e8f0; overflow: hidden; box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.05); }
-    .header { background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%); padding: 36px 32px; color: #ffffff; text-align: center; }
-    .badge { display: inline-block; background: rgba(245, 158, 11, 0.15); border: 1px solid #f59e0b; color: #fbbf24; padding: 6px 14px; border-radius: 30px; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; }
+    .header { background: linear-gradient(135deg, #013efb 0%, #049ffb 65%, #0f172a 100%); padding: 36px 32px; color: #ffffff; text-align: center; }
+    .badge { display: inline-block; background: rgba(251, 92, 3, 0.2); border: 1px solid #fb5c03; color: #ffffff; padding: 6px 14px; border-radius: 30px; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; }
     .title { font-size: 24px; font-weight: 900; margin: 0 0 6px 0; letter-spacing: -0.5px; }
-    .subtitle { font-size: 14px; color: #cbd5e1; margin: 0; }
+    .subtitle { font-size: 14px; color: #dbe7ff; margin: 0; }
     .content { padding: 32px; }
-    .congrats-card { background: linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%); border-left: 5px solid #10b981; border-radius: 12px; padding: 20px 24px; margin-bottom: 28px; }
-    .congrats-card h3 { margin: 0 0 8px 0; color: #065f46; font-size: 18px; font-weight: 800; }
-    .congrats-card p { margin: 0; color: #047857; font-size: 14px; line-height: 1.6; }
+    .congrats-card { background: linear-gradient(135deg, #eff4ff 0%, #f8fafc 100%); border-left: 5px solid #013efb; border-radius: 12px; padding: 20px 24px; margin-bottom: 28px; }
+    .congrats-card h3 { margin: 0 0 8px 0; color: #013efb; font-size: 18px; font-weight: 800; }
+    .congrats-card p { margin: 0; color: #1e293b; font-size: 14px; line-height: 1.6; }
     .key-box { background: #0f172a; color: #ffffff; border: 2px dashed #f59e0b; border-radius: 16px; padding: 24px; text-align: center; margin-bottom: 28px; }
     .key-label { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 1.5px; color: #fbbf24; margin-bottom: 8px; }
     .key-code { font-family: 'Courier New', Courier, monospace; font-size: 24px; font-weight: 900; letter-spacing: 3px; color: #ffffff; background: rgba(255,255,255,0.08); padding: 12px 20px; border-radius: 10px; display: inline-block; margin-bottom: 10px; border: 1px solid rgba(255,255,255,0.15); }
@@ -22891,14 +22927,14 @@ function executeYearTransition(
       const emailHtml = `
         <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 650px; margin: 0 auto; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 20px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.06);">
           <!-- Top Header Banner -->
-          <div style="background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%); padding: 32px 24px; text-align: center; color: #ffffff;">
-            <div style="display: inline-block; padding: 6px 14px; background: rgba(16, 185, 129, 0.2); border: 1px solid rgba(16, 185, 129, 0.4); border-radius: 9999px; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 1px; color: #34d399; margin-bottom: 12px;">
+          <div style="background: linear-gradient(135deg, #013efb 0%, #049ffb 60%, #0f172a 100%); padding: 32px 24px; text-align: center; color: #ffffff;">
+            <div style="display: inline-block; padding: 6px 14px; background: rgba(251, 92, 3, 0.25); border: 1px solid rgba(251, 92, 3, 0.6); border-radius: 9999px; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 1px; color: #ffffff; margin-bottom: 12px;">
               ${isUniquePayment ? 'Paiement Intégral Validé & Compte Activé' : 'Acompte de 45% Validé & Compte Activé'}
             </div>
             <h1 style="margin: 0; font-size: 26px; font-weight: 900; letter-spacing: -0.5px; color: #ffffff;">
-              Mégafixa<span style="color: #10b981;">Educ</span> <span style="color: #fbbf24; font-size: 16px;">PRO</span>
+              Mégafixa<span style="color: #049ffb;">Educ</span> <span style="color: #fb5c03; font-size: 16px;">PRO</span>
             </h1>
-            <p style="margin: 6px 0 0 0; color: #94a3b8; font-size: 13px;">
+            <p style="margin: 6px 0 0 0; color: #dbe7ff; font-size: 13px;">
               Plateforme Numérique de Gestion Éducative & Académique
             </p>
           </div>
@@ -22906,8 +22942,8 @@ function executeYearTransition(
           <!-- Body Container -->
           <div style="padding: 32px 28px;">
             <!-- Message de Félicitation & Gratitude -->
-            <div style="background: #f0fdf4; border-left: 4px solid #10b981; padding: 18px 20px; border-radius: 12px; margin-bottom: 24px;">
-              <h3 style="margin: 0 0 8px 0; color: #166534; font-size: 16px; font-weight: 800;">
+            <div style="background: #eff4ff; border-left: 4px solid #013efb; padding: 18px 20px; border-radius: 12px; margin-bottom: 24px;">
+              <h3 style="margin: 0 0 8px 0; color: #013efb; font-size: 16px; font-weight: 800;">
                 🎉 Félicitations pour votre Souscription !
               </h3>
               <p style="margin: 0; color: #334155; font-size: 13.5px; line-height: 1.6;">
@@ -25893,19 +25929,19 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
               text: `Bonjour ${destName},\n\nVous avez reçu un nouveau message sur votre espace MégafixaEduc Pro :\n\nExpéditeur : ${senderName}\nObjet : ${emailSubject}\n\nMessage :\n${content || ''}\n\nPour consulter ce message et y répondre, connectez-vous sur votre espace sécurisé : ${APP_URL}/messagerie\n\nCordialement,\nL'équipe administrative`,
               html: `
                 <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 16px;">
-                  <div style="border-bottom: 2px solid #10b981; padding-bottom: 12px; margin-bottom: 20px;">
-                    <h2 style="color: #0f172a; margin: 0; font-size: 20px;">Mégafixa<span style="color: #10b981;">Educ</span> Pro</h2>
+                  <div style="border-bottom: 2px solid #013efb; padding-bottom: 12px; margin-bottom: 20px;">
+                    <h2 style="color: #0f172a; margin: 0; font-size: 20px;">Mégafixa<span style="color: #013efb;">Educ</span> <span style="color: #fb5c03;">Pro</span></h2>
                     <p style="color: #64748b; font-size: 12px; margin: 4px 0 0 0;">Messagerie Officielle & Notifications</p>
                   </div>
                   <p style="color: #334155; font-size: 14px; margin-bottom: 16px;">
                     Bonjour <strong>${destName}</strong>,<br/>
                     Vous avez reçu un nouveau message de <strong>${senderName}</strong> sur votre espace MégafixaEduc Pro.
                   </p>
-                  <div style="background: #f8fafc; border-left: 4px solid #10b981; padding: 16px; border-radius: 8px; margin: 20px 0; font-size: 14px; color: #1e293b; line-height: 1.6;">
+                  <div style="background: #f8fafc; border-left: 4px solid #049ffb; padding: 16px; border-radius: 8px; margin: 20px 0; font-size: 14px; color: #1e293b; line-height: 1.6;">
                     ${(content || '').replace(/\n/g, '<br/>')}
                   </div>
                   <div style="text-align: center; margin: 28px 0;">
-                    <a href="${APP_URL}/messagerie" style="display: inline-block; padding: 12px 24px; background: #10b981; color: #ffffff; text-decoration: none; border-radius: 12px; font-weight: bold; font-size: 14px; box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);">
+                    <a href="${APP_URL}/messagerie" style="display: inline-block; padding: 12px 24px; background: #013efb; color: #ffffff; text-decoration: none; border-radius: 12px; font-weight: bold; font-size: 14px; box-shadow: 0 4px 12px rgba(1, 62, 251, 0.3);">
                       Accéder à la Messagerie pour Répondre
                     </a>
                   </div>

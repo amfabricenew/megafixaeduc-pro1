@@ -504,7 +504,7 @@ export function buildSubscriptionFiche(params: {
         </tr>
         <tr>
           <td>Formule choisie</td>
-          <td><span style="color:#059669; font-weight:800;">${meta.name}</span> (${meta.badge})</td>
+          <td><span style="color:#013efb; font-weight:800;">${meta.name}</span> (${meta.badge})</td>
         </tr>
         <tr>
           <td>Montant total réglé</td>
@@ -512,7 +512,7 @@ export function buildSubscriptionFiche(params: {
         </tr>
         <tr>
           <td>Statut du règlement</td>
-          <td><span style="background:#dcfce7; color:#15803d; padding:2px 8px; border-radius:6px; font-weight:700;">Validé & Reçu</span></td>
+          <td><span style="background:#dbe7ff; color:#013efb; padding:2px 8px; border-radius:6px; font-weight:700;">Validé & Reçu</span></td>
         </tr>
         <tr>
           <td>Référence de transaction</td>
@@ -543,7 +543,7 @@ export function buildSubscriptionFiche(params: {
       <div class="guide-box">
         <div class="guide-step">
           <div class="step-num">1</div>
-          <div class="step-text">Cliquez sur le lien direct d'activation : <a href="${activationUrl}" style="color:#059669; font-weight:700;">${activationUrl}</a></div>
+          <div class="step-text">Cliquez sur le lien direct d'activation : <a href="${activationUrl}" style="color:#013efb; font-weight:700;">${activationUrl}</a></div>
         </div>
         <div class="guide-step">
           <div class="step-num">2</div>
@@ -558,7 +558,7 @@ export function buildSubscriptionFiche(params: {
 
     <div class="footer">
       <p>Document officiel émis par <strong>MégafixaEduc Pro SaaS</strong> — Tous droits réservés.</p>
-      <p>Assistance & Support technique dédié : <a href="mailto:support@megafixa.com" style="color:#059669;">support@megafixa.com</a> • WhatsApp : +228 90 00 00 00</p>
+      <p>Assistance & Support technique dédié : <a href="mailto:support@megafixa.com" style="color:#013efb;">support@megafixa.com</a> • WhatsApp : +228 90 00 00 00</p>
     </div>
   </div>
 </body>
