@@ -242,7 +242,7 @@ export default function PlansManagement() {
           <div className="p-3 bg-slate-900/60 rounded-2xl border border-slate-800">
             <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Tarif Référence</p>
             <p className="text-xl font-black text-amber-400 mt-0.5">
-              {plans.find(p => p.is_recommended)?.price.toLocaleString() || '45 000'} <span className="text-xs text-slate-400 font-normal">FCFA</span>
+              {(plans.find(p => p.is_recommended)?.price ?? plans[0]?.price ?? 0).toLocaleString('fr-FR')} <span className="text-xs text-slate-400 font-normal">FCFA</span>
             </p>
           </div>
         </div>

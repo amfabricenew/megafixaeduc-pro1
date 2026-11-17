@@ -84,6 +84,7 @@ import AISettingsTab from '../components/settings/AISettingsTab';
 import SubscriptionSettingsTab from '../components/settings/SubscriptionSettingsTab';
 import AutomationSettingsPanel from '../components/messaging/AutomationSettingsPanel';
 import { formatAcademicYearLibelle, getDefaultDatesForAcademicYear, getNextAcademicYearLibelle } from '../utils/academicYear';
+import { auth, googleProvider, signInWithPopup } from '../lib/firebase';
 
 export default function Settings() {
   const confirm = useConfirm();
@@ -269,27 +270,39 @@ export default function Settings() {
 
   const handleGoogleLogin = async () => {
     try {
-      const res = await apiFetch('/api/auth/google/url');
-      const data = await res.json();
-      
-      if (data.error) {
-        showToast(data.error, 'error');
+      googleProvider.setCustomParameters({ prompt: 'select_account' });
+      const result = await signInWithPopup(auth, googleProvider);
+      if (!result?.user) {
+        showToast('Connexion Google annulée', 'error');
         return;
       }
-
-      const width = 500;
-      const height = 600;
-      const left = window.screenX + (window.outerWidth - width) / 2;
-      const top = window.screenY + (window.outerHeight - height) / 2;
-      
-      window.open(
-        data.url,
-        'google-link',
-        `width=${width},height=${height},left=${left},top=${top}`
-      );
-    } catch (err) {
+      const idToken = await result.user.getIdToken();
+      const res = await apiFetch('/api/auth/google/link', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idToken })
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        showToast(data.error || 'Erreur lors de la liaison avec Google', 'error');
+        return;
+      }
+      if (data.user) {
+        const mergedUser = { ...currentUser, ...data.user };
+        localStorage.setItem('user', JSON.stringify(mergedUser));
+        setCurrentUser(mergedUser);
+      }
+      showToast('Compte lié à Google avec succès');
+    } catch (err: any) {
+      if (err?.code === 'auth/popup-closed-by-user' || err?.code === 'auth/cancelled-popup-request') {
+        return;
+      }
+      if (err?.code === 'auth/popup-blocked') {
+        showToast('Veuillez autoriser les fenêtres pop-up pour lier votre compte Google.', 'error');
+        return;
+      }
       console.error("Google link error:", err);
-      showToast('Erreur lors de la liaison avec Google', 'error');
+      showToast(err?.message || 'Erreur lors de la liaison avec Google', 'error');
     }
   };
 

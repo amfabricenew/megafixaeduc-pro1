@@ -46,6 +46,7 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
   const [activeTab, setActiveTab] = useState<'requests' | 'complaints'>('requests');
   const [requests, setRequests] = useState<any[]>([]);
   const [complaints, setComplaints] = useState<any[]>([]);
+  const [plans, setPlans] = useState<any[]>([]);
   const [stats, setStats] = useState<any>({ total: 0, pending: 0, payment_confirmed: 0, approved: 0, rejected: 0 });
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
@@ -67,7 +68,7 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
   const [approveForm, setApproveForm] = useState({
     code_ecole: '',
     custom_password: '',
-    plan_abonnement: 'PRO',
+    plan_abonnement: '',
     duree_mois: '12',
     admin_notes: ''
   });
@@ -89,11 +90,14 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
       setLoading(true);
       const token = localStorage.getItem('token');
       
-      const [reqsRes, compRes] = await Promise.all([
+      const [reqsRes, compRes, plansRes] = await Promise.all([
         fetch('/api/super-admin/school-requests', {
           headers: { 'Authorization': `Bearer ${token}` }
         }),
         fetch('/api/super-admin/complaints', {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }),
+        fetch('/api/super-admin/plans', {
           headers: { 'Authorization': `Bearer ${token}` }
         })
       ]);
@@ -107,6 +111,13 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
       if (compRes.ok) {
         const data = await compRes.json();
         setComplaints(data || []);
+      }
+
+      if (plansRes.ok) {
+        const plansData = await plansRes.json();
+        if (Array.isArray(plansData)) {
+          setPlans(plansData);
+        }
       }
     } catch (err) {
       console.error("Erreur récupération données:", err);
@@ -187,10 +198,18 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
     const randomSuffix = Math.random().toString(36).substring(2, 6).toLowerCase();
     const cleanCode = `MF-${req.nom_ecole.substring(0, 3).toUpperCase().replace(/[^A-Z]/g, 'SCH')}-${Math.random().toString(36).substring(2, 5).toUpperCase()}`;
 
+    const requestedLower = (req.plan_souhaite || '').toLowerCase().trim();
+    const matchedPlan = plans.find((p: any) =>
+      (p.name || '').toLowerCase().trim() === requestedLower ||
+      String(p.id) === String(req.plan_souhaite) ||
+      (requestedLower && (p.name || '').toLowerCase().includes(requestedLower))
+    );
+    const fallbackPlan = plans.find((p: any) => (p.is_active !== 0 && p.active !== false) && p.is_recommended) || plans[0];
+
     setApproveForm({
       code_ecole: cleanCode,
       custom_password: `Edu2026!${randomSuffix}`,
-      plan_abonnement: req.plan_souhaite || 'PRO',
+      plan_abonnement: matchedPlan?.name || req.plan_souhaite || fallbackPlan?.name || '',
       duree_mois: '12',
       admin_notes: 'Demande validée et compte école configuré avec succès.'
     });
@@ -773,9 +792,14 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
                     <div className="space-y-1">
                       <label className="text-xs font-bold text-slate-700">Formule</label>
                       <select value={approveForm.plan_abonnement} onChange={(e) => setApproveForm({ ...approveForm, plan_abonnement: e.target.value })} className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold">
-                        <option value="PRO">Formule Pro</option>
-                        <option value="EXCELLENCE">Excellence Illimitée</option>
-                        <option value="DECOUVERTE">Découverte (Gratuit)</option>
+                        {plans.map((p: any) => (
+                          <option key={p.id} value={p.name}>
+                            {p.name} ({Number(p.price) === 0 ? 'Gratuit' : `${Number(p.price).toLocaleString('fr-FR')} FCFA / ${p.period || 'mois'}`})
+                          </option>
+                        ))}
+                        {approveForm.plan_abonnement && !plans.some((p: any) => (p.name || '').toLowerCase() === approveForm.plan_abonnement.toLowerCase()) && (
+                          <option value={approveForm.plan_abonnement}>{approveForm.plan_abonnement}</option>
+                        )}
                       </select>
                     </div>
                     <div className="space-y-1">

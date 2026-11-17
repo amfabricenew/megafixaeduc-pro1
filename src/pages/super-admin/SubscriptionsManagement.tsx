@@ -33,6 +33,7 @@ export default function SubscriptionsManagement() {
   const [activeTab, setActiveTab] = React.useState<'subscriptions' | 'licenses'>('subscriptions');
   const [subscriptions, setSubscriptions] = React.useState<any[]>([]);
   const [licenses, setLicenses] = React.useState<any[]>([]);
+  const [plans, setPlans] = React.useState<any[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [stats, setStats] = React.useState<any>(null);
   const [searchTerm, setSearchTerm] = React.useState('');
@@ -49,15 +50,23 @@ export default function SubscriptionsManagement() {
     client_name: '',
     client_email: '',
     client_phone: '',
-    plan_name: 'Formule Excellence (Intégrale Pro)',
-    amount: 150000,
+    plan_name: '',
+    amount: 0,
     duration_days: 365,
     send_email: true
   });
 
+  const getDefaultDurationDays = (period?: string) => {
+    const p = (period || '').toLowerCase();
+    if (p.includes('14') || p.includes('jour')) return 14;
+    if (p.includes('an') || p.includes('year')) return 365;
+    if (p.includes('trimestre')) return 90;
+    return 30;
+  };
+
   const fetchData = async () => {
     try {
-      const [subsRes, statsRes, licRes] = await Promise.all([
+      const [subsRes, statsRes, licRes, plansRes] = await Promise.all([
         fetch('/api/super-admin/subscriptions', {
           headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
         }),
@@ -66,12 +75,32 @@ export default function SubscriptionsManagement() {
         }),
         fetch('/api/super-admin/licenses', {
           headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+        }),
+        fetch('/api/super-admin/plans', {
+          headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
         })
       ]);
 
       if (subsRes.ok) setSubscriptions(await subsRes.json());
       if (statsRes.ok) setStats(await statsRes.json());
       if (licRes.ok) setLicenses(await licRes.json());
+      if (plansRes.ok) {
+        const plansData = await plansRes.json();
+        if (Array.isArray(plansData)) {
+          setPlans(plansData);
+          const defaultP = plansData.find((p: any) => (p.is_active !== 0 && p.active !== false) && p.is_recommended)
+            || plansData.find((p: any) => p.is_active !== 0 && p.active !== false)
+            || plansData[0];
+          if (defaultP) {
+            setNewLicForm(prev => prev.plan_name ? prev : ({
+              ...prev,
+              plan_name: defaultP.name,
+              amount: Number(defaultP.price ?? 0),
+              duration_days: getDefaultDurationDays(defaultP.period)
+            }));
+          }
+        }
+      }
     } catch (error) {
       console.error("Error fetching subscription data:", error);
     } finally {
@@ -114,14 +143,17 @@ export default function SubscriptionsManagement() {
 
       toast.success(`Clé ${data.license_key} générée avec succès !`);
       setShowGenerateModal(false);
+      const defaultP = plans.find((p: any) => (p.is_active !== 0 && p.active !== false) && p.is_recommended)
+        || plans.find((p: any) => p.is_active !== 0 && p.active !== false)
+        || plans[0];
       setNewLicForm({
         school_name: '',
         client_name: '',
         client_email: '',
         client_phone: '',
-        plan_name: 'Formule Excellence (Intégrale Pro)',
-        amount: 150000,
-        duration_days: 365,
+        plan_name: defaultP?.name || '',
+        amount: Number(defaultP?.price ?? 0),
+        duration_days: getDefaultDurationDays(defaultP?.period),
         send_email: true
       });
       fetchData();
@@ -248,7 +280,7 @@ export default function SubscriptionsManagement() {
           <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">MRR estimé</p>
           <div className="flex items-center justify-between">
             <h3 className="text-xl font-bold text-slate-900">
-              {stats?.mrr?.toLocaleString() || '150 000'} FCFA
+              {Number(stats?.mrr ?? 0).toLocaleString('fr-FR')} FCFA
             </h3>
             <span className="text-xs font-bold text-emerald-600">+0%</span>
           </div>
@@ -314,7 +346,9 @@ export default function SubscriptionsManagement() {
                       </div>
                     </td>
                     <td className="px-6 py-4 text-sm font-bold text-slate-900">
-                      {sub.price ? `${sub.price.toLocaleString()} FCFA / ${sub.period}` : '75 000 FCFA / an'}
+                      {sub.price !== null && sub.price !== undefined
+                        ? `${Number(sub.price).toLocaleString('fr-FR')} FCFA / ${sub.period || 'mois'}`
+                        : 'Non tarifée'}
                     </td>
                     <td className="px-6 py-4">
                       <div className="flex items-center gap-2 text-xs font-medium text-slate-500">
@@ -494,17 +528,22 @@ export default function SubscriptionsManagement() {
                     value={newLicForm.plan_name}
                     onChange={(e) => {
                       const val = e.target.value;
-                      let amt = 150000;
-                      if (val.includes('Starter')) amt = 25000;
-                      else if (val.includes('Standard')) amt = 75000;
-                      setNewLicForm({ ...newLicForm, plan_name: val, amount: amt });
+                      const matched = plans.find((p: any) => p.name === val);
+                      setNewLicForm({
+                        ...newLicForm,
+                        plan_name: val,
+                        amount: Number(matched?.price ?? 0),
+                        duration_days: getDefaultDurationDays(matched?.period)
+                      });
                     }}
                     className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 font-medium"
                   >
-                    <option value="Formule Starter (Base)">Formule Starter (Base)</option>
-                    <option value="Formule Académique (Standard)">Formule Académique (Standard)</option>
-                    <option value="Formule Excellence (Intégrale Pro)">Formule Excellence (Intégrale Pro)</option>
-                    <option value="Formule Premium Plus (Élite)">Formule Premium Plus (Élite)</option>
+                    {plans.map((p: any) => (
+                      <option key={p.id} value={p.name}>
+                        {p.name} ({Number(p.price) === 0 ? 'Gratuit' : `${Number(p.price).toLocaleString('fr-FR')} FCFA / ${p.period || 'mois'}`})
+                      </option>
+                    ))}
+                    {plans.length === 0 && <option value="">Aucune formule configurée</option>}
                   </select>
                 </div>
                 <div className="space-y-1">
@@ -514,6 +553,7 @@ export default function SubscriptionsManagement() {
                     onChange={(e) => setNewLicForm({ ...newLicForm, duration_days: Number(e.target.value) })}
                     className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 font-medium"
                   >
+                    <option value={14}>14 jours (Essai)</option>
                     <option value={30}>1 mois (30 jours)</option>
                     <option value={90}>3 mois (1 trimestre)</option>
                     <option value={365}>1 an (365 jours)</option>

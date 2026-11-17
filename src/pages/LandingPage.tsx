@@ -106,6 +106,37 @@ export default function LandingPage() {
     message: ''
   });
   const [submittingContact, setSubmittingContact] = useState(false);
+  const [configuredPlans, setConfiguredPlans] = useState<any[]>([]);
+  const [loadingPlans, setLoadingPlans] = useState(true);
+  const [currencyLabel, setCurrencyLabel] = useState('FCFA');
+
+  useEffect(() => {
+    let active = true;
+    fetch('/api/public/config')
+      .then(res => res.json())
+      .then(data => {
+        if (!active) return;
+        if (Array.isArray(data?.plans)) {
+          setConfiguredPlans(data.plans);
+        }
+        if (data?.config?.currency || data?.currency) {
+          setCurrencyLabel(data?.config?.currency || data?.currency);
+        }
+      })
+      .catch(err => console.warn('Impossible de charger les formules configurées:', err))
+      .finally(() => {
+        if (active) setLoadingPlans(false);
+      });
+    return () => { active = false; };
+  }, []);
+
+  const dynamicPlansSummaryFr = configuredPlans.length > 0
+    ? configuredPlans.map(p => `${p.name} (${Number(p.price) === 0 ? `Gratuit / ${p.period || 'essai'}` : `${Number(p.price).toLocaleString('fr-FR')} ${currencyLabel}/${p.period || 'mois'}`})`).join(', ')
+    : "les formules configurées par l'administration centrale";
+
+  const dynamicPlansSummaryEn = configuredPlans.length > 0
+    ? configuredPlans.map(p => `${p.name} (${Number(p.price) === 0 ? `Free / ${p.period || 'trial'}` : `${Number(p.price).toLocaleString('en-US')} ${currencyLabel}/${p.period || 'month'}`})`).join(', ')
+    : "the plans configured by platform administration";
 
   const faqItems = [
     {
@@ -114,8 +145,8 @@ export default function LandingPage() {
         ? "What are the available subscription plans and pricing?" 
         : "Quels sont les tarifs et formules d'abonnement disponibles ?",
       answer: language === 'en'
-        ? "MégafixaEduc Pro offers 3 transparent plans tailored to your school's size and ambitions: Starter Plan (25,000 FCFA/term for essential academics up to 300 students), Standard Plan (75,000 FCFA/year with QR badges and full organization up to 1,000 students), and Excellence Plan (150,000 FCFA/year all-in-one with finance, payroll, official tamper-proof receipts, and AI assistant for unlimited students). You can select your plan directly during registration."
-        : "MégafixaEduc Pro propose 3 formules transparentes adaptées à la taille et aux ambitions de votre école : la Formule Starter (25 000 FCFA/trimestre pour l'essentiel académique jusqu'à 300 élèves), la Formule Standard (75 000 FCFA/an avec badges QR code et organisation complète jusqu'à 1 000 élèves), et la Formule Excellence (150 000 FCFA/an tout-en-un avec finances, salaires, reçus officiels infalsifiables et assistant IA pour élèves illimités). Vous pouvez sélectionner directement votre formule lors de l'inscription."
+        ? `MégafixaEduc Pro offers transparent plans configured directly in real time: ${dynamicPlansSummaryEn}. You can select your plan directly during registration.`
+        : `MégafixaEduc Pro propose des formules transparentes et actualisées en temps réel : ${dynamicPlansSummaryFr}. Vous pouvez sélectionner directement votre formule lors de l'inscription.`
     },
     {
       category: 'features',
@@ -658,160 +689,121 @@ export default function LandingPage() {
             </p>
           </div>
 
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 items-stretch">
-            {/* Formule Starter */}
-            <div className="bg-white rounded-3xl border border-slate-200 p-8 shadow-sm hover:shadow-xl transition-all duration-300 flex flex-col justify-between relative group">
-              <div>
-                <div className="flex items-center justify-between mb-4">
-                  <span className="text-xs font-black uppercase tracking-wider text-blue-700 bg-blue-50 border border-blue-200 px-3 py-1 rounded-full">
-                    Starter
-                  </span>
-                  <span className="text-xs text-slate-500 font-semibold">{t("Jusqu'à 300 élèves")}</span>
-                </div>
-                <h3 className="text-2xl font-black text-slate-900">{t("Formule Starter")}</h3>
-                <p className="text-xs text-slate-500 mt-1 mb-6">{t("Idéal pour informatiser la gestion pédagogique et les notes.")}</p>
-
-                <div className="mb-6 pb-6 border-b border-slate-100">
-                  <div className="flex items-baseline gap-1">
-                    <span className="text-3xl sm:text-4xl font-black text-slate-900 tracking-tight">25 000</span>
-                    <span className="text-sm font-bold text-slate-600">FCFA</span>
-                    <span className="text-xs text-slate-400 font-medium">{t("/ trimestre")}</span>
-                  </div>
-                  <p className="text-[11px] text-slate-400 mt-1">{t("Facturation trimestrielle flexible")}</p>
-                </div>
-
-                <div className="space-y-3 mb-8">
-                  <p className="text-xs font-bold text-slate-700 uppercase tracking-wider">{t("Fonctionnalités incluses :")}</p>
-                  {[
-                    'Gestion des classes, matières et coefficients',
-                    'Fiches complètes et inscriptions des élèves',
-                    'Saisie des notes et calcul des moyennes',
-                    'Emplois du temps hebdomadaires',
-                    'Espace Parent sécurisé (Mon Enfant)'
-                  ].map((feat, idx) => (
-                    <div key={idx} className="flex items-start gap-2.5 text-xs text-slate-600">
-                      <div className="w-4 h-4 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center shrink-0 mt-0.5">
-                        <Check size={11} className="stroke-[3]" />
-                      </div>
-                      <span>{t(feat)}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <Link
-                to="/paiement-abonnement?plan=starter"
-                className="w-full py-3.5 px-6 rounded-2xl font-black text-xs uppercase tracking-wider text-center text-blue-700 bg-blue-50 hover:bg-blue-600 hover:text-white border border-blue-200 transition-all shadow-xs flex items-center justify-center gap-2 group-hover:shadow-md"
-              >
-                <span>{t("Choisir Formule Starter")}</span>
-                <ArrowRight size={15} />
-              </Link>
+          {loadingPlans ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+              {[1, 2, 3].map((i) => (
+                <div key={i} className="bg-slate-50 rounded-3xl border border-slate-200 p-8 h-96 animate-pulse" />
+              ))}
             </div>
-
-            {/* Formule Standard (Populaire) */}
-            <div className="bg-gradient-to-b from-white to-[#049ffb]/10 rounded-3xl border-2 border-[#013efb] p-8 shadow-xl hover:shadow-2xl transition-all duration-300 flex flex-col justify-between relative transform lg:-translate-y-2">
-              <div className="absolute -top-3.5 left-1/2 -translate-x-1/2 bg-gradient-to-r from-[#013efb] via-[#049ffb] to-[#fb5c03] text-white text-[11px] font-black uppercase tracking-widest px-4 py-1 rounded-full shadow-md flex items-center gap-1.5">
-                <Sparkles size={12} className="text-white" />
-                <span>{t("Formule la plus populaire")}</span>
-              </div>
-
-              <div>
-                <div className="flex items-center justify-between mb-4 mt-2">
-                  <span className="text-xs font-black uppercase tracking-wider text-[#013efb] bg-[#013efb]/10 border border-[#013efb]/30 px-3 py-1 rounded-full">
-                    {t("Académique Standard")}
-                  </span>
-                  <span className="text-xs text-[#013efb] font-bold">{t("Jusqu'à 1 000 élèves")}</span>
-                </div>
-                <h3 className="text-2xl font-black text-slate-900">{t("Formule Standard")}</h3>
-                <p className="text-xs text-slate-500 mt-1 mb-6">{t("Organisation complète avec badges officiels et promotions de fin d'année.")}</p>
-
-                <div className="mb-6 pb-6 border-b border-[#049ffb]/20">
-                  <div className="flex items-baseline gap-1">
-                    <span className="text-3xl sm:text-4xl font-black text-slate-900 tracking-tight">75 000</span>
-                    <span className="text-sm font-bold text-slate-600">FCFA</span>
-                    <span className="text-xs text-slate-400 font-medium">{t("/ an")}</span>
-                  </div>
-                  <p className="text-[11px] text-[#013efb] font-medium mt-1">{t("Licence annuelle complète")}</p>
-                </div>
-
-                <div className="space-y-3 mb-8">
-                  <p className="text-xs font-bold text-slate-700 uppercase tracking-wider">{t("Tout ce qui est dans Starter, plus :")}</p>
-                  {[
-                    'Cartes Scolaires & Badges QR Code imprimables',
-                    'Gestion des Passages & Redoublements de classe',
-                    'Personnel Administratif & affectation des postes',
-                    'Demandes d\'ajustement d\'horaires & documents officiels',
-                    'Paramétrage complet des années scolaires & rôles'
-                  ].map((feat, idx) => (
-                    <div key={idx} className="flex items-start gap-2.5 text-xs text-slate-700 font-medium">
-                      <div className="w-4 h-4 rounded-full bg-[#013efb] text-white flex items-center justify-center shrink-0 mt-0.5 shadow-xs">
-                        <Check size={11} className="stroke-[3]" />
-                      </div>
-                      <span>{t(feat)}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <Link
-                to="/paiement-abonnement?plan=standard"
-                className="w-full py-4 px-6 rounded-2xl font-black text-xs uppercase tracking-wider text-center text-white bg-[#013efb] hover:bg-[#0134db] transition-all shadow-lg shadow-[#013efb]/30 flex items-center justify-center gap-2 hover:scale-[1.02] active:scale-[0.98]"
-              >
-                <span>{t("Choisir Formule Standard")}</span>
-                <ArrowRight size={15} />
-              </Link>
+          ) : configuredPlans.length === 0 ? (
+            <div className="text-center py-14 bg-slate-50 rounded-3xl border border-slate-200 max-w-2xl mx-auto px-6">
+              <p className="text-slate-700 font-bold text-base">
+                {t("Aucune formule d'abonnement n'est actuellement publiée.")}
+              </p>
+              <p className="text-slate-500 text-xs mt-2">
+                {t("Veuillez contacter notre administration pour connaître nos offres sur mesure.")}
+              </p>
             </div>
+          ) : (
+            <div className={`grid grid-cols-1 ${configuredPlans.length === 1 ? 'max-w-md mx-auto' : configuredPlans.length === 2 ? 'lg:grid-cols-2 max-w-4xl mx-auto' : configuredPlans.length >= 4 ? 'md:grid-cols-2 xl:grid-cols-4' : 'lg:grid-cols-3'} gap-7 items-stretch`}>
+              {configuredPlans.map((plan) => {
+                const isRec = Boolean(plan.is_recommended);
+                const isFree = Number(plan.price) === 0 || plan.type === 'trial';
+                const feats: string[] = Array.isArray(plan.features) ? plan.features : [];
+                const studentLimitText =
+                  plan.student_limit === null || plan.student_limit === undefined || Number(plan.student_limit) >= 999999
+                    ? t("Élèves Illimités")
+                    : t(`Jusqu'à ${Number(plan.student_limit).toLocaleString('fr-FR')} élèves`);
 
-            {/* Formule Excellence */}
-            <div className="bg-gradient-to-b from-white to-amber-50/20 rounded-3xl border border-amber-300 p-8 shadow-sm hover:shadow-xl transition-all duration-300 flex flex-col justify-between relative group">
-              <div>
-                <div className="flex items-center justify-between mb-4">
-                  <span className="text-xs font-black uppercase tracking-wider text-amber-800 bg-amber-100 border border-amber-300 px-3 py-1 rounded-full flex items-center gap-1">
-                    <Crown size={12} className="text-amber-700" />
-                    {t("Excellence Pro")}
-                  </span>
-                  <span className="text-xs text-amber-800 font-bold">{t("Élèves Illimités")}</span>
-                </div>
-                <h3 className="text-2xl font-black text-slate-900">{t("Formule Excellence")}</h3>
-                <p className="text-xs text-slate-500 mt-1 mb-6">{t("Gestion intégrale de l'école : Académie, Finances, Salaires & IA.")}</p>
-
-                <div className="mb-6 pb-6 border-b border-amber-100">
-                  <div className="flex items-baseline gap-1">
-                    <span className="text-3xl sm:text-4xl font-black text-slate-900 tracking-tight">150 000</span>
-                    <span className="text-sm font-bold text-slate-600">FCFA</span>
-                    <span className="text-xs text-slate-400 font-medium">{t("/ an")}</span>
-                  </div>
-                  <p className="text-[11px] text-amber-700 font-medium mt-1">{t("Licence annuelle VIP tout-en-un")}</p>
-                </div>
-
-                <div className="space-y-3 mb-8">
-                  <p className="text-xs font-bold text-slate-700 uppercase tracking-wider">{t("Tout ce qui est dans Standard, plus :")}</p>
-                  {[
-                    'Finances & Paiements scolarité (tranches, reçus numérotés)',
-                    'Gestion complète des Salaires & Paie du personnel',
-                    'Journal d\'Audit & traçabilité stricte des actions',
-                    'Assistant IA Gemini pour synthèses & bilans scolaires',
-                    'Support dédié 24/7 & sauvegardes multi-formats'
-                  ].map((feat, idx) => (
-                    <div key={idx} className="flex items-start gap-2.5 text-xs text-slate-700 font-medium">
-                      <div className="w-4 h-4 rounded-full bg-amber-500 text-white flex items-center justify-center shrink-0 mt-0.5 shadow-xs">
-                        <Check size={11} className="stroke-[3]" />
+                return (
+                  <div
+                    key={plan.id}
+                    className={
+                      isRec
+                        ? "bg-gradient-to-b from-white to-[#049ffb]/10 rounded-3xl border-2 border-[#013efb] p-8 shadow-xl hover:shadow-2xl transition-all duration-300 flex flex-col justify-between relative transform lg:-translate-y-2"
+                        : isFree
+                          ? "bg-white rounded-3xl border border-slate-200 p-8 shadow-sm hover:shadow-xl transition-all duration-300 flex flex-col justify-between relative group"
+                          : "bg-gradient-to-b from-white to-amber-50/15 rounded-3xl border border-slate-200 hover:border-amber-300 p-8 shadow-sm hover:shadow-xl transition-all duration-300 flex flex-col justify-between relative group"
+                    }
+                  >
+                    {isRec && (
+                      <div className="absolute -top-3.5 left-1/2 -translate-x-1/2 bg-gradient-to-r from-[#013efb] via-[#049ffb] to-[#fb5c03] text-white text-[11px] font-black uppercase tracking-widest px-4 py-1 rounded-full shadow-md flex items-center gap-1.5 whitespace-nowrap">
+                        <Sparkles size={12} className="text-white" />
+                        <span>{t("Formule recommandée")}</span>
                       </div>
-                      <span>{t(feat)}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
+                    )}
 
-              <Link
-                to="/paiement-abonnement?plan=excellence"
-                className="w-full py-3.5 px-6 rounded-2xl font-black text-xs uppercase tracking-wider text-center text-amber-900 bg-amber-100 hover:bg-amber-500 hover:text-white border border-amber-300 transition-all shadow-xs flex items-center justify-center gap-2 group-hover:shadow-md"
-              >
-                <span>{t("Choisir Formule Excellence")}</span>
-                <ArrowRight size={15} />
-              </Link>
+                    <div>
+                      <div className={`flex items-center justify-between mb-4 ${isRec ? 'mt-2' : ''}`}>
+                        <span className={`text-xs font-black uppercase tracking-wider px-3 py-1 rounded-full border ${
+                          isRec
+                            ? 'text-[#013efb] bg-[#013efb]/10 border-[#013efb]/30'
+                            : isFree
+                              ? 'text-blue-700 bg-blue-50 border-blue-200'
+                              : 'text-amber-800 bg-amber-100 border-amber-300'
+                        }`}>
+                          {plan.name}
+                        </span>
+                        <span className={`text-xs font-bold ${isRec ? 'text-[#013efb]' : 'text-slate-500'}`}>
+                          {studentLimitText}
+                        </span>
+                      </div>
+
+                      <h3 className="text-2xl font-black text-slate-900">{plan.name}</h3>
+                      <p className="text-xs text-slate-500 mt-1 mb-6">
+                        {plan.description || (isFree ? t("Idéal pour découvrir et tester la plateforme.") : t("Solution adaptée aux besoins de votre établissement."))}
+                      </p>
+
+                      <div className={`mb-6 pb-6 border-b ${isRec ? 'border-[#049ffb]/20' : 'border-slate-100'}`}>
+                        <div className="flex items-baseline gap-1">
+                          <span className="text-3xl sm:text-4xl font-black text-slate-900 tracking-tight">
+                            {isFree ? t("Gratuit") : Number(plan.price).toLocaleString('fr-FR')}
+                          </span>
+                          {!isFree && <span className="text-sm font-bold text-slate-600">{currencyLabel}</span>}
+                          <span className="text-xs text-slate-400 font-medium">/ {plan.period || 'mois'}</span>
+                        </div>
+                        <p className={`text-[11px] font-medium mt-1 ${isRec ? 'text-[#013efb]' : 'text-slate-400'}`}>
+                          {isFree ? t(`Période d'essai (${plan.period || '14 jours'})`) : t(`Facturation par ${plan.period || 'mois'}`)}
+                        </p>
+                      </div>
+
+                      <div className="space-y-3 mb-8">
+                        <p className="text-xs font-bold text-slate-700 uppercase tracking-wider">{t("Fonctionnalités incluses :")}</p>
+                        {feats.length > 0 ? (
+                          feats.map((feat, idx) => (
+                            <div key={idx} className="flex items-start gap-2.5 text-xs text-slate-700 font-medium">
+                              <div className={`w-4 h-4 rounded-full flex items-center justify-center shrink-0 mt-0.5 ${
+                                isRec ? 'bg-[#013efb] text-white' : isFree ? 'bg-blue-100 text-blue-600' : 'bg-amber-500 text-white'
+                              }`}>
+                                <Check size={11} className="stroke-[3]" />
+                              </div>
+                              <span>{t(feat)}</span>
+                            </div>
+                          ))
+                        ) : (
+                          <p className="text-xs text-slate-400 italic">{t("Accès complet selon configuration super-admin.")}</p>
+                        )}
+                      </div>
+                    </div>
+
+                    <Link
+                      to={`/paiement-abonnement?plan=${encodeURIComponent(plan.name)}`}
+                      className={
+                        isRec
+                          ? "w-full py-4 px-6 rounded-2xl font-black text-xs uppercase tracking-wider text-center text-white bg-[#013efb] hover:bg-[#0134db] transition-all shadow-lg shadow-[#013efb]/30 flex items-center justify-center gap-2 hover:scale-[1.02] active:scale-[0.98]"
+                          : isFree
+                            ? "w-full py-3.5 px-6 rounded-2xl font-black text-xs uppercase tracking-wider text-center text-blue-700 bg-blue-50 hover:bg-blue-600 hover:text-white border border-blue-200 transition-all shadow-xs flex items-center justify-center gap-2"
+                            : "w-full py-3.5 px-6 rounded-2xl font-black text-xs uppercase tracking-wider text-center text-amber-900 bg-amber-100 hover:bg-amber-500 hover:text-white border border-amber-300 transition-all shadow-xs flex items-center justify-center gap-2"
+                      }
+                    >
+                      <span>{t(`Choisir ${plan.name}`)}</span>
+                      <ArrowRight size={15} />
+                    </Link>
+                  </div>
+                );
+              })}
             </div>
-          </div>
+          )}
 
           {/* Bottom Security & Offline Guarantee banner */}
           <div className="mt-14 bg-slate-900 text-white rounded-3xl p-6 sm:p-8 flex flex-col md:flex-row items-center justify-between gap-6 shadow-xl">

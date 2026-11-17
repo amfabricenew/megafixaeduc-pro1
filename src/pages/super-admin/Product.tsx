@@ -45,13 +45,6 @@ const TABS = [
   { id: 'maintenance', label: 'Maintenance', icon: Lock },
 ];
 
-const INITIAL_PLANS = [
-  { id: 'trial', name: 'Essai (Trial)', price: 0, student_limit: 50, staff_limit: 5, active: true },
-  { id: 'standard', name: 'Standard', price: 25000, student_limit: 500, staff_limit: 50, active: true },
-  { id: 'premium', name: 'Premium', price: 75000, student_limit: 2000, staff_limit: 150, active: true },
-  { id: 'enterprise', name: 'Entreprise', price: 150000, student_limit: 10000, staff_limit: 1000, active: true },
-];
-
 export default function SuperAdminProduct() {
   const [searchParams, setSearchParams] = useSearchParams();
   const initialTab = searchParams.get('tab') || 'product';
@@ -68,7 +61,7 @@ export default function SuperAdminProduct() {
     setActiveTab(tabId);
     setSearchParams({ tab: tabId });
   };
-  const [plans, setPlans] = useState(INITIAL_PLANS);
+  const [plans, setPlans] = useState<any[]>([]);
   const [featureMatrix, setFeatureMatrix] = useState<Record<string, string[]>>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -82,13 +75,13 @@ export default function SuperAdminProduct() {
   const fetchConfig = async () => {
     try {
       setLoading(true);
-      const res = await apiFetch('/api/public/config');
+      const res = await apiFetch('/api/admin/product-config');
       if (res.ok) {
         const data = await res.json();
         if (data.featureMatrix) setFeatureMatrix(data.featureMatrix);
-        
-        const dbPlans = data.config.product_plans ? JSON.parse(data.config.product_plans) : INITIAL_PLANS;
-        setPlans(dbPlans);
+        if (Array.isArray(data.plans)) {
+          setPlans(data.plans);
+        }
       }
     } catch (err) {
       toast.error("Erreur lors du chargement de la configuration");
@@ -124,15 +117,25 @@ export default function SuperAdminProduct() {
 
   const openConfigModal = (plan?: any) => {
     if (plan) {
-      setEditingPlan({ ...plan });
+      setEditingPlan({
+        ...plan,
+        period: plan.period || 'mois',
+        description: plan.description || '',
+        student_limit: plan.student_limit ?? 500,
+        staff_limit: plan.staff_limit ?? 50,
+        active: plan.is_active !== 0 && plan.active !== false
+      });
     } else {
       setEditingPlan({
         id: `plan_${Math.random().toString(36).substr(2, 9)}`,
         name: '',
         price: 0,
-        student_limit: 100,
-        staff_limit: 10,
-        active: true
+        period: 'mois',
+        description: '',
+        student_limit: 500,
+        staff_limit: 50,
+        active: true,
+        is_active: 1
       });
     }
     setIsModalOpen(true);
@@ -186,8 +189,8 @@ export default function SuperAdminProduct() {
     });
   };
 
-  const updatePlan = (id: string, field: string, value: any) => {
-    setPlans(prev => prev.map(p => p.id === id ? { ...p, [field]: value } : p));
+  const updatePlan = (id: any, field: string, value: any) => {
+    setPlans(prev => prev.map(p => String(p.id) === String(id) ? { ...p, [field]: value, ...(field === 'active' ? { is_active: value ? 1 : 0 } : {}) } : p));
   };
 
   if (loading) {
@@ -256,44 +259,44 @@ export default function SuperAdminProduct() {
                         </div>
                         <div className="flex-1 cursor-pointer" onClick={() => openConfigModal(plan)}>
                           <p className="font-bold text-slate-900">{plan.name}</p>
-                          <div className="flex items-center gap-2">
-                             <span className="text-[10px] text-indigo-600 font-black">{plan.price.toLocaleString()}</span>
-                            <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">FCFA / mois</span>
-                          </div>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-3">
-                        <button 
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            openConfigModal(plan);
-                          }}
-                          className="p-2 bg-white text-indigo-600 rounded-xl shadow-sm hover:shadow-md transition-all border border-indigo-50"
-                        >
-                          <Settings size={16} />
-                        </button>
-                        <button 
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            removePlan(plan.id);
-                          }}
-                          className="p-1.5 text-slate-400 hover:text-rose-500 hover:bg-rose-50 rounded-lg transition-all opacity-0 group-hover:opacity-100"
-                        >
-                          <X size={16} />
-                        </button>
-                      </div>
-                    </div>
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="space-y-1">
-                        <p className="text-[10px] font-bold text-slate-400 uppercase">Limite Élèves</p>
-                        <p className="text-xs font-bold text-slate-900">{plan.student_limit.toLocaleString()}</p>
-                      </div>
-                      <div className="space-y-1">
-                        <p className="text-[10px] font-bold text-slate-400 uppercase">Limite Staff</p>
-                        <p className="text-xs font-bold text-slate-900">{plan.staff_limit.toLocaleString()}</p>
-                      </div>
-                    </div>
-                  </div>
+                           <div className="flex items-center gap-2">
+                              <span className="text-[10px] text-indigo-600 font-black">{Number(plan.price || 0).toLocaleString('fr-FR')}</span>
+                             <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">FCFA / {plan.period || 'mois'}</span>
+                           </div>
+                         </div>
+                       </div>
+                       <div className="flex items-center gap-3">
+                         <button 
+                           onClick={(e) => {
+                             e.stopPropagation();
+                             openConfigModal(plan);
+                           }}
+                           className="p-2 bg-white text-indigo-600 rounded-xl shadow-sm hover:shadow-md transition-all border border-indigo-50"
+                         >
+                           <Settings size={16} />
+                         </button>
+                         <button 
+                           onClick={(e) => {
+                             e.stopPropagation();
+                             removePlan(plan.id);
+                           }}
+                           className="p-1.5 text-slate-400 hover:text-rose-500 hover:bg-rose-50 rounded-lg transition-all opacity-0 group-hover:opacity-100"
+                         >
+                           <X size={16} />
+                         </button>
+                       </div>
+                     </div>
+                     <div className="grid grid-cols-2 gap-4">
+                       <div className="space-y-1">
+                         <p className="text-[10px] font-bold text-slate-400 uppercase">Limite Élèves</p>
+                         <p className="text-xs font-bold text-slate-900">{Number(plan.student_limit || 0).toLocaleString('fr-FR')}</p>
+                       </div>
+                       <div className="space-y-1">
+                         <p className="text-[10px] font-bold text-slate-400 uppercase">Limite Staff</p>
+                         <p className="text-xs font-bold text-slate-900">{Number(plan.staff_limit || 0).toLocaleString('fr-FR')}</p>
+                       </div>
+                     </div>
+                   </div>
                 ))}
               </div>
             </div>
@@ -349,7 +352,7 @@ export default function SuperAdminProduct() {
                             Synchro
                           </div>
                         </div>
-                        <p className="text-xs text-indigo-600 font-black">{plan.price.toLocaleString()} FCFA / mois</p>
+                        <p className="text-xs text-indigo-600 font-black">{Number(plan.price || 0).toLocaleString('fr-FR')} FCFA / {plan.period || 'mois'}</p>
                       </div>
                     </div>
                     <div className="flex items-center gap-4">
@@ -566,7 +569,7 @@ export default function SuperAdminProduct() {
 
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
-                  <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Prix Mensuel (FCFA)</label>
+                  <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Tarif (FCFA)</label>
                   <input 
                     type="number" 
                     value={editingPlan.price}
@@ -575,22 +578,37 @@ export default function SuperAdminProduct() {
                   />
                 </div>
                 <div className="space-y-2">
-                  <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Statut Initial</label>
-                  <div className="flex items-center gap-3 p-4 bg-slate-50 rounded-2xl h-[52px]">
-                    <span className="text-xs font-bold text-slate-600">Actif</span>
-                    <button 
-                      onClick={() => setEditingPlan({ ...editingPlan, active: !editingPlan.active })}
-                      className={cn(
-                        "w-10 h-5 rounded-full transition-all relative ml-auto",
-                        editingPlan.active ? "bg-emerald-500" : "bg-slate-300"
-                      )}
-                    >
-                      <div className={cn(
-                        "absolute top-0.5 w-4 h-4 bg-white rounded-full shadow-sm transition-all",
-                        editingPlan.active ? "right-0.5" : "left-0.5"
-                      )} />
-                    </button>
-                  </div>
+                  <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Période / Durée</label>
+                  <select 
+                    value={editingPlan.period || 'mois'}
+                    onChange={(e) => setEditingPlan({ ...editingPlan, period: e.target.value })}
+                    className="w-full p-4 bg-slate-50 border-none rounded-2xl text-sm font-medium focus:ring-2 focus:ring-indigo-500/20"
+                  >
+                    <option value="mois">Par mois</option>
+                    <option value="an">Par an</option>
+                    <option value="trimestre">Par trimestre</option>
+                    <option value="14 jours">14 jours (Essai)</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Statut Initial</label>
+                <div className="flex items-center gap-3 p-4 bg-slate-50 rounded-2xl h-[52px]">
+                  <span className="text-xs font-bold text-slate-600">Actif</span>
+                  <button 
+                    type="button"
+                    onClick={() => setEditingPlan({ ...editingPlan, active: !editingPlan.active, is_active: !editingPlan.active ? 1 : 0 })}
+                    className={cn(
+                      "w-10 h-5 rounded-full transition-all relative ml-auto",
+                      editingPlan.active ? "bg-emerald-500" : "bg-slate-300"
+                    )}
+                  >
+                    <div className={cn(
+                      "absolute top-0.5 w-4 h-4 bg-white rounded-full shadow-sm transition-all",
+                      editingPlan.active ? "right-0.5" : "left-0.5"
+                    )} />
+                  </button>
                 </div>
               </div>
 

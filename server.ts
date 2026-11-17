@@ -3868,6 +3868,9 @@ db.exec(`
     is_recommended INTEGER DEFAULT 0,
     type TEXT DEFAULT 'paid',
     is_active INTEGER DEFAULT 1,
+    student_limit INTEGER DEFAULT 500,
+    staff_limit INTEGER DEFAULT 50,
+    description TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
   );
 
@@ -3886,6 +3889,9 @@ db.exec(`
   );
 `);
 
+try { db.prepare("ALTER TABLE plans ADD COLUMN student_limit INTEGER DEFAULT 500").run(); } catch(e){}
+try { db.prepare("ALTER TABLE plans ADD COLUMN staff_limit INTEGER DEFAULT 50").run(); } catch(e){}
+try { db.prepare("ALTER TABLE plans ADD COLUMN description TEXT").run(); } catch(e){}
 try { db.prepare("ALTER TABLE school_info ADD COLUMN latitude REAL").run(); } catch(e){}
 try { db.prepare("ALTER TABLE school_info ADD COLUMN longitude REAL").run(); } catch(e){}
 try { db.prepare("ALTER TABLE school_info ADD COLUMN geofence_radius INTEGER DEFAULT 200").run(); } catch(e){}
@@ -4646,6 +4652,84 @@ try {
 
   console.log("Database initialization completed.");
   scheduleCheckpoint('startup', 3000);
+}
+
+// Single Source of Truth for Configured Subscription Plans
+function getConfiguredPlansFromDb(onlyActive: boolean = true) {
+  try {
+    const query = onlyActive
+      ? "SELECT * FROM plans WHERE COALESCE(is_active, 1) = 1 ORDER BY price ASC, id ASC"
+      : "SELECT * FROM plans ORDER BY price ASC, id ASC";
+    const rows = db.prepare(query).all() as any[];
+    return rows.map((p: any) => {
+      let parsedFeatures: string[] = [];
+      try {
+        parsedFeatures = typeof p.features === 'string'
+          ? JSON.parse(p.features || '[]')
+          : (Array.isArray(p.features) ? p.features : []);
+      } catch {
+        parsedFeatures = [];
+      }
+      const numericPrice = Number(p.price ?? 0);
+      return {
+        ...p,
+        id: p.id,
+        name: p.name,
+        price: numericPrice,
+        period: p.period || 'mois',
+        features: parsedFeatures,
+        color: p.color || 'indigo',
+        is_recommended: Boolean(p.is_recommended),
+        type: p.type || (numericPrice === 0 ? 'trial' : 'paid'),
+        student_limit: (p.student_limit !== null && p.student_limit !== undefined) ? p.student_limit : (numericPrice === 0 ? 50 : 500),
+        staff_limit: (p.staff_limit !== null && p.staff_limit !== undefined) ? p.staff_limit : (numericPrice === 0 ? 5 : 50),
+        description: p.description || '',
+        is_active: Boolean(p.is_active ?? 1),
+        active: Boolean(p.is_active ?? 1)
+      };
+    });
+  } catch (e) {
+    console.warn("Error reading plans table:", e);
+    return [];
+  }
+}
+
+function resolveConfiguredPlan(planInput?: any, onlyActive: boolean = true) {
+  const allActive = getConfiguredPlansFromDb(onlyActive);
+  const allPlans = onlyActive ? allActive : getConfiguredPlansFromDb(false);
+  const pool = allActive.length > 0 ? allActive : allPlans;
+  if (pool.length === 0) return null;
+
+  if (planInput !== undefined && planInput !== null && String(planInput).trim() !== '') {
+    const raw = String(planInput).trim();
+    const lower = raw.toLowerCase();
+    const byExactId = pool.find((p: any) => String(p.id).toLowerCase() === lower);
+    if (byExactId) return byExactId;
+
+    const byExactName = pool.find((p: any) => (p.name || '').toLowerCase().trim() === lower);
+    if (byExactName) return byExactName;
+
+    const byPartialName = pool.find((p: any) =>
+      (p.name || '').toLowerCase().includes(lower) || lower.includes((p.name || '').toLowerCase())
+    );
+    if (byPartialName) return byPartialName;
+  }
+
+  return pool.find((p: any) => p.is_recommended) || pool[0];
+}
+
+function getDurationFromPeriod(period?: string): { days: number; months: number } {
+  const p = (period || '').toLowerCase();
+  if (p.includes('14') && p.includes('jour')) return { days: 14, months: 1 };
+  const daysMatch = p.match(/(\d+)\s*jour/);
+  if (daysMatch) {
+    const d = Number(daysMatch[1]) || 14;
+    return { days: d, months: Math.max(1, Math.round(d / 30)) };
+  }
+  if (p.includes('an')) return { days: 365, months: 12 };
+  if (p.includes('semestr')) return { days: 180, months: 6 };
+  if (p.includes('trimestr')) return { days: 90, months: 3 };
+  return { days: 30, months: 1 };
 }
 
 // SMTP Transporter Helper
@@ -7577,14 +7661,17 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
       }
 
       const { plan, statut } = req.body;
-      const validPlans = ['starter', 'standard', 'excellence'];
-      const chosenPlan = validPlans.includes(plan) ? plan : 'standard';
+      const matchedPlan = resolveConfiguredPlan(plan, true);
+      if (!matchedPlan) {
+        return res.status(400).json({ error: "Aucune formule d'abonnement active configurée par le Super Admin." });
+      }
+
+      const chosenPlan = matchedPlan.name;
       const chosenStatus = statut || 'actif';
 
-      // Set expiration date (e.g. 3 months for starter, 1 year for standard/excellence)
-      const now = new Date();
-      const monthsToAdd = chosenPlan === 'starter' ? 3 : 12;
-      const expiryDate = new Date(now.setMonth(now.getMonth() + monthsToAdd)).toISOString().split('T')[0];
+      // Set expiration date dynamically from the plan's configured period
+      const { days } = getDurationFromPeriod(matchedPlan.period);
+      const expiryDate = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
 
       db.prepare(`
         UPDATE school_info 
@@ -7599,7 +7686,7 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
         plan: chosenPlan, 
         statut: chosenStatus, 
         date_fin: expiryDate,
-        message: `Abonnement mis à jour avec succès (${chosenPlan.toUpperCase()})`
+        message: `Abonnement mis à jour avec succès (${chosenPlan})`
       });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -20952,6 +21039,42 @@ function executeYearTransition(
     }
   });
 
+  app.post("/api/auth/google/link", authenticateToken, async (req: any, res) => {
+    try {
+      const rawToken = req.body?.idToken || req.body?.credential;
+      if (!rawToken || typeof rawToken !== 'string') {
+        return res.status(400).json({ success: false, error: "Jeton Google manquant." });
+      }
+
+      const { auth: adminAuth } = await import("./src/lib/firebase-admin.ts");
+      const verified = await adminAuth.verifyIdToken(rawToken);
+      if (!verified?.email) {
+        return res.status(401).json({ success: false, error: "Email Google introuvable ou non vérifié." });
+      }
+
+      const cleanUid = verified.uid || verified.email.toString().trim().toLowerCase();
+      const userId = req.userId;
+
+      db.prepare("UPDATE utilisateurs SET google_id = ?, approuve = 1 WHERE id = ? AND school_id = ?")
+        .run(cleanUid, userId, req.schoolId);
+
+      const updatedUser = db.prepare("SELECT id, nom, email, role, school_id, google_id, can_write, eleve_id, enseignant_id, permissions FROM utilisateurs WHERE id = ? AND school_id = ?")
+        .get(userId, req.schoolId) as any;
+
+      logActivity(userId, 'LINK_GOOGLE', 'USER', userId, { googleEmail: verified.email }, req.schoolId);
+      res.json({
+        success: true,
+        user: updatedUser ? {
+          ...updatedUser,
+          permissions: updatedUser.permissions ? JSON.parse(updatedUser.permissions) : []
+        } : null
+      });
+    } catch (error: any) {
+      console.error("Google Link Error:", error);
+      res.status(500).json({ success: false, error: error?.message || "Erreur lors de la liaison avec Google." });
+    }
+  });
+
   app.post("/api/auth/profile/update", authenticateToken, (req: any, res) => {
     const { id, nom, email, question, answer } = req.body;
     const requestedId = id ? Number(id) : req.userId;
@@ -21602,54 +21725,8 @@ function executeYearTransition(
       const configMap: any = {};
       config.forEach((c: any) => configMap[c.key] = c.value);
 
-      // Query active plans from the dedicated plans table first
-      let plans = [];
-      try {
-        const dbPlans = db.prepare("SELECT * FROM plans WHERE is_active = 1 ORDER BY price ASC").all() as any[];
-        if (dbPlans && dbPlans.length > 0) {
-          plans = dbPlans.map(p => ({
-            id: p.id,
-            name: p.name,
-            price: p.price,
-            period: p.period || 'mois',
-            features: typeof p.features === 'string' ? JSON.parse(p.features || '[]') : (p.features || []),
-            color: p.color || 'indigo',
-            is_recommended: Boolean(p.is_recommended),
-            type: p.type || (p.price === 0 ? 'trial' : 'paid'),
-            student_limit: p.student_limit || (p.price === 0 ? 50 : 500),
-            staff_limit: p.staff_limit || (p.price === 0 ? 5 : 50),
-            description: p.description,
-            active: true
-          }));
-        }
-      } catch (e) {
-        console.warn("Error reading plans table:", e);
-      }
-
-      if (plans.length === 0) {
-        try {
-          plans = configMap.product_plans ? JSON.parse(configMap.product_plans) : [
-            { id: 'trial', name: 'Essai (Trial)', price: 0, student_limit: 50, staff_limit: 5, active: true },
-            { id: 'standard', name: 'Standard', price: 25000, student_limit: 500, staff_limit: 50, active: true },
-            { id: 'premium', name: 'Premium', price: 75000, student_limit: 2000, staff_limit: 150, active: true },
-            { id: 'enterprise', name: 'Entreprise', price: 150000, student_limit: 10000, staff_limit: 1000, active: true },
-          ];
-        } catch (e) {
-          plans = [];
-        }
-
-        let matrix = {};
-        try {
-          matrix = configMap.product_feature_matrix ? JSON.parse(configMap.product_feature_matrix) : {};
-        } catch (e) {
-          matrix = {};
-        }
-
-        plans = plans.map((p: any) => ({
-          ...p,
-          features: matrix[p.id] || []
-        }));
-      }
+      // Single source of truth: active plans configured by Super Admin in the `plans` table
+      const plans = getConfiguredPlansFromDb(true);
 
       // Parse activated payment methods
       let paymentMethods: any[] = [];
@@ -21859,56 +21936,8 @@ function executeYearTransition(
         planPaymentLinks = {};
       }
 
-      const plans = [
-        {
-          id: 'starter',
-          name: 'Starter',
-          price: 25000,
-          period: 'trimestre',
-          student_limit: 300,
-          description: "Idéal pour informatiser la gestion pédagogique et les notes",
-          features: [
-            'Gestion des classes, matières et coefficients',
-            'Fiches complètes et inscriptions des élèves',
-            'Saisie des notes et calcul des moyennes',
-            'Emplois du temps hebdomadaires',
-            'Espace Parent sécurisé (Mon Enfant)'
-          ]
-        },
-        {
-          id: 'standard',
-          name: 'Standard',
-          price: 75000,
-          period: 'an',
-          student_limit: 1000,
-          is_recommended: true,
-          description: "Organisation complète avec badges officiels et promotions",
-          features: [
-            'Tout ce qui est dans Starter',
-            'Cartes Scolaires & Badges QR Code imprimables',
-            'Gestion des Passages & Redoublements de classe',
-            'Personnel Administratif & affectation des postes',
-            'Demandes d\'ajustement d\'horaires & documents officiels',
-            'Paramétrage complet des années scolaires & rôles'
-          ]
-        },
-        {
-          id: 'excellence',
-          name: 'Excellence',
-          price: 150000,
-          period: 'an',
-          student_limit: 'Illimité',
-          description: "Gestion intégrale de l'école : Académie, Finances, Salaires & IA",
-          features: [
-            'Tout ce qui est dans Standard',
-            'Finances & Paiements scolarité (tranches, reçus numérotés)',
-            'Gestion complète des Salaires & Paie du personnel',
-            'Journal d\'Audit & traçabilité stricte des actions',
-            'Assistant IA Gemini pour synthèses & bilans scolaires',
-            'Support prioritaire 24/7 par un conseiller dédié'
-          ]
-        }
-      ];
+      // Single source of truth: active plans configured by Super Admin
+      const plans = getConfiguredPlansFromDb(true);
 
       res.json({
         success: true,
@@ -22362,44 +22391,17 @@ function executeYearTransition(
     return candidate;
   }
 
-  function getPlanFeaturesList(planNameOrCode: string = 'standard'): string[] {
-    const lower = (planNameOrCode || '').toLowerCase();
-    if (lower.includes('starter') || lower.includes('base') || lower.includes('essai')) {
-      return [
-        "Gestion des classes, matières et coefficients",
-        "Fiches et inscriptions complètes des élèves",
-        "Saisie des notes et calcul des moyennes périodiques",
-        "Emplois du temps hebdomadaires des classes",
-        "Espace individuel Parent sécurisé (Mon Enfant)",
-        "Capacité jusqu'à 300 élèves",
-        "Support technique standard"
-      ];
-    } else if (lower.includes('standard') || lower.includes('academique')) {
-      return [
-        "Toutes les fonctionnalités de la formule Starter",
-        "Génération & Impression des Cartes Scolaires & Badges QR Code",
-        "Gestion des Passages & Redoublements de fin d'année",
-        "Gestion du Personnel Administratif et des Postes",
-        "Demandes d'ajustement d'horaires et documents administratifs",
-        "Paramétrage complet des années scolaires & rôles",
-        "Capacité jusqu'à 1 000 élèves",
-        "Support prioritaire WhatsApp & Email"
-      ];
-    } else {
-      // Excellence / Premium / Premium Plus
-      return [
-        "Toutes les fonctionnalités des formules Starter & Standard",
-        "Module Finances & Paiements de scolarité (tranches, reçus officiels)",
-        "Gestion complète des Salaires & Paie (permanents & vacataires)",
-        "Journal d'audit & Traçabilité complète des opérations",
-        "Assistant IA Gemini pour analyses pédagogiques et bilans scolaires",
-        "Bibliothèque numérique & Banque d'épreuves partagées",
-        "Diffusion d'Alertes et Messagerie SMS / Vocale",
-        "Effectifs et classes illimités",
-        "Sauvegardes cloud automatiques",
-        "Support dédié VIP 24/7 et accompagnement au déploiement"
-      ];
+  function getPlanFeaturesList(planNameOrCode: string = ''): string[] {
+    const matched = resolveConfiguredPlan(planNameOrCode, false);
+    if (matched && Array.isArray(matched.features) && matched.features.length > 0) {
+      return matched.features;
     }
+    return [
+      "Gestion des classes, matières et coefficients",
+      "Fiches et inscriptions des élèves",
+      "Saisie des notes et calcul des moyennes",
+      "Emplois du temps hebdomadaires"
+    ];
   }
 
   function generateFicheAbonnementHtml(data: {
@@ -23539,21 +23541,28 @@ L'équipe MégafixaEduc Pro vous souhaite une excellente réussite académique !
         return res.status(400).json({ error: "Nom de l'école, email client et formule sont requis." });
       }
 
-      const licenseKey = generateSubscriptionKey(plan_name);
-      const days = Number(duration_days) || 365;
+      const matchedPlan = resolveConfiguredPlan(plan_name, false);
+      const resolvedPlanName = matchedPlan ? matchedPlan.name : plan_name;
+      const resolvedAmount = amount !== undefined && amount !== null && amount !== ''
+        ? Number(amount)
+        : (matchedPlan ? matchedPlan.price : 0);
+
+      const licenseKey = generateSubscriptionKey(resolvedPlanName);
+      const periodDuration = matchedPlan ? getDurationFromPeriod(matchedPlan.period) : { days: 365, months: 12 };
+      const days = Number(duration_days) || periodDuration.days || 365;
       const now = new Date();
       const dateDebut = now.toISOString().split('T')[0];
       const expiryDate = new Date(now.getTime() + days * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-      const durationText = days >= 365 ? '1 an' : `${Math.round(days / 30)} mois`;
-      const features = getPlanFeaturesList(plan_name);
+      const durationText = days >= 365 ? `${Math.round(days / 365)} an(s)` : days >= 30 ? `${Math.round(days / 30)} mois` : `${days} jours`;
+      const features = matchedPlan && matchedPlan.features?.length > 0 ? matchedPlan.features : getPlanFeaturesList(resolvedPlanName);
       const ref = `MANUAL-${Date.now()}`;
 
       const ficheHtml = generateFicheAbonnementHtml({
         schoolName: school_name,
         adminNom: client_name || 'Direction',
         email: client_email,
-        planName: plan_name,
-        amount: amount || 0,
+        planName: resolvedPlanName,
+        amount: resolvedAmount,
         currency: currency || 'FCFA',
         reference: ref,
         licenseKey,
@@ -23575,15 +23584,15 @@ L'équipe MégafixaEduc Pro vous souhaite une excellente réussite académique !
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'available', ?, ?, ?)
       `).run(
         licenseKey,
-        plan_name,
-        plan_name.toLowerCase(),
+        resolvedPlanName,
+        resolvedPlanName.toLowerCase(),
         school_name,
         schoolId,
         client_email,
         client_name || 'Direction',
         client_phone || null,
         ref,
-        amount || 0,
+        resolvedAmount,
         currency || 'FCFA',
         days,
         JSON.stringify(features),
@@ -23703,15 +23712,8 @@ Cette clé servira lors du premier accès de votre établissement au système po
       const configMap: any = {};
       settings.forEach(s => configMap[s.key] = s.value);
 
-      // Get plans from the dedicated plans table
-      const dbPlans = db.prepare("SELECT * FROM plans ORDER BY price ASC").all() as any[];
-      const plans = dbPlans.map(p => ({
-        ...p,
-        features: typeof p.features === 'string' ? JSON.parse(p.features || '[]') : (p.features || []),
-        is_active: Boolean(p.is_active),
-        is_recommended: Boolean(p.is_recommended),
-        active: Boolean(p.is_active)
-      }));
+      // Get plans from the dedicated plans table (single source of truth)
+      const plans = getConfiguredPlansFromDb(false);
 
       res.json({
         plans,
@@ -23724,7 +23726,7 @@ Cette clé servira lors du premier accès de votre établissement au système po
     }
   });
 
-  // Admin endpoint to save product configuration
+  // Admin endpoint to save product configuration and keep `plans` table synchronized
   app.post("/api/admin/product-config", authenticateToken, (req: any, res) => {
     try {
       if (req.user.role !== 'super_admin') {
@@ -23732,12 +23734,88 @@ Cette clé servira lors du premier accès de votre établissement au système po
       }
 
       const { plans, featureMatrix, paymentMethods, planPaymentLinks } = req.body;
-
       const upsert = db.prepare("INSERT OR REPLACE INTO super_admin_settings (key, value) VALUES (?, ?)");
-      
+
       db.transaction(() => {
-        upsert.run('product_plans', JSON.stringify(plans));
-        upsert.run('product_feature_matrix', JSON.stringify(featureMatrix));
+        if (Array.isArray(plans)) {
+          const existingDbPlans = db.prepare("SELECT id, name, features FROM plans").all() as any[];
+          const keptIds = new Set<number>();
+
+          for (const p of plans) {
+            const numericId = typeof p.id === 'number' || /^\d+$/.test(String(p.id)) ? Number(p.id) : null;
+            const existingRow = numericId
+              ? existingDbPlans.find(r => r.id === numericId)
+              : existingDbPlans.find(r => (r.name || '').toLowerCase().trim() === (p.name || '').toLowerCase().trim());
+
+            const isAct = p.is_active !== undefined ? (p.is_active ? 1 : 0) : (p.active !== undefined ? (p.active ? 1 : 0) : 1);
+            const priceVal = Number(p.price ?? 0);
+            const typeVal = p.type || (priceVal === 0 ? 'trial' : 'paid');
+            const periodVal = p.period || (typeVal === 'trial' ? '14 jours' : 'mois');
+            const featuresVal = Array.isArray(p.features)
+              ? JSON.stringify(p.features)
+              : (existingRow?.features || '[]');
+
+            if (existingRow) {
+              keptIds.add(existingRow.id);
+              db.prepare(`
+                UPDATE plans SET
+                  name = ?,
+                  price = ?,
+                  period = ?,
+                  features = ?,
+                  color = ?,
+                  is_recommended = ?,
+                  type = ?,
+                  is_active = ?,
+                  student_limit = ?,
+                  staff_limit = ?,
+                  description = ?
+                WHERE id = ?
+              `).run(
+                p.name,
+                priceVal,
+                periodVal,
+                featuresVal,
+                p.color || 'indigo',
+                p.is_recommended ? 1 : 0,
+                typeVal,
+                isAct,
+                p.student_limit ?? 500,
+                p.staff_limit ?? 50,
+                p.description ?? null,
+                existingRow.id
+              );
+            } else {
+              const ins = db.prepare(`
+                INSERT INTO plans (name, price, period, features, color, is_recommended, type, is_active, student_limit, staff_limit, description)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              `).run(
+                p.name,
+                priceVal,
+                periodVal,
+                featuresVal,
+                p.color || 'indigo',
+                p.is_recommended ? 1 : 0,
+                typeVal,
+                isAct,
+                p.student_limit ?? 500,
+                p.staff_limit ?? 50,
+                p.description ?? null
+              );
+              keptIds.add(Number(ins.lastInsertRowid));
+            }
+          }
+
+          // Remove any plans explicitly deleted in Product.tsx
+          for (const row of existingDbPlans) {
+            if (!keptIds.has(row.id)) {
+              db.prepare("DELETE FROM plans WHERE id = ?").run(row.id);
+            }
+          }
+        }
+
+        upsert.run('product_plans', JSON.stringify(plans || []));
+        upsert.run('product_feature_matrix', JSON.stringify(featureMatrix || {}));
         if (paymentMethods) upsert.run('payment_methods', JSON.stringify(paymentMethods));
         if (planPaymentLinks) upsert.run('plan_payment_links', JSON.stringify(planPaymentLinks));
       })();
@@ -30056,13 +30134,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
   // Plans Management
   app.get("/api/super-admin/plans", authenticateToken, requireSuperAdmin, (req, res) => {
     try {
-      const plans = db.prepare("SELECT * FROM plans ORDER BY price ASC").all();
-      res.json(plans.map((p: any) => ({ 
-        ...p, 
-        features: typeof p.features === 'string' ? JSON.parse(p.features || '[]') : (p.features || []),
-        is_active: Boolean(p.is_active),
-        is_recommended: Boolean(p.is_recommended)
-      })));
+      res.json(getConfiguredPlansFromDb(false));
     } catch (err) {
       res.status(500).json({ error: "Erreur lors de la récupération des plans." });
     }
@@ -30070,9 +30142,21 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
 
   app.post("/api/super-admin/plans", authenticateToken, requireSuperAdmin, (req, res) => {
     try {
-      const { name, price, period, features, color, is_recommended, type, student_limit, staff_limit, description } = req.body;
-      const info = db.prepare("INSERT INTO plans (name, price, period, features, color, is_recommended, type, student_limit, staff_limit, description, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)")
-        .run(name, price || 0, period || 'mois', JSON.stringify(features || []), color || 'indigo', is_recommended ? 1 : 0, type || 'paid', student_limit || 500, staff_limit || 50, description || null);
+      const { name, price, period, features, color, is_recommended, type, is_active, student_limit, staff_limit, description } = req.body;
+      const info = db.prepare("INSERT INTO plans (name, price, period, features, color, is_recommended, type, student_limit, staff_limit, description, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(
+          name,
+          price ?? 0,
+          period || 'mois',
+          JSON.stringify(features || []),
+          color || 'indigo',
+          is_recommended ? 1 : 0,
+          type || (Number(price ?? 0) === 0 ? 'trial' : 'paid'),
+          student_limit ?? 500,
+          staff_limit ?? 50,
+          description || null,
+          is_active !== undefined ? (is_active ? 1 : 0) : 1
+        );
       res.json({ success: true, id: info.lastInsertRowid });
     } catch (err) {
       res.status(500).json({ error: "Erreur lors de la création du plan." });
@@ -30090,10 +30174,10 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
           JSON.stringify(features || []), 
           color || 'indigo', 
           is_recommended ? 1 : 0, 
-          type || 'paid', 
+          type || (Number(price ?? 0) === 0 ? 'trial' : 'paid'), 
           is_active !== undefined ? (is_active ? 1 : 0) : 1, 
-          student_limit || 500, 
-          staff_limit || 50, 
+          student_limit ?? 500, 
+          staff_limit ?? 50, 
           description || null,
           req.params.id
         );
@@ -30277,8 +30361,9 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       const defaultPassword = `Edu2026!${randomSuffix}`;
       const passwordHash = bcrypt.hashSync(defaultPassword, 8);
 
-      // Generate subscription key
-      const plan = plan_abonnement || 'Standard';
+      // Generate subscription key & resolve configured plan from Super Admin DB
+      const matchedPlan = resolveConfiguredPlan(plan_abonnement, false);
+      const plan = (plan_abonnement && String(plan_abonnement).trim()) ? (matchedPlan?.name || String(plan_abonnement).trim()) : (matchedPlan?.name || 'Standard');
       let subscriptionKey = '';
       try {
         subscriptionKey = generateSubscriptionKey(plan);
@@ -30454,7 +30539,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         adresse || null,
         pays || 'Bénin',
         devise || 'FCFA',
-        plan_abonnement || 'Standard',
+        plan_abonnement || resolveConfiguredPlan(undefined, false)?.name || 'Standard',
         statut_abonnement || 'actif',
         date_fin_abonnement || null,
         primActif,
@@ -30754,17 +30839,8 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         }
       } catch (e) {}
 
-      // Get plans
-      let plans = [];
-      try {
-        plans = db.prepare("SELECT * FROM plans WHERE active = 1 ORDER BY price ASC").all();
-      } catch (e) {
-        plans = [
-          { id: 'DECOUVERTE', name: 'Découverte', price: 0, student_limit: 100, staff_limit: 10 },
-          { id: 'PRO', name: 'Formule Pro', price: 150000, student_limit: 500, staff_limit: 30 },
-          { id: 'EXCELLENCE', name: 'Excellence Illimitée', price: 350000, student_limit: 2000, staff_limit: 100 }
-        ];
-      }
+      // Single source of truth: active plans configured by Super Admin (`plans` table, using `is_active`)
+      const plans = getConfiguredPlansFromDb(true);
 
       res.json({
         app_name: configMap.app_name || 'MégafixaEduc Pro',
@@ -30822,6 +30898,11 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       // Generate unique reference
       const cleanRef = `DEM-${new Date().getFullYear()}-${Math.random().toString(36).substring(2, 7).toUpperCase()}`;
 
+      // Resolve exclusively from plans configured by Super Admin
+      const matchedPlan = resolveConfiguredPlan(plan_souhaite, true);
+      const finalPlanName = matchedPlan ? matchedPlan.name : (plan_souhaite || 'Standard');
+      const finalEstimatedAmount = matchedPlan ? Number(matchedPlan.price || 0) : (Number(montant_estime) || 0);
+
       const stmt = db.prepare(`
         INSERT INTO school_creation_requests (
           reference, nom_ecole, type_etablissement, pays, ville, adresse,
@@ -30840,8 +30921,8 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         adresse || '',
         telephone_ecole || '',
         email_ecole ? email_ecole.trim().toLowerCase() : '',
-        plan_souhaite || 'PRO',
-        Number(montant_estime) || 0,
+        finalPlanName,
+        finalEstimatedAmount,
         demandeur_nom.trim(),
         demandeur_fonction || 'Directeur / Fondateur',
         demandeur_email.trim().toLowerCase(),
@@ -30856,7 +30937,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       // Super Admin Real-Time Notification
       try {
         const notifTitre = `Nouvelle demande d'école : ${nom_ecole.trim()}`;
-        const notifMsg = `Demande reçue de ${demandeur_nom.trim()} (${demandeur_fonction || 'Demandeur'}) pour l'établissement « ${nom_ecole.trim()} » (${ville || 'N/A'}, ${pays || 'Bénin'}). Formule souhaitée : ${plan_souhaite || 'PRO'}. Contact : ${demandeur_whatsapp || demandeur_telephone}.`;
+        const notifMsg = `Demande reçue de ${demandeur_nom.trim()} (${demandeur_fonction || 'Demandeur'}) pour l'établissement « ${nom_ecole.trim()} » (${ville || 'N/A'}, ${pays || 'Bénin'}). Formule souhaitée : ${finalPlanName}. Contact : ${demandeur_whatsapp || demandeur_telephone}.`;
         
         db.prepare(`
           INSERT INTO super_admin_notifications (titre, message, type, school_id, school_name, school_code, admin_email, lu)
@@ -30878,7 +30959,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
             <p style="color:#334155;font-size:14px;line-height:1.6;">Nous confirmons la bonne réception de la demande pour votre établissement <strong>${nom_ecole}</strong> sur la plateforme <strong>MégafixaEduc Pro</strong>.</p>
             <div style="background:#ffffff;border:1px solid #e2e8f0;padding:16px;border-radius:12px;margin:16px 0;">
               <p style="margin:4px 0;font-size:13px;"><strong>Référence de dossier :</strong> <span style="color:#4f46e5;font-weight:bold;">${cleanRef}</span></p>
-              <p style="margin:4px 0;font-size:13px;"><strong>Formule choisie :</strong> ${plan_souhaite || 'PRO'}</p>
+              <p style="margin:4px 0;font-size:13px;"><strong>Formule choisie :</strong> ${finalPlanName}</p>
               <p style="margin:4px 0;font-size:13px;"><strong>Délai de traitement :</strong> 24h maximum après confirmation du paiement</p>
             </div>
             <p style="color:#64748b;font-size:12px;">Pour toute question, contactez notre équipe au (+229) 0161107918 ou par WhatsApp.</p>
@@ -31040,8 +31121,9 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         : `Edu2026!${randomSuffix}`;
       const passwordHash = bcrypt.hashSync(defaultPassword, 8);
 
-      // Plan & Subscription Key
-      const plan = plan_abonnement || request.plan_souhaite || 'PRO';
+      // Plan & Subscription Key resolved from Super Admin configured plans
+      const matchedApprovePlan = resolveConfiguredPlan(plan_abonnement || request.plan_souhaite, false);
+      const plan = matchedApprovePlan ? matchedApprovePlan.name : (plan_abonnement || request.plan_souhaite || 'Standard');
       let subscriptionKey = '';
       try {
         subscriptionKey = generateSubscriptionKey(plan);
@@ -31406,13 +31488,12 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         GROUP BY plan_abonnement
       `).all();
 
-      // Estimate MRR (Monthly Recurring Revenue)
-      const plans = db.prepare("SELECT * FROM plans").all() as any[];
+      // Estimate MRR (Monthly Recurring Revenue) from Super Admin configured plans
       let mrr = 0;
       const schools = db.prepare("SELECT plan_abonnement FROM school_info WHERE statut_abonnement = 'actif'").all() as any[];
       schools.forEach(s => {
-        const plan = plans.find(p => p.name.toLowerCase() === s.plan_abonnement?.toLowerCase());
-        if (plan) mrr += plan.price;
+        const plan = resolveConfiguredPlan(s.plan_abonnement, false);
+        if (plan) mrr += Number(plan.price || 0);
       });
 
       res.json({
@@ -31429,20 +31510,27 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
 
   app.get("/api/super-admin/subscriptions", authenticateToken, requireSuperAdmin, (req, res) => {
     try {
-      const subscriptions = db.prepare(`
+      const schools = db.prepare(`
         SELECT 
           s.id,
           s.nom as school_name,
           s.plan_abonnement as plan,
           s.statut_abonnement as status,
           s.date_fin_abonnement as next_billing,
-          s.created_at,
-          p.price,
-          p.period
+          s.created_at
         FROM school_info s
-        LEFT JOIN plans p ON LOWER(s.plan_abonnement) = LOWER(p.name)
         ORDER BY s.created_at DESC
-      `).all();
+      `).all() as any[];
+
+      const subscriptions = schools.map((s: any) => {
+        const matched = resolveConfiguredPlan(s.plan, false);
+        return {
+          ...s,
+          plan: matched ? matched.name : s.plan,
+          price: matched ? Number(matched.price ?? 0) : null,
+          period: matched ? matched.period : null
+        };
+      });
       res.json(subscriptions);
     } catch (err) {
       res.status(500).json({ error: "Erreur lors de la récupération des abonnements." });

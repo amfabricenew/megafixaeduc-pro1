@@ -38,7 +38,7 @@ interface SchoolCreationRequestModalProps {
 export default function SchoolCreationRequestModal({
   isOpen,
   onClose,
-  defaultPlan = 'PRO',
+  defaultPlan = '',
   defaultEmail = '',
   defaultNom = '',
   initialMode = 'creation'
@@ -158,6 +158,17 @@ export default function SchoolCreationRequestModal({
         .then(data => {
           if (data && data.support_contacts) {
             setConfig(data);
+            if (Array.isArray(data.plans) && data.plans.length > 0) {
+              setForm(prev => {
+                const candidate = String(prev.plan_souhaite || defaultPlan || '').toLowerCase().trim();
+                const matched =
+                  data.plans.find((p: any) => String(p.id).toLowerCase() === candidate || (p.name || '').toLowerCase().trim() === candidate) ||
+                  data.plans.find((p: any) => (p.name || '').toLowerCase().includes(candidate) && candidate.length > 0) ||
+                  data.plans.find((p: any) => p.is_recommended) ||
+                  data.plans[0];
+                return matched ? { ...prev, plan_souhaite: matched.name } : prev;
+              });
+            }
             if (data.payment_methods && data.payment_methods.length > 0) {
               setSelectedMethodId(data.payment_methods[0].id);
             }
@@ -203,13 +214,16 @@ export default function SchoolCreationRequestModal({
     setTimeout(() => setCopied(null), 2500);
   };
 
-  // Get active price based on selected plan
+  // Get active price based exclusively on Super Admin configured plans
   const getSelectedPlanDetails = () => {
-    const p = config.plans.find(x => x.id === form.plan_souhaite);
-    if (p) return p;
-    if (form.plan_souhaite === 'DECOUVERTE') return { name: 'Formule Découverte', price: 0 };
-    if (form.plan_souhaite === 'EXCELLENCE') return { name: 'Excellence Illimitée', price: 350000 };
-    return { name: 'Formule Pro', price: 150000 };
+    const candidate = String(form.plan_souhaite || '').toLowerCase().trim();
+    const matched =
+      config.plans.find((x: any) => String(x.id).toLowerCase() === candidate || (x.name || '').toLowerCase().trim() === candidate) ||
+      config.plans.find((x: any) => candidate && ((x.name || '').toLowerCase().includes(candidate) || candidate.includes((x.name || '').toLowerCase()))) ||
+      config.plans.find((x: any) => x.is_recommended) ||
+      config.plans[0];
+    if (matched) return matched;
+    return { name: form.plan_souhaite || 'Chargement des offres...', price: 0, period: 'mois' };
   };
 
   const selectedPlanDetails = getSelectedPlanDetails();
@@ -444,17 +458,25 @@ export default function SchoolCreationRequestModal({
                   </div>
                   <div>
                     <p className="text-xs font-bold text-white">Formule d'abonnement sélectionnée</p>
-                    <p className="text-xs text-indigo-300">{selectedPlanDetails.name} • {selectedPlanDetails.price === 0 ? 'Gratuit' : `${Number(selectedPlanDetails.price).toLocaleString()} FCFA / an`}</p>
+                    <p className="text-xs text-indigo-300">
+                      {selectedPlanDetails.name} • {Number(selectedPlanDetails.price) === 0 ? 'Gratuit' : `${Number(selectedPlanDetails.price).toLocaleString('fr-FR')} ${config.currency || 'FCFA'} / ${selectedPlanDetails.period || 'mois'}`}
+                    </p>
                   </div>
                 </div>
                 <select
-                  value={form.plan_souhaite}
+                  value={selectedPlanDetails.name || form.plan_souhaite}
                   onChange={(e) => setForm({ ...form, plan_souhaite: e.target.value })}
                   className="px-3 py-1.5 bg-slate-900 border border-indigo-500/40 rounded-xl text-xs text-white focus:outline-none focus:border-indigo-400 font-semibold"
                 >
-                  <option value="PRO">Formule Pro (150 000 F)</option>
-                  <option value="EXCELLENCE">Excellence Illimitée (350 000 F)</option>
-                  <option value="DECOUVERTE">Découverte (Gratuit)</option>
+                  {config.plans.length > 0 ? (
+                    config.plans.map((plan: any) => (
+                      <option key={plan.id} value={plan.name}>
+                        {plan.name} ({Number(plan.price) === 0 ? `Gratuit / ${plan.period || 'essai'}` : `${Number(plan.price).toLocaleString('fr-FR')} ${config.currency || 'FCFA'} / ${plan.period || 'mois'}`})
+                      </option>
+                    ))
+                  ) : (
+                    <option value="">Chargement des formules...</option>
+                  )}
                 </select>
               </div>
 
@@ -715,7 +737,7 @@ export default function SchoolCreationRequestModal({
                 <div>
                   <span className="text-[11px] font-black uppercase tracking-wider text-amber-400">Montant d'adhésion</span>
                   <h3 className="text-2xl font-black text-white mt-0.5">
-                    {selectedPlanDetails.price === 0 ? 'Gratuit (0 FCFA)' : `${Number(selectedPlanDetails.price).toLocaleString()} FCFA`}
+                    {Number(selectedPlanDetails.price) === 0 ? `Gratuit (0 ${config.currency || 'FCFA'})` : `${Number(selectedPlanDetails.price).toLocaleString('fr-FR')} ${config.currency || 'FCFA'} / ${selectedPlanDetails.period || 'mois'}`}
                   </h3>
                   <p className="text-xs text-slate-400 mt-0.5">Formule {selectedPlanDetails.name}</p>
                 </div>

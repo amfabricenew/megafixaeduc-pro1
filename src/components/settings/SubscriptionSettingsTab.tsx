@@ -19,7 +19,6 @@ import {
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { apiFetch } from '../../utils/api';
-import { SUBSCRIPTION_PLANS, SubscriptionPlan } from '../../utils/subscriptions';
 import { useTranslation } from '../../contexts/TranslationContext';
 
 interface SchoolSubData {
@@ -40,8 +39,10 @@ interface SchoolSubData {
 }
 
 export default function SubscriptionSettingsTab() {
-  const { language, t } = useTranslation();
+  const { language } = useTranslation();
   const [subData, setSubData] = useState<SchoolSubData | null>(null);
+  const [configuredPlans, setConfiguredPlans] = useState<any[]>([]);
+  const [currencyLabel, setCurrencyLabel] = useState('FCFA');
   const [loading, setLoading] = useState(true);
   const [updatingPlan, setUpdatingPlan] = useState<string | null>(null);
   const [licenseKeyInput, setLicenseKeyInput] = useState('');
@@ -52,13 +53,25 @@ export default function SubscriptionSettingsTab() {
     try {
       setLoading(true);
       const token = localStorage.getItem('token');
-      // Fetch school subscription
-      const res = await apiFetch('/api/school-subscription', {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-      if (res.ok) {
-        const data = await res.json();
-        // Also fetch license details if available
+      const [subRes, cfgRes] = await Promise.all([
+        apiFetch('/api/school-subscription', {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }),
+        apiFetch('/api/public/config')
+      ]);
+
+      if (cfgRes.ok) {
+        const cfgData = await cfgRes.json();
+        if (Array.isArray(cfgData?.plans)) {
+          setConfiguredPlans(cfgData.plans);
+        }
+        if (cfgData?.config?.currency || cfgData?.currency) {
+          setCurrencyLabel(cfgData?.config?.currency || cfgData?.currency);
+        }
+      }
+
+      if (subRes.ok) {
+        const data = await subRes.json();
         let licenseData = null;
         try {
           const licRes = await apiFetch('/api/school-subscription/my-license', {
@@ -72,7 +85,7 @@ export default function SubscriptionSettingsTab() {
         }
 
         setSubData({
-          plan: data.plan || 'standard',
+          plan: data.plan || '',
           statut: data.statut || 'actif',
           date_fin: data.date_fin || null,
           school_nom: data.school_nom || '',
@@ -136,10 +149,10 @@ export default function SubscriptionSettingsTab() {
     }
   };
 
-  const handleSwitchPlan = async (targetPlan: SubscriptionPlan) => {
-    if (subData?.plan === targetPlan) return;
+  const handleSwitchPlan = async (targetPlan: any) => {
+    const planLabel = targetPlan?.name || String(targetPlan);
+    if ((subData?.plan || '').toLowerCase().trim() === planLabel.toLowerCase().trim()) return;
 
-    const planLabel = SUBSCRIPTION_PLANS[targetPlan]?.name || targetPlan;
     const confirmPrompt = language === 'en'
       ? `Switch subscription plan to "${planLabel}"?`
       : `Voulez-vous basculer l'abonnement de votre école vers "${planLabel}" ?`;
@@ -147,7 +160,7 @@ export default function SubscriptionSettingsTab() {
     if (!window.confirm(confirmPrompt)) return;
 
     try {
-      setUpdatingPlan(targetPlan);
+      setUpdatingPlan(planLabel);
       const token = localStorage.getItem('token');
       const res = await apiFetch('/api/school-subscription', {
         method: 'PUT',
@@ -156,7 +169,7 @@ export default function SubscriptionSettingsTab() {
           'Authorization': `Bearer ${token}`
         },
         body: JSON.stringify({
-          plan: targetPlan,
+          plan: planLabel,
           statut: 'actif'
         })
       });
@@ -165,8 +178,8 @@ export default function SubscriptionSettingsTab() {
       if (res.ok && data.success) {
         toast.success(
           language === 'en'
-            ? `Plan upgraded to ${targetPlan.toUpperCase()}!`
-            : `Formule mise à niveau vers ${targetPlan.toUpperCase()} avec succès !`
+            ? `Plan upgraded to ${planLabel}!`
+            : `Formule mise à niveau vers ${planLabel} avec succès !`
         );
         await fetchSubscription();
         window.dispatchEvent(new Event('school_subscription_updated'));
@@ -187,7 +200,11 @@ export default function SubscriptionSettingsTab() {
     setTimeout(() => setCopiedKey(false), 2500);
   };
 
-  const currentPlan = (subData?.plan?.toLowerCase() as SubscriptionPlan) || 'standard';
+  const rawPlanLower = (subData?.plan || '').toLowerCase().trim();
+  const matchedCurrentPlan =
+    configuredPlans.find(p => (p.name || '').toLowerCase().trim() === rawPlanLower || String(p.id).toLowerCase() === rawPlanLower) ||
+    configuredPlans.find(p => rawPlanLower && ((p.name || '').toLowerCase().includes(rawPlanLower) || rawPlanLower.includes((p.name || '').toLowerCase()))) ||
+    null;
   const isExpired = subData?.date_fin && new Date(subData.date_fin) < new Date();
 
   return (
@@ -218,7 +235,7 @@ export default function SubscriptionSettingsTab() {
             <p className="text-xs sm:text-sm text-slate-300 max-w-2xl leading-relaxed">
               {language === 'en'
                 ? "Manage your active subscription formula, unlock school modules, or activate an official license key."
-                : "Consultez votre formule d'abonnement en cours, basculez entre les plans ou activez une clé de licence officielle."}
+                : "Consultez votre formule d'abonnement en cours, basculez entre les plans configurés par la plateforme ou activez une clé de licence officielle."}
             </p>
           </div>
 
@@ -239,10 +256,14 @@ export default function SubscriptionSettingsTab() {
               {language === 'en' ? 'Current Formula' : 'Formule Actuelle'}
             </span>
             <p className="text-lg font-black text-amber-300 mt-1 uppercase">
-              {subData?.plan || 'STANDARD'}
+              {matchedCurrentPlan?.name || subData?.plan || 'Non définie'}
             </p>
             <p className="text-xs text-slate-300 mt-0.5">
-              {SUBSCRIPTION_PLANS[currentPlan]?.name || 'Standard'}
+              {matchedCurrentPlan
+                ? (Number(matchedCurrentPlan.price) === 0
+                  ? `Gratuit • ${matchedCurrentPlan.period || 'essai'}`
+                  : `${Number(matchedCurrentPlan.price).toLocaleString('fr-FR')} ${currencyLabel} / ${matchedCurrentPlan.period || 'mois'}`)
+                : 'Offre configurée Super Admin'}
             </p>
           </div>
 
@@ -354,273 +375,174 @@ export default function SubscriptionSettingsTab() {
           </div>
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Starter Plan */}
-          <div className={`bg-white rounded-3xl border-2 p-6 flex flex-col justify-between transition-all ${
-            currentPlan === 'starter'
-              ? 'border-blue-500 ring-4 ring-blue-500/10 shadow-lg'
-              : 'border-slate-200 hover:border-slate-300 shadow-xs'
-          }`}>
-            <div>
-              <div className="flex items-center justify-between mb-3">
-                <span className="text-xs font-black uppercase tracking-wider text-blue-700 bg-blue-50 border border-blue-200 px-3 py-1 rounded-full">
-                  Starter
-                </span>
-                {currentPlan === 'starter' && (
-                  <span className="text-xs font-bold text-blue-700 bg-blue-100 px-2 py-0.5 rounded-full flex items-center gap-1">
-                    <Check size={12} /> {language === 'en' ? 'Current' : 'En cours'}
-                  </span>
-                )}
-              </div>
-              <h4 className="text-xl font-black text-slate-900">{SUBSCRIPTION_PLANS.starter.name}</h4>
-              <p className="text-xs text-slate-500 mt-1 mb-4">{SUBSCRIPTION_PLANS.starter.tagline}</p>
-
-              <div className="mb-4 pb-4 border-b border-slate-100">
-                <div className="flex items-baseline gap-1">
-                  <span className="text-2xl font-black text-slate-900">{SUBSCRIPTION_PLANS.starter.price}</span>
-                  <span className="text-xs text-slate-400 font-medium">{SUBSCRIPTION_PLANS.starter.period}</span>
-                </div>
-                <p className="text-[11px] text-slate-400 mt-0.5">{SUBSCRIPTION_PLANS.starter.maxStudents}</p>
-              </div>
-
-              <div className="space-y-2 mb-6">
-                <p className="text-[11px] font-bold text-slate-700 uppercase tracking-wider">
-                  {language === 'en' ? 'Included features:' : 'Inclus dans Starter :'}
-                </p>
-                {SUBSCRIPTION_PLANS.starter.features.map((f, i) => (
-                  <div key={i} className="flex items-start gap-2 text-xs text-slate-600">
-                    <div className="w-4 h-4 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center shrink-0 mt-0.5">
-                      <Check size={10} className="stroke-[3]" />
-                    </div>
-                    <span>{f}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <button
-              onClick={() => handleSwitchPlan('starter')}
-              disabled={currentPlan === 'starter' || updatingPlan !== null}
-              className={`w-full py-3 px-4 rounded-2xl font-black text-xs uppercase tracking-wider transition-all flex items-center justify-center gap-2 ${
-                currentPlan === 'starter'
-                  ? 'bg-blue-50 text-blue-700 cursor-default border border-blue-200'
-                  : 'bg-slate-100 hover:bg-blue-600 hover:text-white text-slate-800'
-              }`}
-            >
-              {updatingPlan === 'starter' && <RefreshCw size={14} className="animate-spin" />}
-              <span>{currentPlan === 'starter' ? (language === 'en' ? 'Current Formula' : 'Formule Active') : (language === 'en' ? 'Switch to Starter' : 'Activer Starter')}</span>
-            </button>
+        {configuredPlans.length === 0 ? (
+          <div className="bg-white rounded-3xl border border-slate-200 p-8 text-center text-sm text-slate-500">
+            {language === 'en' ? 'No active plans configured yet.' : "Aucune formule d'abonnement active configurée par le super-admin."}
           </div>
+        ) : (
+          <div className={`grid grid-cols-1 ${configuredPlans.length <= 2 ? 'lg:grid-cols-2' : configuredPlans.length >= 4 ? 'md:grid-cols-2 xl:grid-cols-4' : 'lg:grid-cols-3'} gap-6`}>
+            {configuredPlans.map((plan) => {
+              const isCurrent = matchedCurrentPlan
+                ? String(matchedCurrentPlan.id) === String(plan.id)
+                : rawPlanLower === (plan.name || '').toLowerCase().trim();
+              const isFree = Number(plan.price) === 0 || plan.type === 'trial';
+              const isRec = Boolean(plan.is_recommended);
+              const feats: string[] = Array.isArray(plan.features) ? plan.features : [];
+              const maxStudentsLabel =
+                plan.student_limit === null || plan.student_limit === undefined || Number(plan.student_limit) >= 999999
+                  ? 'Élèves illimités'
+                  : `Jusqu'à ${Number(plan.student_limit).toLocaleString('fr-FR')} élèves`;
 
-          {/* Standard Plan */}
-          <div className={`bg-white rounded-3xl border-2 p-6 flex flex-col justify-between transition-all ${
-            currentPlan === 'standard'
-              ? 'border-emerald-500 ring-4 ring-emerald-500/10 shadow-lg'
-              : 'border-slate-200 hover:border-slate-300 shadow-xs'
-          }`}>
-            <div>
-              <div className="flex items-center justify-between mb-3">
-                <span className="text-xs font-black uppercase tracking-wider text-emerald-700 bg-emerald-50 border border-emerald-200 px-3 py-1 rounded-full">
-                  Académique Standard
-                </span>
-                {currentPlan === 'standard' && (
-                  <span className="text-xs font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full flex items-center gap-1">
-                    <Check size={12} /> {language === 'en' ? 'Current' : 'En cours'}
-                  </span>
-                )}
-              </div>
-              <h4 className="text-xl font-black text-slate-900">{SUBSCRIPTION_PLANS.standard.name}</h4>
-              <p className="text-xs text-slate-500 mt-1 mb-4">{SUBSCRIPTION_PLANS.standard.tagline}</p>
-
-              <div className="mb-4 pb-4 border-b border-slate-100">
-                <div className="flex items-baseline gap-1">
-                  <span className="text-2xl font-black text-emerald-900">{SUBSCRIPTION_PLANS.standard.price}</span>
-                  <span className="text-xs text-slate-400 font-medium">{SUBSCRIPTION_PLANS.standard.period}</span>
-                </div>
-                <p className="text-[11px] text-slate-400 mt-0.5">{SUBSCRIPTION_PLANS.standard.maxStudents}</p>
-              </div>
-
-              <div className="space-y-2 mb-6">
-                <p className="text-[11px] font-bold text-slate-700 uppercase tracking-wider">
-                  {language === 'en' ? 'Starter features, plus:' : 'Tout Starter, plus :'}
-                </p>
-                {SUBSCRIPTION_PLANS.standard.features.slice(1).map((f, i) => (
-                  <div key={i} className="flex items-start gap-2 text-xs text-slate-600">
-                    <div className="w-4 h-4 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center shrink-0 mt-0.5">
-                      <Check size={10} className="stroke-[3]" />
+              return (
+                <div
+                  key={plan.id}
+                  className={`bg-white rounded-3xl border-2 p-6 flex flex-col justify-between transition-all ${
+                    isCurrent
+                      ? 'border-emerald-500 ring-4 ring-emerald-500/10 shadow-lg'
+                      : isRec
+                        ? 'border-indigo-200 hover:border-indigo-400 shadow-xs'
+                        : 'border-slate-200 hover:border-slate-300 shadow-xs'
+                  }`}
+                >
+                  <div>
+                    <div className="flex items-center justify-between mb-3 gap-2">
+                      <span className={`text-xs font-black uppercase tracking-wider px-3 py-1 rounded-full border ${
+                        isRec
+                          ? 'text-indigo-700 bg-indigo-50 border-indigo-200'
+                          : isFree
+                            ? 'text-blue-700 bg-blue-50 border-blue-200'
+                            : 'text-amber-800 bg-amber-50 border-amber-200'
+                      }`}>
+                        {isRec ? 'Recommandée' : isFree ? 'Découverte' : 'Offre Pro'}
+                      </span>
+                      {isCurrent && (
+                        <span className="text-xs font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full flex items-center gap-1">
+                          <Check size={12} /> {language === 'en' ? 'Current' : 'En cours'}
+                        </span>
+                      )}
                     </div>
-                    <span>{f}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
+                    <h4 className="text-xl font-black text-slate-900">{plan.name}</h4>
+                    <p className="text-xs text-slate-500 mt-1 mb-4">
+                      {plan.description || (isFree ? 'Offre de découverte' : 'Formule configurée par le super-admin')}
+                    </p>
 
-            <button
-              onClick={() => handleSwitchPlan('standard')}
-              disabled={currentPlan === 'standard' || updatingPlan !== null}
-              className={`w-full py-3 px-4 rounded-2xl font-black text-xs uppercase tracking-wider transition-all flex items-center justify-center gap-2 ${
-                currentPlan === 'standard'
-                  ? 'bg-emerald-50 text-emerald-700 cursor-default border border-emerald-200'
-                  : 'bg-slate-100 hover:bg-emerald-600 hover:text-white text-slate-800'
-              }`}
-            >
-              {updatingPlan === 'standard' && <RefreshCw size={14} className="animate-spin" />}
-              <span>{currentPlan === 'standard' ? (language === 'en' ? 'Current Formula' : 'Formule Active') : (language === 'en' ? 'Switch to Standard' : 'Activer Standard')}</span>
-            </button>
-          </div>
-
-          {/* Excellence Plan */}
-          <div className={`bg-white rounded-3xl border-2 p-6 flex flex-col justify-between transition-all ${
-            currentPlan === 'excellence'
-              ? 'border-amber-500 ring-4 ring-amber-500/10 shadow-lg'
-              : 'border-slate-200 hover:border-slate-300 shadow-xs'
-          }`}>
-            <div>
-              <div className="flex items-center justify-between mb-3">
-                <span className="text-xs font-black uppercase tracking-wider text-amber-800 bg-amber-50 border border-amber-200 px-3 py-1 rounded-full flex items-center gap-1">
-                  <Crown size={12} className="text-amber-600" />
-                  Excellence Pro
-                </span>
-                {currentPlan === 'excellence' && (
-                  <span className="text-xs font-bold text-amber-800 bg-amber-100 px-2 py-0.5 rounded-full flex items-center gap-1">
-                    <Check size={12} /> {language === 'en' ? 'Current' : 'En cours'}
-                  </span>
-                )}
-              </div>
-              <h4 className="text-xl font-black text-slate-900">{SUBSCRIPTION_PLANS.excellence.name}</h4>
-              <p className="text-xs text-slate-500 mt-1 mb-4">{SUBSCRIPTION_PLANS.excellence.tagline}</p>
-
-              <div className="mb-4 pb-4 border-b border-slate-100">
-                <div className="flex items-baseline gap-1">
-                  <span className="text-2xl font-black text-amber-900">{SUBSCRIPTION_PLANS.excellence.price}</span>
-                  <span className="text-xs text-slate-400 font-medium">{SUBSCRIPTION_PLANS.excellence.period}</span>
-                </div>
-                <p className="text-[11px] text-amber-700 font-medium mt-0.5">{SUBSCRIPTION_PLANS.excellence.maxStudents}</p>
-              </div>
-
-              <div className="space-y-2 mb-6">
-                <p className="text-[11px] font-bold text-slate-700 uppercase tracking-wider">
-                  {language === 'en' ? 'Standard features, plus:' : 'Tout Standard, plus :'}
-                </p>
-                {SUBSCRIPTION_PLANS.excellence.features.slice(1).map((f, i) => (
-                  <div key={i} className="flex items-start gap-2 text-xs text-slate-600">
-                    <div className="w-4 h-4 rounded-full bg-amber-100 text-amber-700 flex items-center justify-center shrink-0 mt-0.5">
-                      <Check size={10} className="stroke-[3]" />
+                    <div className="mb-4 pb-4 border-b border-slate-100">
+                      <div className="flex items-baseline gap-1">
+                        <span className="text-2xl font-black text-slate-900">
+                          {isFree ? 'Gratuit' : `${Number(plan.price).toLocaleString('fr-FR')} ${currencyLabel}`}
+                        </span>
+                        <span className="text-xs text-slate-400 font-medium">/ {plan.period || 'mois'}</span>
+                      </div>
+                      <p className="text-[11px] text-slate-500 font-medium mt-0.5">{maxStudentsLabel}</p>
                     </div>
-                    <span>{f}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
 
-            <button
-              onClick={() => handleSwitchPlan('excellence')}
-              disabled={currentPlan === 'excellence' || updatingPlan !== null}
-              className={`w-full py-3 px-4 rounded-2xl font-black text-xs uppercase tracking-wider transition-all flex items-center justify-center gap-2 ${
-                currentPlan === 'excellence'
-                  ? 'bg-amber-50 text-amber-800 cursor-default border border-amber-200'
-                  : 'bg-slate-100 hover:bg-amber-600 hover:text-white text-slate-800'
-              }`}
-            >
-              {updatingPlan === 'excellence' && <RefreshCw size={14} className="animate-spin" />}
-              <span>{currentPlan === 'excellence' ? (language === 'en' ? 'Current Formula' : 'Formule Active') : (language === 'en' ? 'Switch to Excellence' : 'Activer Excellence')}</span>
-            </button>
+                    <div className="space-y-2 mb-6">
+                      <p className="text-[11px] font-bold text-slate-700 uppercase tracking-wider">
+                        {language === 'en' ? 'Included features:' : 'Fonctionnalités incluses :'}
+                      </p>
+                      {feats.map((f, i) => (
+                        <div key={i} className="flex items-start gap-2 text-xs text-slate-600">
+                          <div className="w-4 h-4 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center shrink-0 mt-0.5">
+                            <Check size={10} className="stroke-[3]" />
+                          </div>
+                          <span>{f}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={() => handleSwitchPlan(plan)}
+                    disabled={isCurrent || updatingPlan !== null}
+                    className={`w-full py-3 px-4 rounded-2xl font-black text-xs uppercase tracking-wider transition-all flex items-center justify-center gap-2 ${
+                      isCurrent
+                        ? 'bg-emerald-50 text-emerald-700 cursor-default border border-emerald-200'
+                        : 'bg-slate-100 hover:bg-indigo-600 hover:text-white text-slate-800'
+                    }`}
+                  >
+                    {updatingPlan === plan.name && <RefreshCw size={14} className="animate-spin" />}
+                    <span>
+                      {isCurrent
+                        ? (language === 'en' ? 'Current Formula' : 'Formule Active')
+                        : (language === 'en' ? `Switch to ${plan.name}` : `Activer ${plan.name}`)}
+                    </span>
+                  </button>
+                </div>
+              );
+            })}
           </div>
-        </div>
+        )}
       </div>
 
-      {/* Feature Gating Comparison Matrix */}
-      <div className="bg-white rounded-3xl border border-slate-200 overflow-hidden shadow-xs">
-        <div className="p-6 border-b border-slate-100 bg-slate-50/50">
-          <h4 className="font-black text-slate-900 text-base">
-            {language === 'en' ? 'Module Availability Matrix' : 'Matrice de Déblocage des Modules par Formule'}
-          </h4>
-          <p className="text-xs text-slate-500 mt-0.5">
-            {language === 'en'
-              ? 'Detailed breakdown of modules accessible for each subscription plan.'
-              : 'Détail des modules et accès réservés selon la formule active de votre établissement.'}
-          </p>
-        </div>
+      {/* Feature Comparison Matrix across Configured Plans */}
+      {configuredPlans.length > 0 && (
+        <div className="bg-white rounded-3xl border border-slate-200 overflow-hidden shadow-xs">
+          <div className="p-6 border-b border-slate-100 bg-slate-50/50">
+            <h4 className="font-black text-slate-900 text-base">
+              {language === 'en' ? 'Configured Plans Overview' : 'Comparatif des Formules Configurées'}
+            </h4>
+            <p className="text-xs text-slate-500 mt-0.5">
+              {language === 'en'
+                ? 'Tariffs and features published directly by platform administration.'
+                : 'Tarifs, capacités et fonctionnalités publiés par le super-administrateur.'}
+            </p>
+          </div>
 
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs">
-            <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 uppercase tracking-wider font-bold">
-              <tr>
-                <th className="py-3 px-6">{language === 'en' ? 'Module / Capability' : 'Module / Fonctionnalité'}</th>
-                <th className="py-3 px-4 text-center">Starter</th>
-                <th className="py-3 px-4 text-center">Standard</th>
-                <th className="py-3 px-4 text-center">Excellence</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100 text-slate-700">
-              {[
-                { name: 'Pédagogie (Classes, Matières, Élèves, Notes)', starter: true, standard: true, excellence: true },
-                { name: 'Bulletins de notes officiels PDF & Calculs', starter: true, standard: true, excellence: true },
-                { name: 'Emplois du temps hebdomadaires', starter: true, standard: true, excellence: true },
-                { name: 'Espace Parent sécurisé (Mon Enfant)', starter: true, standard: true, excellence: true },
-                { name: 'Cartes Scolaires & Badges QR Code imprimables', starter: false, standard: true, excellence: true },
-                { name: 'Passages, Redoublements & Décisions de fin d\'année', starter: false, standard: true, excellence: true },
-                { name: 'Gestion du Personnel Administratif & Postes', starter: false, standard: true, excellence: true },
-                { name: 'Banque d\'épreuves et compositions', starter: false, standard: true, excellence: true },
-                { name: 'Module Finances (Tranches, Frais de Scolarité, Reçus)', starter: false, standard: false, excellence: true },
-                { name: 'Gestion des Salaires & Paie du Personnel Enseignant', starter: false, standard: false, excellence: true },
-                { name: 'Journal d\'Audit & Traçabilité Complète des Opérations', starter: false, standard: false, excellence: true },
-                { name: 'Assistant IA Gemini pour Synthèses Pédagogiques', starter: false, standard: false, excellence: true },
-                { name: 'Capacité d\'élèves maximale', starter: '300 élèves', standard: '1 000 élèves', excellence: 'Illimitée' },
-              ].map((row, idx) => (
-                <tr key={idx} className="hover:bg-slate-50/70 transition-colors">
-                  <td className="py-3.5 px-6 font-semibold text-slate-800">{row.name}</td>
-                  <td className="py-3.5 px-4 text-center">
-                    {typeof row.starter === 'boolean' ? (
-                      row.starter ? (
-                        <div className="w-5 h-5 mx-auto rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center">
-                          <Check size={12} className="stroke-[3]" />
-                        </div>
-                      ) : (
-                        <div className="w-5 h-5 mx-auto rounded-full bg-slate-100 text-slate-400 flex items-center justify-center">
-                          <Lock size={11} />
-                        </div>
-                      )
-                    ) : (
-                      <span className="font-bold text-slate-600">{row.starter}</span>
-                    )}
-                  </td>
-                  <td className="py-3.5 px-4 text-center">
-                    {typeof row.standard === 'boolean' ? (
-                      row.standard ? (
-                        <div className="w-5 h-5 mx-auto rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center">
-                          <Check size={12} className="stroke-[3]" />
-                        </div>
-                      ) : (
-                        <div className="w-5 h-5 mx-auto rounded-full bg-slate-100 text-slate-400 flex items-center justify-center">
-                          <Lock size={11} />
-                        </div>
-                      )
-                    ) : (
-                      <span className="font-bold text-emerald-700">{row.standard}</span>
-                    )}
-                  </td>
-                  <td className="py-3.5 px-4 text-center">
-                    {typeof row.excellence === 'boolean' ? (
-                      row.excellence ? (
-                        <div className="w-5 h-5 mx-auto rounded-full bg-amber-100 text-amber-700 flex items-center justify-center">
-                          <Check size={12} className="stroke-[3]" />
-                        </div>
-                      ) : (
-                        <div className="w-5 h-5 mx-auto rounded-full bg-slate-100 text-slate-400 flex items-center justify-center">
-                          <Lock size={11} />
-                        </div>
-                      )
-                    ) : (
-                      <span className="font-bold text-amber-700">{row.excellence}</span>
-                    )}
-                  </td>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 uppercase tracking-wider font-bold">
+                <tr>
+                  <th className="py-3 px-6">{language === 'en' ? 'Criteria / Feature' : 'Critère / Fonctionnalité'}</th>
+                  {configuredPlans.map((p) => (
+                    <th key={p.id} className="py-3 px-4 text-center">{p.name}</th>
+                  ))}
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody className="divide-y divide-slate-100 text-slate-700">
+                <tr className="hover:bg-slate-50/70">
+                  <td className="py-3.5 px-6 font-semibold text-slate-800">Tarif</td>
+                  {configuredPlans.map((p) => (
+                    <td key={p.id} className="py-3.5 px-4 text-center font-black text-slate-900">
+                      {Number(p.price) === 0 ? `Gratuit / ${p.period || 'essai'}` : `${Number(p.price).toLocaleString('fr-FR')} ${currencyLabel} / ${p.period || 'mois'}`}
+                    </td>
+                  ))}
+                </tr>
+                <tr className="hover:bg-slate-50/70">
+                  <td className="py-3.5 px-6 font-semibold text-slate-800">Capacité d'élèves maximale</td>
+                  {configuredPlans.map((p) => (
+                    <td key={p.id} className="py-3.5 px-4 text-center font-bold text-indigo-700">
+                      {p.student_limit === null || p.student_limit === undefined || Number(p.student_limit) >= 999999
+                        ? 'Illimitée'
+                        : `${Number(p.student_limit).toLocaleString('fr-FR')} élèves`}
+                    </td>
+                  ))}
+                </tr>
+                {Array.from(new Set(configuredPlans.flatMap((p) => Array.isArray(p.features) ? p.features : []))).map((feat, idx) => (
+                  <tr key={idx} className="hover:bg-slate-50/70 transition-colors">
+                    <td className="py-3.5 px-6 font-semibold text-slate-800">{feat}</td>
+                    {configuredPlans.map((p) => {
+                      const included = Array.isArray(p.features) && p.features.includes(feat);
+                      return (
+                        <td key={p.id} className="py-3.5 px-4 text-center">
+                          {included ? (
+                            <div className="w-5 h-5 mx-auto rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center">
+                              <Check size={12} className="stroke-[3]" />
+                            </div>
+                          ) : (
+                            <div className="w-5 h-5 mx-auto rounded-full bg-slate-100 text-slate-400 flex items-center justify-center">
+                              <Lock size={11} />
+                            </div>
+                          )}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }

@@ -72,17 +72,19 @@ export default function PlansCatalog() {
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         {plans.map((plan, index) => {
-          const enabledFeatures = featureMatrix[plan.id] || [];
+          const enabledFeatures = featureMatrix[plan.id] || featureMatrix[String(plan.id)] || [];
+          const isPlanActive = plan.is_active !== 0 && plan.active !== false;
+          const customFeatures: string[] = Array.isArray(plan.features) ? plan.features : [];
           
           return (
             <div 
               key={plan.id} 
               className={cn(
                 "relative bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden flex flex-col transition-all hover:shadow-xl hover:-translate-y-1",
-                !plan.active && "opacity-60 grayscale"
+                !isPlanActive && "opacity-60 grayscale"
               )}
             >
-              {!plan.active && (
+              {!isPlanActive && (
                 <div className="absolute top-4 right-4 px-2 py-1 bg-slate-200 text-slate-500 rounded text-[8px] font-black uppercase tracking-tighter z-10">
                   Inactif
                 </div>
@@ -95,55 +97,70 @@ export default function PlansCatalog() {
                   </div>
                   <div>
                     <h3 className="font-bold text-slate-900 text-xl">{plan.name}</h3>
-                    <p className="text-indigo-600 font-black text-sm">{plan.price.toLocaleString()} FCFA <span className="text-slate-400 font-medium">/mois</span></p>
+                    <p className="text-indigo-600 font-black text-sm">
+                      {Number(plan.price) === 0 ? 'Gratuit' : `${Number(plan.price).toLocaleString('fr-FR')} FCFA`} <span className="text-slate-400 font-medium">/{plan.period || 'mois'}</span>
+                    </p>
                   </div>
                 </div>
 
                 <div className="grid grid-cols-2 gap-3">
                   <div className="p-3 bg-slate-50 rounded-2xl text-center">
                     <Users className="mx-auto mb-1 text-slate-400" size={16} />
-                    <p className="text-xs font-black text-slate-900">{plan.student_limit}</p>
+                    <p className="text-xs font-black text-slate-900">{plan.student_limit ?? 'Illimité'}</p>
                     <p className="text-[10px] text-slate-500 font-bold uppercase tracking-tighter leading-none mt-1">Élèves</p>
                   </div>
                   <div className="p-3 bg-slate-50 rounded-2xl text-center">
                     <Shield className="mx-auto mb-1 text-slate-400" size={16} />
-                    <p className="text-xs font-black text-slate-900">{plan.staff_limit}</p>
+                    <p className="text-xs font-black text-slate-900">{plan.staff_limit ?? 'Illimité'}</p>
                     <p className="text-[10px] text-slate-500 font-bold uppercase tracking-tighter leading-none mt-1">Staff</p>
                   </div>
                 </div>
 
                 <div className="space-y-4">
                   <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">Fonctionnalités Incluses</p>
-                  <div className="space-y-2.5">
-                    {APP_FEATURES.map((feature) => {
-                      const isEnabled = enabledFeatures.includes(feature.id);
-                      return (
-                        <div key={feature.id} className="flex items-start gap-3 group">
-                          <div className={cn(
-                            "mt-0.5 w-4 h-4 rounded-full flex items-center justify-center shrink-0 transition-colors",
-                            isEnabled ? "bg-emerald-100 text-emerald-600" : "bg-slate-100 text-slate-300"
-                          )}>
-                            {isEnabled ? <Check size={10} strokeWidth={4} /> : <X size={10} strokeWidth={4} />}
+                  {customFeatures.length > 0 && enabledFeatures.length === 0 ? (
+                    <div className="space-y-2.5">
+                      {customFeatures.map((feat, fIdx) => (
+                        <div key={fIdx} className="flex items-start gap-3">
+                          <div className="mt-0.5 w-4 h-4 rounded-full flex items-center justify-center shrink-0 bg-emerald-100 text-emerald-600">
+                            <Check size={10} strokeWidth={4} />
                           </div>
-                          <span className={cn(
-                            "text-xs leading-tight transition-colors",
-                            isEnabled ? "text-slate-700 font-medium" : "text-slate-400"
-                          )}>
-                            {feature.name}
-                          </span>
+                          <span className="text-xs leading-tight text-slate-700 font-medium">{feat}</span>
                         </div>
-                      );
-                    })}
-                  </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="space-y-2.5">
+                      {APP_FEATURES.map((feature) => {
+                        const isEnabled = enabledFeatures.includes(feature.id);
+                        return (
+                          <div key={feature.id} className="flex items-start gap-3 group">
+                            <div className={cn(
+                              "mt-0.5 w-4 h-4 rounded-full flex items-center justify-center shrink-0 transition-colors",
+                              isEnabled ? "bg-emerald-100 text-emerald-600" : "bg-slate-100 text-slate-300"
+                            )}>
+                              {isEnabled ? <Check size={10} strokeWidth={4} /> : <X size={10} strokeWidth={4} />}
+                            </div>
+                            <span className={cn(
+                              "text-xs leading-tight transition-colors",
+                              isEnabled ? "text-slate-700 font-medium" : "text-slate-400"
+                            )}>
+                              {feature.name}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               </div>
 
               <div className="p-6 bg-slate-50 border-t border-slate-100">
                 <button 
-                  disabled={!plan.active}
+                  disabled={!isPlanActive}
                   className={cn(
                     "w-full py-3 rounded-2xl text-xs font-bold transition-all shadow-lg flex items-center justify-center gap-2",
-                    plan.active 
+                    isPlanActive 
                       ? "bg-indigo-600 text-white shadow-indigo-100 hover:bg-indigo-700 hover:shadow-indigo-200" 
                       : "bg-slate-200 text-slate-400 shadow-none cursor-not-allowed"
                   )}

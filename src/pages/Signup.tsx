@@ -28,7 +28,6 @@ import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import toast from 'react-hot-toast';
 import PasswordStrengthMeter, { evaluatePassword } from '../components/PasswordStrengthMeter';
-import { SUBSCRIPTION_PLANS, SubscriptionPlan } from '../utils/subscriptions';
 import SchoolCreationRequestModal from '../components/SchoolCreationRequestModal';
 
 function cn(...inputs: ClassValue[]) {
@@ -49,8 +48,10 @@ export default function Signup() {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   
-  // Step 2: Subscription Plan
-  const [selectedPlan, setSelectedPlan] = useState<SubscriptionPlan>('standard');
+  // Step 2: Subscription Plan (from Super Admin DB)
+  const [configuredPlans, setConfiguredPlans] = useState<any[]>([]);
+  const [currencyLabel, setCurrencyLabel] = useState('FCFA');
+  const [selectedPlan, setSelectedPlan] = useState<string>('');
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -65,13 +66,30 @@ export default function Signup() {
     const params = new URLSearchParams(location.search);
     const emailParam = params.get('email');
     const nomParam = params.get('nom');
-    const planParam = params.get('plan') as SubscriptionPlan;
+    const planParam = params.get('plan') || '';
 
     if (emailParam) setEmail(emailParam);
     if (nomParam) setNom(nomParam);
-    if (planParam && (planParam === 'starter' || planParam === 'standard' || planParam === 'excellence')) {
-      setSelectedPlan(planParam);
-    }
+    if (planParam) setSelectedPlan(planParam);
+
+    fetch('/api/public/config')
+      .then(res => res.json())
+      .then(data => {
+        if (data?.config?.currency || data?.currency) {
+          setCurrencyLabel(data?.config?.currency || data?.currency);
+        }
+        if (Array.isArray(data?.plans) && data.plans.length > 0) {
+          setConfiguredPlans(data.plans);
+          const candidate = planParam.toLowerCase().trim();
+          const matched =
+            data.plans.find((p: any) => String(p.id).toLowerCase() === candidate || (p.name || '').toLowerCase().trim() === candidate) ||
+            data.plans.find((p: any) => candidate && ((p.name || '').toLowerCase().includes(candidate) || candidate.includes((p.name || '').toLowerCase()))) ||
+            data.plans.find((p: any) => p.is_recommended) ||
+            data.plans[0];
+          if (matched) setSelectedPlan(matched.name);
+        }
+      })
+      .catch(err => console.warn('Could not load public plans in Signup:', err));
 
     if (location.state?.unlinkedNotice) {
       setUnlinkedNotice(location.state.unlinkedNotice);
@@ -350,35 +368,34 @@ export default function Signup() {
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
-                {(['starter', 'standard', 'excellence'] as SubscriptionPlan[]).map((planKey) => {
-                  const plan = SUBSCRIPTION_PLANS[planKey];
-                  const isSelected = selectedPlan === planKey;
-                  const isPopular = planKey === 'standard';
-                  const isExcellence = planKey === 'excellence';
+                {configuredPlans.map((plan) => {
+                  const isSelected = selectedPlan.toLowerCase() === (plan.name || '').toLowerCase() || String(plan.id) === selectedPlan;
+                  const isRecommended = Boolean(plan.is_recommended);
+                  const isFree = Number(plan.price) === 0 || plan.type === 'trial';
+                  const feats: string[] = Array.isArray(plan.features) ? plan.features : [];
+                  const maxStudentsLabel =
+                    plan.student_limit === null || plan.student_limit === undefined || Number(plan.student_limit) >= 999999
+                      ? 'Élèves illimités'
+                      : `Jusqu'à ${Number(plan.student_limit).toLocaleString('fr-FR')} élèves`;
 
                   return (
                     <div
-                      key={planKey}
-                      onClick={() => setSelectedPlan(planKey)}
+                      key={plan.id}
+                      onClick={() => setSelectedPlan(plan.name)}
                       className={cn(
                         "relative rounded-3xl p-6 border-2 transition-all cursor-pointer flex flex-col justify-between group",
-                        isSelected 
-                          ? isExcellence 
-                            ? "bg-amber-950/30 border-amber-500 shadow-xl shadow-amber-500/20 scale-[1.02]"
-                            : isPopular
-                              ? "bg-emerald-950/30 border-emerald-500 shadow-xl shadow-emerald-500/20 scale-[1.02]"
-                              : "bg-blue-950/30 border-blue-500 shadow-xl shadow-blue-500/20 scale-[1.02]"
+                        isSelected
+                          ? isRecommended
+                            ? "bg-emerald-950/30 border-emerald-500 shadow-xl shadow-emerald-500/20 scale-[1.02]"
+                            : isFree
+                              ? "bg-blue-950/30 border-blue-500 shadow-xl shadow-blue-500/20 scale-[1.02]"
+                              : "bg-amber-950/30 border-amber-500 shadow-xl shadow-amber-500/20 scale-[1.02]"
                           : "bg-slate-800/40 border-slate-700/80 hover:border-slate-600 hover:bg-slate-800/70"
                       )}
                     >
-                      {isPopular && (
+                      {isRecommended && (
                         <div className="absolute -top-3 left-1/2 -translate-x-1/2 px-3 py-0.5 bg-emerald-500 text-slate-950 text-[10px] font-black uppercase tracking-wider rounded-full shadow-md">
                           Recommandé
-                        </div>
-                      )}
-                      {isExcellence && (
-                        <div className="absolute -top-3 left-1/2 -translate-x-1/2 px-3 py-0.5 bg-amber-500 text-slate-950 text-[10px] font-black uppercase tracking-wider rounded-full shadow-md">
-                          Intégrale Pro
                         </div>
                       )}
 
@@ -386,11 +403,11 @@ export default function Signup() {
                         <div className="flex items-center justify-between">
                           <span className={cn(
                             "text-[10px] font-black uppercase px-2 py-0.5 rounded-md",
-                            planKey === 'starter' ? "bg-blue-500/20 text-blue-400" :
-                            planKey === 'standard' ? "bg-emerald-500/20 text-emerald-400" :
+                            isFree ? "bg-blue-500/20 text-blue-400" :
+                            isRecommended ? "bg-emerald-500/20 text-emerald-400" :
                             "bg-amber-500/20 text-amber-400"
                           )}>
-                            {plan.badge}
+                            {isFree ? 'Essai / Découverte' : (plan.period || 'Formule')}
                           </span>
                           <div className={cn(
                             "w-5 h-5 rounded-full border-2 flex items-center justify-center transition-all",
@@ -402,25 +419,23 @@ export default function Signup() {
 
                         <div>
                           <h3 className="text-lg font-black text-white">{plan.name}</h3>
-                          <p className="text-[11px] text-slate-400 mt-0.5 leading-snug">{plan.tagline}</p>
+                          <p className="text-[11px] text-slate-400 mt-0.5 leading-snug">{plan.description || "Offre configurée par la plateforme"}</p>
                         </div>
 
                         <div className="pt-2 border-t border-slate-700/50">
                           <div className="flex items-baseline gap-1">
-                            <span className="text-2xl font-black text-white">{plan.price}</span>
-                            <span className="text-xs text-slate-400 font-bold">{plan.period}</span>
+                            <span className="text-2xl font-black text-white">
+                              {isFree ? 'Gratuit' : `${Number(plan.price).toLocaleString('fr-FR')} ${currencyLabel}`}
+                            </span>
+                            <span className="text-xs text-slate-400 font-bold">/ {plan.period || 'mois'}</span>
                           </div>
-                          <p className="text-[10px] text-slate-500 font-medium mt-0.5">{plan.maxStudents}</p>
-                          <div className="mt-1.5 px-2 py-1 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-[10px] text-emerald-300 font-bold flex items-center gap-1.5">
-                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" />
-                            <span>Paiement unique (100%) ou Acompte initial de 45%</span>
-                          </div>
+                          <p className="text-[10px] text-slate-500 font-medium mt-0.5">{maxStudentsLabel}</p>
                         </div>
 
                         <div className="space-y-2 pt-2">
                           <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Inclus :</span>
                           <ul className="space-y-1.5 text-xs text-slate-300">
-                            {plan.features.map((feat, idx) => (
+                            {feats.map((feat, idx) => (
                               <li key={idx} className="flex items-start gap-2 text-[11px] leading-tight">
                                 <Check size={13} className="text-emerald-400 shrink-0 mt-0.5" />
                                 <span>{feat}</span>
@@ -433,7 +448,7 @@ export default function Signup() {
                       <div className="pt-4 mt-4 border-t border-slate-700/50">
                         <button
                           type="button"
-                          onClick={() => setSelectedPlan(planKey)}
+                          onClick={() => setSelectedPlan(plan.name)}
                           className={cn(
                             "w-full py-2.5 rounded-xl text-xs font-bold transition-all",
                             isSelected 
@@ -469,7 +484,7 @@ export default function Signup() {
                     <span className="animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent" />
                   ) : (
                     <>
-                      <span>Passer au Paiement Sécurisé ({SUBSCRIPTION_PLANS[selectedPlan].name})</span>
+                      <span>Passer au Paiement Sécurisé ({selectedPlan || configuredPlans[0]?.name || 'Formule'})</span>
                       <ArrowRight size={16} />
                     </>
                   )}
@@ -549,7 +564,7 @@ export default function Signup() {
         onClose={() => setShowRequestModal(false)}
         defaultEmail={email}
         defaultNom={nom}
-        defaultPlan={selectedPlan.toUpperCase()}
+        defaultPlan={selectedPlan}
       />
     </div>
   );

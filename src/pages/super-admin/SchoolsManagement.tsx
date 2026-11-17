@@ -110,7 +110,7 @@ export default function SchoolsManagement() {
     ville: '',
     pays: 'Bénin',
     devise: 'FCFA',
-    plan_abonnement: 'Standard',
+    plan_abonnement: '',
     duree_mois: '12'
   });
 
@@ -133,9 +133,11 @@ export default function SchoolsManagement() {
 
       if (plansRes.ok) {
         const plansData = await plansRes.json();
+        const activePlans = Array.isArray(plansData) ? plansData.filter((p: any) => p.is_active !== 0 && p.active !== false) : [];
+        const defaultPlan = activePlans.find((p: any) => p.is_recommended) || activePlans[0] || (Array.isArray(plansData) ? plansData[0] : null);
         setPlans(plansData || []);
-        if (plansData.length > 0 && !newSchoolForm.plan_abonnement) {
-          setNewSchoolForm(prev => ({ ...prev, plan_abonnement: plansData[0].name }));
+        if (defaultPlan) {
+          setNewSchoolForm(prev => prev.plan_abonnement ? prev : ({ ...prev, plan_abonnement: defaultPlan.name }));
         }
       }
     } catch (error) {
@@ -208,6 +210,9 @@ export default function SchoolsManagement() {
         school: data.school,
         credentials: data.credentials
       });
+      const defaultPlanAfterCreate = plans.find((p: any) => (p.is_active !== 0 && p.active !== false) && p.is_recommended)
+        || plans.find((p: any) => p.is_active !== 0 && p.active !== false)
+        || plans[0];
       setNewSchoolForm({
         nom: '',
         code_ecole: '',
@@ -218,7 +223,7 @@ export default function SchoolsManagement() {
         ville: '',
         pays: 'Bénin',
         devise: 'FCFA',
-        plan_abonnement: plans.length > 0 ? plans[0].name : 'Standard',
+        plan_abonnement: defaultPlanAfterCreate?.name || '',
         duree_mois: '12'
       });
       fetchData();
@@ -259,7 +264,7 @@ export default function SchoolsManagement() {
       adresse: school.adresse || '',
       pays: school.pays || 'Bénin',
       devise: school.devise || 'FCFA',
-      plan_abonnement: school.plan_abonnement || 'Standard',
+      plan_abonnement: school.plan_abonnement || (plans[0]?.name || ''),
       statut_abonnement: school.statut_abonnement || 'actif',
       date_fin_abonnement: school.date_fin_abonnement ? school.date_fin_abonnement.split('T')[0] : '',
       espace_primaire_actif: (school.espace_primaire_actif !== undefined && school.espace_primaire_actif !== null) ? Number(school.espace_primaire_actif) : 1,
@@ -609,10 +614,9 @@ export default function SchoolsManagement() {
             className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
           >
             <option value="all">Toutes les formules</option>
-            <option value="standard">Standard</option>
-            <option value="premium">Premium</option>
-            <option value="excellence">Excellence</option>
-            <option value="illimité">Illimité</option>
+            {plans.map((p) => (
+              <option key={p.id} value={p.name}>{p.name}</option>
+            ))}
           </select>
 
           {(searchTerm || statusFilter !== 'all' || planFilter !== 'all') && (
@@ -1001,15 +1005,12 @@ export default function SchoolsManagement() {
                     className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
                   >
                     {plans.map(p => (
-                      <option key={p.id} value={p.name}>{p.name}</option>
+                      <option key={p.id} value={p.name}>
+                        {p.name} ({Number(p.price) === 0 ? 'Gratuit' : `${Number(p.price).toLocaleString('fr-FR')} FCFA / ${p.period || 'mois'}`})
+                      </option>
                     ))}
                     {plans.length === 0 && (
-                      <>
-                        <option value="Standard">Standard</option>
-                        <option value="Premium">Premium</option>
-                        <option value="Excellence">Excellence</option>
-                        <option value="Illimité">Illimité</option>
-                      </>
+                      <option value="">Aucune formule configurée</option>
                     )}
                   </select>
                 </div>
@@ -1664,10 +1665,14 @@ export default function SchoolsManagement() {
                     onChange={(e) => setEditingSchool({ ...editingSchool, plan_abonnement: e.target.value })}
                     className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
                   >
-                    <option value="Standard">Standard</option>
-                    <option value="Premium">Premium</option>
-                    <option value="Excellence">Excellence</option>
-                    <option value="Illimité">Illimité</option>
+                    {plans.map(p => (
+                      <option key={p.id} value={p.name}>
+                        {p.name} ({Number(p.price) === 0 ? 'Gratuit' : `${Number(p.price).toLocaleString('fr-FR')} FCFA / ${p.period || 'mois'}`})
+                      </option>
+                    ))}
+                    {editingSchool.plan_abonnement && !plans.some((p: any) => (p.name || '').toLowerCase() === editingSchool.plan_abonnement.toLowerCase()) && (
+                      <option value={editingSchool.plan_abonnement}>{editingSchool.plan_abonnement} (historique)</option>
+                    )}
                   </select>
                 </div>
 

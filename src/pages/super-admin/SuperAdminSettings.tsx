@@ -40,12 +40,6 @@ function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-const DEFAULT_PLANS = [
-  { id: 'DECOUVERTE', name: 'Découverte (Gratuit)', price: 0, student_limit: 100, staff_limit: 10, active: true },
-  { id: 'PRO', name: 'Formule Pro', price: 150000, student_limit: 500, staff_limit: 30, active: true },
-  { id: 'EXCELLENCE', name: 'Excellence Illimitée', price: 350000, student_limit: 2000, staff_limit: 100, active: true },
-];
-
 const DEFAULT_PAYMENT_METHODS = [
   {
     id: 'pay_mtn_bj',
@@ -58,7 +52,7 @@ const DEFAULT_PAYMENT_METHODS = [
     ussd: '*880*41*0161107918*MONTANT#',
     instructions: 'Envoyez le montant exact sur le numéro marchand via le menu MTN Momo ou en composant le code USSD rapide.',
     active: true,
-    formulas: ['DECOUVERTE', 'PRO', 'EXCELLENCE']
+    formulas: [] as string[]
   },
   {
     id: 'pay_moov_bj',
@@ -71,7 +65,7 @@ const DEFAULT_PAYMENT_METHODS = [
     ussd: '*155*1*1*95000000*MONTANT#',
     instructions: 'Effectuez le transfert vers notre compte marchand Moov Money.',
     active: true,
-    formulas: ['DECOUVERTE', 'PRO', 'EXCELLENCE']
+    formulas: [] as string[]
   },
   {
     id: 'pay_celtiis_bj',
@@ -84,7 +78,7 @@ const DEFAULT_PAYMENT_METHODS = [
     ussd: '*889#',
     instructions: 'Effectuez le paiement via le menu Celtiis Cash (*889#) ou confirmez la notification push sur votre numéro Celtiis.',
     active: true,
-    formulas: ['DECOUVERTE', 'PRO', 'EXCELLENCE']
+    formulas: [] as string[]
   },
   {
     id: 'pay_card_visa_mc',
@@ -97,7 +91,7 @@ const DEFAULT_PAYMENT_METHODS = [
     ussd: '',
     instructions: 'Paiement direct et sécurisé par carte bancaire internationale Visa ou MasterCard (débit ou crédit) avec confirmation 3D-Secure.',
     active: true,
-    formulas: ['DECOUVERTE', 'PRO', 'EXCELLENCE']
+    formulas: [] as string[]
   },
   {
     id: 'pay_fedapay',
@@ -110,7 +104,7 @@ const DEFAULT_PAYMENT_METHODS = [
     ussd: '',
     instructions: 'Paiement en ligne sécurisé par carte bancaire Visa/Mastercard ou Mobile Money.',
     active: true,
-    formulas: ['PRO', 'EXCELLENCE']
+    formulas: [] as string[]
   },
   {
     id: 'pay_bank',
@@ -123,27 +117,9 @@ const DEFAULT_PAYMENT_METHODS = [
     ussd: '',
     instructions: 'Envoyez l\'ordre de virement avec le nom de l\'école en libellé puis transmettez le bordereau.',
     active: true,
-    formulas: ['PRO', 'EXCELLENCE']
+    formulas: [] as string[]
   }
 ];
-
-const DEFAULT_PLAN_PAYMENT_LINKS: Record<string, { acompte?: string; annuel?: string; mensuel?: string }> = {
-  DECOUVERTE: {
-    acompte: '',
-    annuel: '',
-    mensuel: ''
-  },
-  PRO: {
-    acompte: 'https://checkout.fedapay.com/pay/pro-acompte-45',
-    annuel: 'https://checkout.fedapay.com/pay/pro-annuel',
-    mensuel: 'https://checkout.fedapay.com/pay/pro-mensuel'
-  },
-  EXCELLENCE: {
-    acompte: 'https://checkout.fedapay.com/pay/excellence-acompte-45',
-    annuel: 'https://checkout.fedapay.com/pay/excellence-annuel',
-    mensuel: 'https://checkout.fedapay.com/pay/excellence-mensuel'
-  }
-};
 
 export default function SuperAdminSettings() {
   const { tab } = useParams<{ tab?: string }>();
@@ -154,10 +130,10 @@ export default function SuperAdminSettings() {
   const [loading, setLoading] = React.useState(true);
   const [saving, setSaving] = React.useState(false);
 
-  // Plans & Payments State
-  const [plans, setPlans] = React.useState<any[]>(DEFAULT_PLANS);
+  // Plans & Payments State (chargés dynamiquement depuis /api/super-admin/plans)
+  const [plans, setPlans] = React.useState<any[]>([]);
   const [paymentMethods, setPaymentMethods] = React.useState<any[]>(DEFAULT_PAYMENT_METHODS);
-  const [planPaymentLinks, setPlanPaymentLinks] = React.useState<Record<string, any>>(DEFAULT_PLAN_PAYMENT_LINKS);
+  const [planPaymentLinks, setPlanPaymentLinks] = React.useState<Record<string, any>>({});
   const [isPaymentModalOpen, setIsPaymentModalOpen] = React.useState(false);
   const [editingPayment, setEditingPayment] = React.useState<any>(null);
 
@@ -413,7 +389,7 @@ export default function SuperAdminSettings() {
       ussd: '',
       instructions: '',
       active: true,
-      formulas: ['DECOUVERTE', 'PRO', 'EXCELLENCE']
+      formulas: plans.map((p: any) => String(p.id))
     });
     setIsPaymentModalOpen(true);
   };
@@ -663,38 +639,49 @@ export default function SuperAdminSettings() {
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                  {plans.map((plan) => {
-                    const links = planPaymentLinks[plan.id] || {};
-                    return (
-                      <div key={plan.id} className="bg-[#0b1329] border border-slate-800/80 rounded-2xl p-5 space-y-4">
-                        <div>
-                          <span className="text-[11px] font-black uppercase tracking-wider text-indigo-400 block">
-                            {plan.id}
-                          </span>
-                          <h4 className="text-sm font-bold text-white mt-0.5">{plan.name}</h4>
-                          <p className="text-xs text-slate-500 font-semibold mt-0.5">
-                            {plan.price === 0 ? '0 F / an' : `${Number(plan.price).toLocaleString()} F / an`}
-                          </p>
-                        </div>
-
-                        <div className="space-y-3 pt-2">
-                          <div className="space-y-1">
-                            <label className="text-[11px] font-bold text-slate-400">Lien Acompte 45%</label>
-                            <input
-                              type="url"
-                              value={links.acompte || ''}
-                              onChange={(e) => updatePlanPaymentLink(plan.id, 'acompte', e.target.value)}
-                              placeholder="https://checkout.fedapay.com/pay/..."
-                              className="w-full px-3 py-2 bg-slate-900 border border-slate-800 rounded-xl text-xs text-white placeholder-slate-600 focus:outline-none focus:border-amber-500"
-                            />
+                  {plans.length === 0 ? (
+                    <div className="md:col-span-3 p-6 rounded-2xl bg-[#0b1329] border border-slate-800 text-center text-xs text-slate-400">
+                      Aucune formule d'abonnement configurée. Créez vos formules dans l'espace « Offres & Abonnements ».
+                    </div>
+                  ) : (
+                    plans.map((plan) => {
+                      const planKey = String(plan.id);
+                      const links = planPaymentLinks[planKey] || planPaymentLinks[plan.name] || {};
+                      return (
+                        <div key={planKey} className="bg-[#0b1329] border border-slate-800/80 rounded-2xl p-5 space-y-4">
+                          <div>
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-[11px] font-black uppercase tracking-wider text-indigo-400 block">
+                                Offre #{planKey}
+                              </span>
+                              {(plan.is_active === 0 || plan.active === false) && (
+                                <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-slate-800 text-slate-400">Inactive</span>
+                              )}
+                            </div>
+                            <h4 className="text-sm font-bold text-white mt-0.5">{plan.name}</h4>
+                            <p className="text-xs text-slate-400 font-semibold mt-0.5">
+                              {Number(plan.price) === 0 ? 'Gratuit (0 FCFA)' : `${Number(plan.price).toLocaleString('fr-FR')} FCFA / ${plan.period || 'mois'}`}
+                            </p>
                           </div>
+
+                          <div className="space-y-3 pt-2">
+                            <div className="space-y-1">
+                              <label className="text-[11px] font-bold text-slate-400">Lien Acompte 45%</label>
+                              <input
+                                type="url"
+                                value={links.acompte || ''}
+                                onChange={(e) => updatePlanPaymentLink(planKey, 'acompte', e.target.value)}
+                                placeholder="https://checkout.fedapay.com/pay/..."
+                                className="w-full px-3 py-2 bg-slate-900 border border-slate-800 rounded-xl text-xs text-white placeholder-slate-600 focus:outline-none focus:border-amber-500"
+                              />
+                            </div>
 
                           <div className="space-y-1">
                             <label className="text-[11px] font-bold text-slate-400">Lien Annuel Complet</label>
                             <input
                               type="url"
                               value={links.annuel || ''}
-                              onChange={(e) => updatePlanPaymentLink(plan.id, 'annuel', e.target.value)}
+                              onChange={(e) => updatePlanPaymentLink(planKey, 'annuel', e.target.value)}
                               placeholder="https://checkout.fedapay.com/pay/..."
                               className="w-full px-3 py-2 bg-slate-900 border border-slate-800 rounded-xl text-xs text-white placeholder-slate-600 focus:outline-none focus:border-amber-500"
                             />
@@ -705,15 +692,16 @@ export default function SuperAdminSettings() {
                             <input
                               type="url"
                               value={links.mensuel || ''}
-                              onChange={(e) => updatePlanPaymentLink(plan.id, 'mensuel', e.target.value)}
+                              onChange={(e) => updatePlanPaymentLink(planKey, 'mensuel', e.target.value)}
                               placeholder="https://checkout.fedapay.com/pay/..."
                               className="w-full px-3 py-2 bg-slate-900 border border-slate-800 rounded-xl text-xs text-white placeholder-slate-600 focus:outline-none focus:border-amber-500"
                             />
                           </div>
                         </div>
                       </div>
-                    );
-                  })}
+                      );
+                    })
+                  )}
                 </div>
               </div>
 
@@ -841,11 +829,19 @@ export default function SuperAdminSettings() {
                       {/* Formulas + Toggle Active */}
                       <div className="flex items-center justify-between pt-1 border-t border-slate-800/60">
                         <div className="flex flex-wrap items-center gap-1.5">
-                          {(method.formulas || []).map((formulaId: string) => (
-                            <span key={formulaId} className="px-2 py-0.5 text-[10px] font-bold bg-indigo-950/60 text-indigo-300 border border-indigo-800/40 rounded-md">
-                              {formulaId}
+                          {(method.formulas || []).map((formulaId: string) => {
+                            const matchedPlan = plans.find((p: any) => String(p.id) === String(formulaId) || (p.name || '').toLowerCase() === String(formulaId).toLowerCase());
+                            return (
+                              <span key={formulaId} className="px-2 py-0.5 text-[10px] font-bold bg-indigo-950/60 text-indigo-300 border border-indigo-800/40 rounded-md">
+                                {matchedPlan ? matchedPlan.name : formulaId}
+                              </span>
+                            );
+                          })}
+                          {(!method.formulas || method.formulas.length === 0) && (
+                            <span className="px-2 py-0.5 text-[10px] font-bold bg-emerald-950/60 text-emerald-300 border border-emerald-800/40 rounded-md">
+                              Toutes les formules
                             </span>
-                          ))}
+                          )}
                         </div>
                         <button
                           onClick={() => toggleMethodActive(method.id)}
@@ -2097,25 +2093,28 @@ export default function SuperAdminSettings() {
 
               {/* Formules applicables */}
               <div className="space-y-2 pt-2">
-                <label className="text-xs font-bold text-slate-300 block">Formules applicables</label>
+                <label className="text-xs font-bold text-slate-300 block">Formules applicables (laisser tout décoché pour appliquer à toutes)</label>
                 <div className="flex flex-wrap gap-4">
                   {plans.map((p) => {
-                    const checked = (editingPayment.formulas || []).includes(p.id);
+                    const pKey = String(p.id);
+                    const checked = (editingPayment.formulas || []).some(
+                      (fid: string) => String(fid) === pKey || String(fid).toLowerCase() === (p.name || '').toLowerCase()
+                    );
                     return (
-                      <label key={p.id} className="flex items-center gap-2 cursor-pointer text-xs text-slate-300">
+                      <label key={pKey} className="flex items-center gap-2 cursor-pointer text-xs text-slate-300">
                         <input
                           type="checkbox"
                           checked={checked}
                           onChange={(e) => {
-                            const current = editingPayment.formulas || [];
+                            const current: string[] = editingPayment.formulas || [];
                             const updated = e.target.checked
-                              ? [...current, p.id]
-                              : current.filter((fid: string) => fid !== p.id);
+                              ? Array.from(new Set([...current, pKey]))
+                              : current.filter((fid: string) => String(fid) !== pKey && String(fid).toLowerCase() !== (p.name || '').toLowerCase());
                             setEditingPayment({ ...editingPayment, formulas: updated });
                           }}
                           className="rounded border-slate-700 bg-slate-900 text-amber-500 focus:ring-0 w-4 h-4"
                         />
-                        <span>{p.name} ({p.id})</span>
+                        <span>{p.name}</span>
                       </label>
                     );
                   })}

@@ -1,7 +1,7 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { Crown, Sparkles, ArrowRight, ShieldAlert, ArrowLeft } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
-import { SUBSCRIPTION_PLANS, SubscriptionPlan } from '../utils/subscriptions';
+import { SubscriptionPlan } from '../utils/subscriptions';
 import { useAuth } from '../contexts/AuthContext';
 
 interface SubscriptionGatedViewProps {
@@ -9,13 +9,28 @@ interface SubscriptionGatedViewProps {
   currentPlan?: SubscriptionPlan | string;
 }
 
-export default function SubscriptionGatedView({ path, currentPlan = 'starter' }: SubscriptionGatedViewProps) {
+export default function SubscriptionGatedView({ path, currentPlan = '' }: SubscriptionGatedViewProps) {
   const navigate = useNavigate();
   const { user } = useAuth();
   const isFonde = user?.role === 'admin' || user?.role === 'super_admin' || user?.role === 'fonde';
+  const [plans, setPlans] = useState<any[]>([]);
 
-  const planKey = (currentPlan in SUBSCRIPTION_PLANS ? currentPlan : 'starter') as SubscriptionPlan;
-  const currentPlanDetails = SUBSCRIPTION_PLANS[planKey];
+  useEffect(() => {
+    fetch('/api/public/config')
+      .then(res => res.json())
+      .then(data => {
+        if (Array.isArray(data?.plans)) setPlans(data.plans);
+      })
+      .catch(() => {});
+  }, []);
+
+  const target = (currentPlan || '').toString().toLowerCase().trim();
+  const matchedPlan = plans.find(p => (p.name || '').toLowerCase().trim() === target || String(p.id).toLowerCase() === target);
+  const recommendedPlan = plans.find(p => p.is_recommended) || plans[plans.length - 1];
+  const currentPlanLabel = matchedPlan?.name || currentPlan || 'Formule actuelle';
+  const currentStudentLimit = matchedPlan?.student_limit
+    ? (Number(matchedPlan.student_limit) >= 999999 ? 'Élèves illimités' : `Jusqu'à ${matchedPlan.student_limit} élèves`)
+    : 'Selon configuration super-admin';
 
   return (
     <div className="min-h-[70vh] flex items-center justify-center p-4">
@@ -31,7 +46,7 @@ export default function SubscriptionGatedView({ path, currentPlan = 'starter' }:
 
         <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-500/10 text-amber-700 text-xs font-black uppercase tracking-wider mb-3">
           <Sparkles className="w-3.5 h-3.5" />
-          Fonctionnalité Premium
+          Fonctionnalité Supérieure
         </div>
 
         <h2 className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight">
@@ -39,7 +54,7 @@ export default function SubscriptionGatedView({ path, currentPlan = 'starter' }:
         </h2>
 
         <p className="text-slate-600 text-sm mt-3 leading-relaxed max-w-lg mx-auto">
-          Votre établissement est actuellement sous la <strong className="text-slate-900 font-bold">{currentPlanDetails.name}</strong>. 
+          Votre établissement est actuellement sous la formule <strong className="text-slate-900 font-bold">{currentPlanLabel}</strong>. 
           Pour débloquer l'accès à ce module et à toutes ses fonctionnalités associées, veuillez mettre à niveau l'abonnement de votre établissement.
         </p>
 
@@ -49,8 +64,8 @@ export default function SubscriptionGatedView({ path, currentPlan = 'starter' }:
             <div className="flex items-center gap-2 mb-2">
               <span className="text-xs font-bold uppercase tracking-wider text-slate-500">Votre formule</span>
             </div>
-            <p className="font-extrabold text-slate-800 text-sm">{currentPlanDetails.name}</p>
-            <p className="text-xs text-slate-500 mt-1">{currentPlanDetails.maxStudents}</p>
+            <p className="font-extrabold text-slate-800 text-sm">{currentPlanLabel}</p>
+            <p className="text-xs text-slate-500 mt-1">{currentStudentLimit}</p>
           </div>
 
           <div className="p-4 rounded-2xl bg-gradient-to-br from-amber-500/10 to-orange-500/5 border-2 border-amber-500/30">
@@ -60,8 +75,12 @@ export default function SubscriptionGatedView({ path, currentPlan = 'starter' }:
                 Formule Recommandée
               </span>
             </div>
-            <p className="font-extrabold text-amber-950 text-sm">Formule Académique ou Excellence</p>
-            <p className="text-xs text-amber-800 mt-1">Débloque la gestion des cartes, finances, salaires & IA</p>
+            <p className="font-extrabold text-amber-950 text-sm">{recommendedPlan?.name || 'Formule supérieure configurée'}</p>
+            <p className="text-xs text-amber-800 mt-1">
+              {recommendedPlan
+                ? `${Number(recommendedPlan.price).toLocaleString('fr-FR')} FCFA / ${recommendedPlan.period || 'mois'}`
+                : 'Consultez les formules configurées par le super-admin'}
+            </p>
           </div>
         </div>
 

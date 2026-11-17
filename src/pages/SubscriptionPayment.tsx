@@ -126,7 +126,7 @@ export default function SubscriptionPayment() {
   const [cardCvc, setCardCvc] = useState('');
   const [cardBrand, setCardBrand] = useState<'visa' | 'mastercard' | 'cb'>('cb');
 
-  // Load configured payment methods from Super Admin settings
+  // Load configured payment methods & plans from Super Admin settings
   useEffect(() => {
     let isMounted = true;
     const fetchMethods = async () => {
@@ -138,15 +138,23 @@ export default function SubscriptionPayment() {
         if (isMounted && data.success) {
           if (data.plans && data.plans.length > 0) {
             setPlans(data.plans);
+            const target = String(selectedPlanId || '').toLowerCase().trim();
+            const matched =
+              data.plans.find((p: any) => String(p.id).toLowerCase() === target || (p.name || '').toLowerCase().trim() === target) ||
+              data.plans.find((p: any) => target && ((p.name || '').toLowerCase().includes(target) || target.includes((p.name || '').toLowerCase()))) ||
+              data.plans.find((p: any) => p.is_recommended) ||
+              data.plans[0];
+            if (matched) {
+              setSelectedPlanId(String(matched.id));
+            }
           }
           if (data.paymentMethods && data.paymentMethods.length > 0) {
             setPaymentMethods(data.paymentMethods);
-            // Default select the first active method
             setSelectedMethodId(data.paymentMethods[0].id);
           }
         }
       } catch (err) {
-        console.warn("Could not load dynamic payment methods, using defaults:", err);
+        console.warn("Could not load dynamic plans & payment methods:", err);
       } finally {
         if (isMounted) setLoadingConfig(false);
       }
@@ -156,50 +164,56 @@ export default function SubscriptionPayment() {
     return () => { isMounted = false; };
   }, []);
 
-  // Selected plan calculation
-  const currentPlan = plans.find(p => p.id.toLowerCase() === selectedPlanId.toLowerCase()) || {
-    id: selectedPlanId,
-    name: selectedPlanId === 'starter' ? 'Starter' : selectedPlanId === 'excellence' ? 'Excellence' : 'Standard',
-    price: selectedPlanId === 'starter' ? 25000 : selectedPlanId === 'excellence' ? 150000 : 75000,
-    period: selectedPlanId === 'starter' ? 'trimestre' : 'an',
-    student_limit: selectedPlanId === 'starter' ? 300 : selectedPlanId === 'excellence' ? 'Illimité' : 1000,
-    description: "Formule tout-en-un pour la gestion informatisée de l'établissement",
-    features: [
-      'Gestion des notes et calcul des moyennes',
-      'Bulletins et fiches élèves numérisées',
-      'Accès Espace Parents et Enseignants'
-    ]
-  };
+  // Selected plan resolved exclusively from Super Admin configured plans
+  const targetPlanLower = String(selectedPlanId || '').toLowerCase().trim();
+  const currentPlan =
+    plans.find(p => String(p.id).toLowerCase() === targetPlanLower || (p.name || '').toLowerCase().trim() === targetPlanLower) ||
+    plans.find(p => targetPlanLower && ((p.name || '').toLowerCase().includes(targetPlanLower) || targetPlanLower.includes((p.name || '').toLowerCase()))) ||
+    plans.find(p => p.is_recommended) ||
+    plans[0] || {
+      id: selectedPlanId || '',
+      name: 'Formule configurée',
+      price: 0,
+      period: 'mois',
+      student_limit: 500,
+      description: '',
+      features: []
+    };
 
-  // Helper to calculate pricing, 45% initial payment and installment schedule for each modality
+  // Helper to calculate pricing, 45% initial payment and installment schedule based strictly on configured plan price
   const getModalityDetails = (planId: string, modality: 'annuel' | 'semestriel' | 'trimestriel' | 'mensuel') => {
-    const pId = planId.toLowerCase();
-    
-    // Base annual price of the subscription plan
-    const totalPlanPrice = pId === 'starter' ? 80000 : pId === 'excellence' ? 150000 : 75000;
-    const isUnique = modality === 'annuel';
+    const targetLower = String(planId || '').toLowerCase().trim();
+    const matchedPlan =
+      plans.find(p => String(p.id).toLowerCase() === targetLower || (p.name || '').toLowerCase().trim() === targetLower) ||
+      currentPlan;
+
+    const totalPlanPrice = Number(matchedPlan?.price ?? 0);
+    const planPeriod = matchedPlan?.period || 'mois';
+    const isUnique = modality === 'annuel' || totalPlanPrice === 0;
     const initialPercentage = isUnique ? 100 : 45;
     const initialAmount = isUnique ? totalPlanPrice : Math.round(totalPlanPrice * 0.45);
     const remainingPercentage = isUnique ? 0 : 55;
     const remainingAmount = totalPlanPrice - initialAmount;
 
-    let name = 'Annuel (Paiement unique)';
-    let periodText = '/ an (Paiement unique)';
-    let durationText = '1 an (365 jours)';
-    let discountBadge: string | null = '-25% Réduction';
-    let badge = 'Paiement Unique (100%)';
-    let subtext = "1 seul règlement pour toute l'année scolaire (sans mensualités ultérieures)";
+    let name = totalPlanPrice === 0 ? `Période d'essai (${planPeriod})` : `Paiement unique (${planPeriod})`;
+    let periodText = `/ ${planPeriod} (Paiement unique)`;
+    let durationText = `1 ${planPeriod}`;
+    let discountBadge: string | null = totalPlanPrice === 0 ? 'Gratuit' : 'Paiement Intégral';
+    let badge = totalPlanPrice === 0 ? 'Gratuit (0 FCFA)' : 'Paiement Unique (100%)';
+    let subtext = "1 seul règlement pour la formule sélectionnée (sans mensualités ultérieures)";
     let remainingScheduleText = "Aucun solde restant - Formule intégralement soldée";
     let installments: Array<{ title: string; percentage: number; amount: number; dueText: string; isPaidNow: boolean }> = [];
 
-    if (modality === 'annuel') {
-      name = 'Annuel (Paiement unique)';
-      periodText = '/ an (Paiement unique)';
-      durationText = '1 an (365 jours)';
-      discountBadge = pId === 'starter' ? '-20% Réduction' : pId === 'excellence' ? '-22% Économie' : '-26% Économie';
-      badge = 'Paiement Unique (100%)';
-      subtext = `Règlement intégral de ${totalPlanPrice.toLocaleString('fr-FR')} FCFA à la souscription sans solde ultérieur`;
-      remainingScheduleText = "Aucun solde restant - Licence annuelle acquittée intégralement à 100%";
+    if (modality === 'annuel' || totalPlanPrice === 0) {
+      name = totalPlanPrice === 0 ? `Essai (${planPeriod})` : `Paiement unique (${planPeriod})`;
+      periodText = `/ ${planPeriod} (Paiement unique)`;
+      durationText = planPeriod;
+      discountBadge = totalPlanPrice === 0 ? 'Offert' : 'Intégral';
+      badge = totalPlanPrice === 0 ? 'Gratuit' : 'Paiement Unique (100%)';
+      subtext = totalPlanPrice === 0
+        ? `Activation sans frais (${planPeriod})`
+        : `Règlement intégral de ${totalPlanPrice.toLocaleString('fr-FR')} FCFA à la souscription sans solde ultérieur`;
+      remainingScheduleText = "Aucun solde restant - Licence acquittée intégralement à 100%";
       installments = [
         {
           title: "Règlement unique intégral (100%)",
@@ -823,38 +837,56 @@ export default function SubscriptionPayment() {
                   </p>
                 </div>
 
-                {/* Plan selector pills */}
+                {/* Plan selector pills (exclusively configured by Super Admin) */}
                 <div className="pt-2">
                   <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">
                     1. Sélectionnez la Formule d'Abonnement Souhaitée :
                   </label>
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                    {[
-                      { id: 'starter', name: 'Starter', price: '25 000 FCFA', cycle: 'Entrée de gamme' },
-                      { id: 'standard', name: 'Standard', price: '75 000 FCFA', cycle: 'Le plus populaire', rec: true },
-                      { id: 'excellence', name: 'Excellence', price: '150 000 FCFA', cycle: 'Intégrale & IA' }
-                    ].map((p) => (
-                      <button
-                        type="button"
-                        key={p.id}
-                        onClick={() => setSelectedPlanId(p.id)}
-                        className={`p-3.5 rounded-2xl border text-left transition-all relative ${
-                          selectedPlanId.toLowerCase() === p.id
-                            ? 'border-primary-600 bg-primary-50/70 ring-2 ring-primary-500/20'
-                            : 'border-slate-200 hover:border-slate-300 bg-white'
-                        }`}
-                      >
-                        {p.rec && (
-                          <span className="absolute -top-2.5 right-3 bg-emerald-600 text-white text-[9px] font-black uppercase px-2 py-0.5 rounded-full shadow-xs">
-                            Recommandé
-                          </span>
-                        )}
-                        <span className="block font-black text-sm text-slate-900">{p.name}</span>
-                        <span className="block font-extrabold text-primary-700 text-xs mt-1">{p.price}</span>
-                        <span className="block text-[10px] text-slate-400 font-medium">{p.cycle}</span>
-                      </button>
-                    ))}
-                  </div>
+                  {loadingConfig ? (
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      {[1, 2, 3].map((idx) => (
+                        <div key={idx} className="h-24 rounded-2xl border border-slate-200 bg-slate-50 animate-pulse" />
+                      ))}
+                    </div>
+                  ) : plans.length === 0 ? (
+                    <div className="p-4 rounded-2xl border border-amber-200 bg-amber-50 text-xs text-amber-800 font-semibold">
+                      Aucune formule d'abonnement active configurée par l'administration.
+                    </div>
+                  ) : (
+                    <div className={`grid grid-cols-1 ${plans.length <= 2 ? 'sm:grid-cols-2' : plans.length >= 4 ? 'sm:grid-cols-2 lg:grid-cols-4' : 'sm:grid-cols-3'} gap-3`}>
+                      {plans.map((p) => {
+                        const isSelected = String(currentPlan.id) === String(p.id);
+                        const priceDisplay = Number(p.price) === 0
+                          ? `Gratuit (${p.period || 'essai'})`
+                          : `${Number(p.price).toLocaleString('fr-FR')} FCFA / ${p.period || 'mois'}`;
+                        const cycleInfo = p.student_limit
+                          ? (Number(p.student_limit) >= 999999 ? 'Élèves illimités' : `Jusqu'à ${p.student_limit} élèves`)
+                          : (p.period || 'Formule configurée');
+
+                        return (
+                          <button
+                            type="button"
+                            key={p.id}
+                            onClick={() => setSelectedPlanId(String(p.id))}
+                            className={`p-3.5 rounded-2xl border text-left transition-all relative ${
+                              isSelected
+                                ? 'border-primary-600 bg-primary-50/70 ring-2 ring-primary-500/20'
+                                : 'border-slate-200 hover:border-slate-300 bg-white'
+                            }`}
+                          >
+                            {p.is_recommended && (
+                              <span className="absolute -top-2.5 right-3 bg-emerald-600 text-white text-[9px] font-black uppercase px-2 py-0.5 rounded-full shadow-xs">
+                                Recommandé
+                              </span>
+                            )}
+                            <span className="block font-black text-sm text-slate-900">{p.name}</span>
+                            <span className="block font-extrabold text-primary-700 text-xs mt-1">{priceDisplay}</span>
+                            <span className="block text-[10px] text-slate-400 font-medium">{cycleInfo}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
 
                 {/* Payment Modalities Selector (Annuel paiement unique, Semestriel, Trimestriel, Mensuel) */}
@@ -1567,7 +1599,7 @@ export default function SubscriptionPayment() {
               </span>
               <div className="flex flex-col sm:flex-row items-center justify-between gap-4 bg-white/10 p-4 rounded-2xl border border-white/15">
                 <span className="text-xl sm:text-2xl font-mono font-black tracking-wider text-amber-300 break-all select-all">
-                  {licenseKey || 'MEG-EXCELLENCE-OFFICIEL'}
+                  {licenseKey || 'MEG-LICENCE-OFFICIELLE'}
                 </span>
 
                 <button

@@ -73,6 +73,16 @@ const MENU_ITEMS: MenuItem[] = [
     ]
   },
   {
+    title: 'Offres & Abonnements',
+    icon: Package,
+    submenu: [
+      { title: 'Planches des Offres & Tarifs', path: '/super-admin/plans' },
+      { title: 'Abonnements & Licences', path: '/super-admin/subscriptions' },
+      { title: 'Catalogue Comparatif', path: '/super-admin/catalog' },
+      { title: 'Offre Produit & Matrice', path: '/super-admin/product' },
+    ]
+  },
+  {
     title: 'Analytics',
     icon: BarChart3,
     submenu: [
