@@ -149,53 +149,71 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }, 100);
   };
 
+  const userJsonRef = React.useRef<string>('');
+  const refreshInFlightRef = React.useRef<Promise<void> | null>(null);
+
   const refreshPlan = async () => {
     try {
       const res = await apiFetch('/api/school-subscription');
       if (res.ok) {
         const data = await res.json();
-        setSchoolPlan(data.plan || 'standard');
+        const nextPlan = data.plan || 'standard';
+        setSchoolPlan(prev => (prev === nextPlan ? prev : nextPlan));
       }
     } catch (e) {
       console.warn('Unable to refresh school plan:', e);
-      if (!schoolPlan) setSchoolPlan('standard');
+      setSchoolPlan(prev => prev || 'standard');
     }
   };
 
   const refreshUser = async () => {
-    try {
-      const token = safeGet('token');
-      if (!token) {
-        setLoading(false);
-        return;
-      }
-      
-      const response = await apiFetch('/api/auth/me', {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-
-      if (response.ok) {
-        const userData = await response.json();
-        safeSet('user', JSON.stringify(userData));
-        setUser(userData);
-      } else if (response.status === 401 || response.status === 403) {
-        // Token is definitely invalid or expired
-        logout();
-      } else {
-        // For other errors (500, 502, 503, 504), keep the current session
-        console.warn(`Auth sync failed with status ${response.status}. Keeping session.`);
-      }
-    } catch (error) {
-      console.warn('Unable to refresh user data:', error);
-    } finally {
-      setLoading(false);
+    if (refreshInFlightRef.current) {
+      return refreshInFlightRef.current;
     }
+
+    const promise = (async () => {
+      try {
+        const token = safeGet('token');
+        if (!token) {
+          setLoading(false);
+          return;
+        }
+
+        const response = await apiFetch('/api/auth/me', {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+
+        if (response.ok) {
+          const userData = await response.json();
+          const serialized = JSON.stringify(userData);
+          if (serialized !== userJsonRef.current) {
+            userJsonRef.current = serialized;
+            safeSet('user', serialized);
+            setUser(userData);
+          }
+        } else if (response.status === 401 || response.status === 403) {
+          logout();
+        } else {
+          console.warn(`Auth sync failed with status ${response.status}. Keeping session.`);
+        }
+      } catch (error) {
+        console.warn('Unable to refresh user data:', error);
+      } finally {
+        setLoading(false);
+        refreshInFlightRef.current = null;
+      }
+    })();
+
+    refreshInFlightRef.current = promise;
+    return promise;
   };
 
   const login = (token: string, userData: User) => {
     safeRemove('logged_out');
     safeSet('token', token);
-    safeSet('user', JSON.stringify(userData));
+    const serialized = JSON.stringify(userData);
+    userJsonRef.current = serialized;
+    safeSet('user', serialized);
     safeSet('activeSpace', 'all');
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new Event('activeSpaceChanged'));
@@ -207,6 +225,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const logout = () => {
     lastIdentifiedEmailRef.current = null;
+    userJsonRef.current = '';
     safeSet('logged_out', 'true');
     safeRemove('token');
     safeRemove('user');
@@ -292,12 +311,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, [user?.email, user?.nom, user?.role]);
 
+  const userId = user?.id ?? null;
+
   useEffect(() => {
-    if (!user) return;
+    if (!userId) return;
 
     const handlePermissionSync = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
       const now = Date.now();
-      if (now - lastSyncRef.current < 2500) return;
+      if (now - lastSyncRef.current < 4000) return;
       lastSyncRef.current = now;
       refreshUser();
       refreshPlan();
@@ -305,30 +327,29 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     };
 
     const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
       refreshUser();
       refreshPlan();
       fetchYears();
     }, 30000);
 
     const handleStorage = (e: StorageEvent) => {
-      if (e.key === 'school_permissions_version' || e.key === 'user' || e.key === 'megafixa_last_update') {
+      if (e.key === 'school_permissions_version' || e.key === 'user') {
         handlePermissionSync();
       }
     };
 
     window.addEventListener('focus', handlePermissionSync);
     window.addEventListener('school_permissions_updated', handlePermissionSync);
-    window.addEventListener('app:data-updated', handlePermissionSync);
     window.addEventListener('storage', handleStorage);
 
     return () => {
       clearInterval(interval);
       window.removeEventListener('focus', handlePermissionSync);
       window.removeEventListener('school_permissions_updated', handlePermissionSync);
-      window.removeEventListener('app:data-updated', handlePermissionSync);
       window.removeEventListener('storage', handleStorage);
     };
-  }, [user]);
+  }, [userId]);
 
   const selectedYear = (Array.isArray(years) && typeof years.find === 'function') ? years.find(y => y.id === selectedYearId) || null : null;
 
@@ -350,7 +371,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       {loading && !isPublicUnblockedRoute() ? (
         <div className="min-h-screen w-full flex items-center justify-center bg-slate-50">
           <div className="flex flex-col items-center gap-3">
-            <div className="w-10 h-10 border-4 border-teal-600 border-t-transparent rounded-full animate-spin" />
+            <div className="w-10 h-10 border-4 border-[#013efb] border-t-transparent rounded-full animate-spin" />
             <p className="text-sm font-medium text-slate-500">Chargement en cours...</p>
           </div>
         </div>

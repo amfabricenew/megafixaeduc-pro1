@@ -1,4 +1,3 @@
-import { motion } from 'framer-motion';
 import { apiFetch } from '../utils/api';
 import TimeSyncWarning from './TimeSyncWarning';
 import React from 'react';
@@ -143,12 +142,10 @@ export default function Layout() {
 
     window.addEventListener('schoolInfoChanged', handleForcedSync);
     window.addEventListener('school_permissions_updated', handleSync);
-    window.addEventListener('app:data-updated', handleSync);
     window.addEventListener('focus', handleSync);
     return () => {
       window.removeEventListener('schoolInfoChanged', handleForcedSync);
       window.removeEventListener('school_permissions_updated', handleSync);
-      window.removeEventListener('app:data-updated', handleSync);
       window.removeEventListener('focus', handleSync);
     };
   }, [fetchSchoolInfo]);
@@ -414,7 +411,7 @@ export default function Layout() {
   // Apply school styles
   React.useEffect(() => {
     if (schoolInfo) {
-      document.documentElement.style.setProperty('--school-primary', schoolInfo.couleur_primaire || '#10b981');
+      document.documentElement.style.setProperty('--school-primary', schoolInfo.couleur_primaire || '#013efb');
       
       const fontFamilies: Record<string, string> = {
         inter: '"Inter", sans-serif',
@@ -453,12 +450,46 @@ export default function Layout() {
           </div>
       </header>
 
+      {/* Mobile Drawer Backdrop */}
+      {isSidebarOpen && (
+        <div
+          onClick={() => setIsSidebarOpen(false)}
+          className="fixed inset-0 bg-slate-900/50 backdrop-blur-[1px] z-40 md:hidden"
+          aria-hidden="true"
+        />
+      )}
+
       {/* Sidebar */}
       <aside className={cn(
-        "fixed inset-y-0 left-0 z-40 w-64 bg-white border-r transform transition-transform duration-200 ease-in-out md:relative md:translate-x-0",
+        "fixed inset-y-0 left-0 z-50 md:z-auto w-72 md:w-64 bg-white border-r shadow-2xl md:shadow-none transform transition-transform duration-200 ease-in-out md:relative md:translate-x-0",
         isSidebarOpen ? "translate-x-0" : "-translate-x-full"
       )}>
         <div className="h-full flex flex-col">
+          {/* Mobile Drawer Top Bar */}
+          <div className="p-4 border-b border-slate-100 flex md:hidden items-center justify-between gap-2 bg-slate-50/70">
+            <div className="flex items-center gap-2.5 min-w-0">
+              {schoolInfo?.logo ? (
+                <img src={schoolInfo.logo} alt="Logo" className="w-8 h-8 object-contain shrink-0" referrerPolicy="no-referrer" />
+              ) : (
+                <img src={logo} alt="Logo" className="w-8 h-8 object-contain shrink-0" referrerPolicy="no-referrer" />
+              )}
+              <div className="min-w-0">
+                <p className="font-bold text-slate-900 text-sm truncate">{schoolInfo?.nom || import.meta.env.VITE_SCHOOL_NAME || 'MégafixaEduc'}</p>
+                <p className="text-[10px] text-slate-500 truncate">
+                  {localUser?.role === 'enseignant' ? t('Espace Enseignant') : localUser?.role === 'parent' ? t('Espace Parents') : t('Administration')}
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setIsSidebarOpen(false)}
+              className="p-2 text-slate-500 hover:bg-slate-200/70 rounded-xl shrink-0"
+              aria-label="Fermer le menu"
+            >
+              <X size={20} />
+            </button>
+          </div>
+
           <div className="p-6 hidden md:flex items-center gap-3">
             {schoolInfo?.logo ? (
               <img src={schoolInfo.logo} alt="Logo" className="w-10 h-10 object-contain" referrerPolicy="no-referrer" />
@@ -480,15 +511,44 @@ export default function Layout() {
             </div>
           </div>
 
+          {/* Mobile Academic Year Selector */}
+          {years.length > 0 && (
+            <div className="px-4 pt-3 pb-1 md:hidden">
+              <div className="flex items-center gap-2 px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl">
+                <Calendar size={14} className="text-slate-400 shrink-0" />
+                <select
+                  value={selectedYearId || ''}
+                  onChange={async (e) => {
+                    const targetId = Number(e.target.value);
+                    if (targetId) {
+                      try {
+                        await apiFetch(`/api/annees/${targetId}/activate`, { method: 'PATCH' });
+                      } catch {}
+                      setSelectedYearId(targetId);
+                    }
+                  }}
+                  className="w-full bg-transparent text-xs font-bold text-slate-700 focus:outline-none cursor-pointer"
+                >
+                  {years.map((y: any) => (
+                    <option key={y.id} value={y.id}>
+                      Année {y.libelle} {y.est_active_effective || y.est_active ? '(Active)' : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          )}
+
           {/* Space Selector Tabs (Hidden for teachers & parents) */}
           {localUser?.role !== 'enseignant' && localUser?.role !== 'parent' && (
-            <div className="px-4 pt-1 pb-2">
+            <div className="px-4 pt-2 pb-2">
               <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5 px-1">{t("Choix de l'espace")}</p>
               <div className="grid grid-cols-3 gap-1 bg-slate-100 p-1 rounded-xl text-[11px] font-medium">
                 <button
                   type="button"
                   onClick={() => {
                     updateActiveSpace('all');
+                    setIsSidebarOpen(false);
                     navigate('/accueil');
                   }}
                   className={cn(
@@ -511,6 +571,7 @@ export default function Layout() {
                       return;
                     }
                     updateActiveSpace('primaire');
+                    setIsSidebarOpen(false);
                     navigate('/accueil-primaire');
                   }}
                   className={cn(
@@ -537,6 +598,7 @@ export default function Layout() {
                       return;
                     }
                     updateActiveSpace('secondaire');
+                    setIsSidebarOpen(false);
                     navigate('/accueil-secondaire');
                   }}
                   className={cn(
@@ -633,17 +695,17 @@ export default function Layout() {
                 setIsSidebarOpen(false);
                 toggleAIAssistant();
               }}
-              className="w-full flex items-center justify-between px-3 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 via-primary-600 to-indigo-600 hover:from-emerald-700 hover:via-primary-700 hover:to-indigo-700 text-white shadow-sm hover:shadow transition-all group cursor-pointer"
+              className="w-full flex items-center justify-between px-3 py-2.5 rounded-xl bg-gradient-to-r from-[#013efb] via-[#049ffb] to-[#fb5c03] hover:brightness-110 text-white shadow-sm hover:shadow transition-all group cursor-pointer"
               title="Ouvrir l'Assistant IA MégafixaBot"
             >
               <div className="flex items-center gap-2.5 min-w-0">
                 <div className="w-7 h-7 rounded-lg bg-white/20 backdrop-blur-xs flex items-center justify-center shrink-0 border border-white/25 group-hover:scale-110 transition-transform shadow-2xs">
-                  <Sparkles size={15} className="text-amber-300" />
+                  <Sparkles size={15} className="text-white" />
                 </div>
                 <div className="text-left min-w-0">
                   <p className="text-xs font-bold leading-tight truncate flex items-center gap-1.5">
                     Assistant IA
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-300 animate-pulse"></span>
+                    <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse"></span>
                   </p>
                   <p className="text-[10px] text-white/80 leading-tight truncate">MégafixaBot 7j/7</p>
                 </div>
@@ -686,7 +748,7 @@ export default function Layout() {
       </aside>
 
       {/* Main Content */}
-      <main ref={mainRef} data-scroll-container="main" className="flex-1 overflow-y-auto flex flex-col min-h-screen">
+      <main ref={mainRef} data-scroll-container="main" className="flex-1 min-w-0 overflow-x-clip overflow-y-auto flex flex-col min-h-screen">
         <TimeSyncWarning />
         <div className="hidden md:flex items-center justify-end px-8 pt-6 gap-3">
           {/* Academic Year Selector */}
@@ -776,7 +838,7 @@ export default function Layout() {
         </div>
         
         {/* Global Footer */}
-        <footer className="mt-8 pt-8 border-t border-slate-200 text-slate-500">
+        <footer className="mt-8 px-4 md:px-8 pt-8 pb-8 border-t border-slate-200 text-slate-500">
           <div className="max-w-7xl mx-auto flex flex-col md:flex-row items-center justify-between gap-4">
             <div className="flex flex-col md:flex-row items-center gap-4 md:gap-8 text-center md:text-left">
               <p className="text-xs font-medium italic opacity-70">

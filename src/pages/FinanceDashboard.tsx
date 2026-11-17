@@ -160,7 +160,7 @@ const REVENUE_CATEGORIES = [
   'Autre Recette'
 ];
 
-const COLORS = ['#10b981', '#6366f1', '#f59e0b', '#ec4899', '#8b5cf6', '#3b82f6', '#14b8a6', '#f43f5e', '#64748b'];
+const COLORS = ['#013efb', '#fb5c03', '#049ffb', '#6366f1', '#10b981', '#ec4899', '#8b5cf6', '#f43f5e', '#64748b'];
 
 export default function FinanceDashboard({ cycleProp = 'all' }: Props) {
   const { user } = useAuth();
@@ -800,11 +800,11 @@ export default function FinanceDashboard({ cycleProp = 'all' }: Props) {
                     <p className="text-xs text-slate-500">Comparatif des entrées réelles face aux engagements de dépenses</p>
                   </div>
                   <div className="flex items-center gap-2 text-xs">
-                    <span className="inline-flex items-center gap-1 text-emerald-700 font-semibold">
-                      <span className="w-2.5 h-2.5 rounded-full bg-emerald-500"></span> Entrées
+                    <span className="inline-flex items-center gap-1 text-[#013efb] font-semibold">
+                      <span className="w-2.5 h-2.5 rounded-full bg-[#013efb]"></span> Entrées
                     </span>
-                    <span className="inline-flex items-center gap-1 text-rose-700 font-semibold">
-                      <span className="w-2.5 h-2.5 rounded-full bg-rose-500"></span> Sorties
+                    <span className="inline-flex items-center gap-1 text-[#fb5c03] font-semibold">
+                      <span className="w-2.5 h-2.5 rounded-full bg-[#fb5c03]"></span> Sorties
                     </span>
                   </div>
                 </div>
@@ -820,8 +820,8 @@ export default function FinanceDashboard({ cycleProp = 'all' }: Props) {
                           formatter={(value: any) => [`${Number(value).toLocaleString()} FCFA`]}
                           contentStyle={{ backgroundColor: '#ffffff', borderRadius: '12px', border: '1px solid #e2e8f0', fontSize: '12px' }}
                         />
-                        <Bar dataKey="entrees" name="Entrées" fill="#10b981" radius={[4, 4, 0, 0]} />
-                        <Bar dataKey="sorties" name="Sorties" fill="#f43f5e" radius={[4, 4, 0, 0]} />
+                        <Bar dataKey="entrees" name="Entrées" fill="#013efb" radius={[4, 4, 0, 0]} />
+                        <Bar dataKey="sorties" name="Sorties" fill="#fb5c03" radius={[4, 4, 0, 0]} />
                       </BarChart>
                     </ResponsiveContainer>
                   ) : (

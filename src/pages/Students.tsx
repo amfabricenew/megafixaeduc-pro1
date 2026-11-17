@@ -1704,7 +1704,7 @@ export default function Students({ cycle = 'all' }: StudentsProps) {
                           </p>
                           <span className="text-[10px] text-slate-400 font-medium">Défilez pour voir tout le fichier</span>
                         </div>
-                        <div className="border border-slate-200 rounded-xl overflow-hidden max-h-72 overflow-y-auto shadow-inner bg-white">
+                        <div className="border border-slate-200 rounded-xl overflow-x-auto max-h-72 overflow-y-auto shadow-inner bg-white">
                           <table className="w-full text-left text-xs relative">
                             <thead className="bg-slate-100 text-slate-700 uppercase font-bold tracking-wider sticky top-0 z-10 border-b border-slate-200">
                               <tr>

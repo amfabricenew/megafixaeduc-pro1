@@ -220,29 +220,36 @@ export const apiFetch = async (input: RequestInfo | URL, init?: RequestInit, ret
 
 export function useAppSync(onSync: () => void, intervalMs: number = 8000) {
   const savedHandler = useRef(onSync);
+  const lastRunRef = useRef<number>(0);
 
   useEffect(() => {
     savedHandler.current = onSync;
   }, [onSync]);
 
   useEffect(() => {
-    const handler = () => {
+    const handler = (force = false) => {
+      const now = Date.now();
+      if (!force && now - lastRunRef.current < 800) return;
+      lastRunRef.current = now;
       savedHandler.current();
     };
 
-    window.addEventListener('app:data-updated', handler);
-    window.addEventListener('focus', handler);
+    const onUpdated = () => handler(true);
+    const onFocusOrStorage = () => handler(false);
+
+    window.addEventListener('app:data-updated', onUpdated);
+    window.addEventListener('focus', onFocusOrStorage);
 
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
-        handler();
+        handler(false);
       }
     };
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
     const handleStorage = (e: StorageEvent) => {
       if (e.key === 'megafixa_last_update') {
-        handler();
+        handler(false);
       }
     };
     window.addEventListener('storage', handleStorage);
@@ -253,21 +260,22 @@ export function useAppSync(onSync: () => void, intervalMs: number = 8000) {
         channel = new BroadcastChannel('megafixa_app_sync');
         channel.onmessage = (event) => {
           if (event.data && event.data.type === 'DATA_CHANGED') {
-            handler();
+            handler(false);
           }
         };
-      } catch (e) {
+      } catch {
         // channel error
       }
     }
 
     const timer = setInterval(() => {
-      handler();
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      handler(false);
     }, intervalMs);
 
     return () => {
-      window.removeEventListener('app:data-updated', handler);
-      window.removeEventListener('focus', handler);
+      window.removeEventListener('app:data-updated', onUpdated);
+      window.removeEventListener('focus', onFocusOrStorage);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('storage', handleStorage);
       if (channel) {

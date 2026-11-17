@@ -12,11 +12,12 @@ interface BulletinHeaderModalProps {
 }
 
 const COLOR_PRESETS = [
+  { name: 'Bleu Logo (Officiel)', color: '#013efb' },
+  { name: 'Cyan Logo', color: '#049ffb' },
+  { name: 'Orange Logo', color: '#fb5c03' },
   { name: 'Blanc / Noir (Monochrome)', color: '#000000', isBlackWhite: true },
   { name: 'Vert Émeraude Officiel', color: '#059669' },
   { name: 'Vert Forêt République', color: '#15803d' },
-  { name: 'Vert Pin Sombre', color: '#166534' },
-  { name: 'Bleu Royal Institutionnel', color: '#2563eb' },
   { name: 'Bleu Marine / Nuit', color: '#1e3a8a' },
   { name: 'Indigo Impérial', color: '#4338ca' },
   { name: 'Violet / Pourpre', color: '#6d28d9' },
@@ -24,7 +25,6 @@ const COLOR_PRESETS = [
   { name: 'Rouge Sombre', color: '#991b1b' },
   { name: 'Ambre Doré', color: '#d97706' },
   { name: 'Cuivre Chaud', color: '#c2410c' },
-  { name: 'Cyan Océan', color: '#0891b2' },
   { name: 'Ardoise / Slate', color: '#334155' },
   { name: 'Noir Anthracite', color: '#0f172a' },
 ];
@@ -89,7 +89,7 @@ export default function BulletinHeaderModal({
       nom_directeur: schoolInfo?.nom_fondateur || '',
       signature_tampon: schoolInfo?.signature || '',
       devise_ecole: slogan,
-      couleur_principale: schoolInfo?.couleur_primaire || '#059669',
+      couleur_principale: schoolInfo?.couleur_primaire || '#013efb',
       position_tutelle: 'gauche',
       alignement_tutelle: 'center',
       position_etablissement: 'droite',
@@ -264,7 +264,7 @@ export default function BulletinHeaderModal({
             email: data.email || schoolInfo?.email || defaults.email,
             boite_postale: data.boite_postale || schoolInfo?.boite_postale || defaults.boite_postale,
             logo: data.logo || schoolInfo?.logo || defaults.logo,
-            couleur_principale: data.couleur_principale || schoolInfo?.couleur_primaire || '#059669',
+            couleur_principale: data.couleur_principale || schoolInfo?.couleur_primaire || '#013efb',
             position_tutelle: data.position_tutelle || 'gauche',
             alignement_tutelle: data.alignement_tutelle || 'center',
             position_etablissement: data.position_etablissement || 'droite',
@@ -462,7 +462,7 @@ export default function BulletinHeaderModal({
       email: schoolInfo.email || prev.email,
       boite_postale: schoolInfo.boite_postale || prev.boite_postale,
       logo: schoolInfo.logo || prev.logo,
-      couleur_principale: schoolInfo.couleur_primaire || prev.couleur_principale || '#059669',
+      couleur_principale: schoolInfo.couleur_primaire || prev.couleur_principale || '#013efb',
       nom_pays: schoolInfo.pays || prev.nom_pays
     }));
     toast.success("Informations synchronisées avec succès depuis Info École !");
@@ -751,7 +751,7 @@ export default function BulletinHeaderModal({
                   {/* Bulletin Title Banner */}
                   <div 
                     className="py-2.5 px-4 rounded-xl text-center text-white font-extrabold uppercase tracking-widest text-sm shadow-sm"
-                    style={{ backgroundColor: headerData.couleur_principale || '#059669' }}
+                    style={{ backgroundColor: headerData.couleur_principale || '#013efb' }}
                   >
                     {headerData.titre_bulletin || 'BULLETIN DE NOTES'}
                     {headerData.sous_titre && <span className="block text-[11px] font-normal lowercase tracking-normal">{headerData.sous_titre}</span>}
@@ -774,7 +774,7 @@ export default function BulletinHeaderModal({
                     {activeCycle === 'primaire_maternelle' ? (
                       <table className="w-full text-left border-collapse">
                         <thead>
-                          <tr className="text-white text-[11px]" style={{ backgroundColor: headerData.couleur_principale || '#059669' }}>
+                          <tr className="text-white text-[11px]" style={{ backgroundColor: headerData.couleur_principale || '#013efb' }}>
                             <th className="p-2 border-r border-emerald-400 font-bold">DISCIPLINE / ACTIVITÉ</th>
                             <th className="p-2 border-r border-emerald-400 text-center font-bold">NOTE OBT.</th>
                             <th className="p-2 border-r border-emerald-400 text-center font-bold">NOTE PERF.</th>
@@ -810,7 +810,7 @@ export default function BulletinHeaderModal({
                     ) : (
                       <table className="w-full text-left border-collapse">
                         <thead>
-                          <tr className="text-white text-[11px]" style={{ backgroundColor: headerData.couleur_principale || '#059669' }}>
+                          <tr className="text-white text-[11px]" style={{ backgroundColor: headerData.couleur_principale || '#013efb' }}>
                             <th className="p-2 border-r border-indigo-400 font-bold">MATIÈRE</th>
                             <th className="p-2 border-r border-indigo-400 text-center font-bold">MI</th>
                             <th className="p-2 border-r border-indigo-400 text-center font-bold">DEV 1</th>
@@ -1308,14 +1308,14 @@ export default function BulletinHeaderModal({
                       <Sparkles size={18} className="text-primary-600" />
                       <span>Couleur Principale du Bulletin & Thème Graphique</span>
                     </div>
-                    <span className="text-xs font-bold px-2.5 py-0.5 rounded-full text-white" style={{ backgroundColor: headerData.couleur_principale || '#059669' }}>
-                      {headerData.couleur_principale === '#000000' ? 'Blanc / Noir (#000000)' : (headerData.couleur_principale || '#059669')}
+                    <span className="text-xs font-bold px-2.5 py-0.5 rounded-full text-white" style={{ backgroundColor: headerData.couleur_principale || '#013efb' }}>
+                      {headerData.couleur_principale === '#000000' ? 'Blanc / Noir (#000000)' : (headerData.couleur_principale || '#013efb')}
                     </span>
                   </div>
 
                   <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-8 gap-2.5">
                     {COLOR_PRESETS.map((preset) => {
-                      const isSelected = (headerData.couleur_principale || '#059669').toLowerCase() === preset.color.toLowerCase();
+                      const isSelected = (headerData.couleur_principale || '#013efb').toLowerCase() === preset.color.toLowerCase();
                       const isWhiteBlack = preset.color === '#000000';
                       return (
                         <button
@@ -1357,16 +1357,16 @@ export default function BulletinHeaderModal({
                     <div className="flex items-center gap-2 bg-white border border-slate-300 rounded-xl px-3 py-1.5 shadow-2xs">
                       <input
                         type="color"
-                        value={headerData.couleur_principale || '#059669'}
+                        value={headerData.couleur_principale || '#013efb'}
                         onChange={e => setHeaderData({ ...headerData, couleur_principale: e.target.value })}
                         className="w-7 h-7 rounded-lg cursor-pointer border-0 p-0"
                       />
                       <input
                         type="text"
-                        value={headerData.couleur_principale || '#059669'}
+                        value={headerData.couleur_principale || '#013efb'}
                         onChange={e => setHeaderData({ ...headerData, couleur_principale: e.target.value })}
                         className="w-20 text-xs font-mono font-bold text-slate-800 outline-none uppercase"
-                        placeholder="#059669"
+                        placeholder="#013efb"
                       />
                     </div>
                   </div>

@@ -429,7 +429,7 @@ export default function Login() {
           to="/"
           className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-slate-800/90 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700/80 shadow-lg text-xs font-bold backdrop-blur-md transition-all group hover:scale-[1.02] active:scale-[0.98]"
         >
-          <ArrowLeft size={16} className="group-hover:-translate-x-1 transition-transform text-emerald-400" />
+          <ArrowLeft size={16} className="group-hover:-translate-x-1 transition-transform text-[#049ffb]" />
           <span>{t("Page d'information")}</span>
         </Link>
       </div>
@@ -440,13 +440,13 @@ export default function Login() {
       </div>
 
       {/* Decorative background glows */}
-      <div className="absolute -top-40 -left-40 w-96 h-96 bg-primary-500/10 rounded-full blur-3xl pointer-events-none" />
-      <div className="absolute -bottom-40 -right-40 w-96 h-96 bg-emerald-500/10 rounded-full blur-3xl pointer-events-none" />
+      <div className="absolute -top-40 -left-40 w-96 h-96 bg-[#013efb]/15 rounded-full blur-3xl pointer-events-none" />
+      <div className="absolute -bottom-40 -right-40 w-96 h-96 bg-[#fb5c03]/12 rounded-full blur-3xl pointer-events-none" />
 
       <div className="sm:mx-auto sm:w-full sm:max-w-md z-10">
         {/* Dedicated School Branding Banner if schoolParam present */}
         {schoolInfo ? (
-          <div className="mb-4 bg-gradient-to-b from-emerald-950/60 to-slate-800/80 border border-emerald-500/30 rounded-3xl p-5 shadow-2xl backdrop-blur-md text-center relative overflow-hidden">
+          <div className="mb-4 bg-gradient-to-b from-[#013efb]/25 to-slate-800/80 border border-[#049ffb]/40 rounded-3xl p-5 shadow-2xl backdrop-blur-md text-center relative overflow-hidden">
             <div className="absolute top-2 right-2">
               <button 
                 type="button"
@@ -460,18 +460,18 @@ export default function Login() {
 
             <div className="flex justify-center mb-3">
               {schoolInfo.logo ? (
-                <div className="w-16 h-16 rounded-2xl overflow-hidden bg-white/10 p-1.5 border border-emerald-500/40 shadow-lg">
+                <div className="w-16 h-16 rounded-2xl overflow-hidden bg-white/10 p-1.5 border border-[#049ffb]/40 shadow-lg">
                   <img src={schoolInfo.logo} alt={schoolInfo.nom} className="w-full h-full object-contain rounded-xl" />
                 </div>
               ) : (
-                <div className="w-16 h-16 bg-emerald-500/20 border border-emerald-500/40 rounded-2xl flex items-center justify-center text-emerald-400 shadow-lg shadow-emerald-500/10">
+                <div className="w-16 h-16 bg-[#013efb]/20 border border-[#049ffb]/40 rounded-2xl flex items-center justify-center text-[#049ffb] shadow-lg shadow-[#013efb]/15">
                   <School className="w-9 h-9" />
                 </div>
               )}
             </div>
 
-            <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 text-[10px] font-black uppercase tracking-wider border border-emerald-500/30 mb-1.5">
-              <ShieldCheck size={12} className="text-emerald-400" />
+            <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-[#013efb]/25 text-[#8ab3ff] text-[10px] font-black uppercase tracking-wider border border-[#049ffb]/40 mb-1.5">
+              <ShieldCheck size={12} className="text-[#049ffb]" />
               <span>Portail Officiel d'Établissement</span>
             </div>
 
@@ -480,7 +480,7 @@ export default function Login() {
             </h1>
 
             {schoolInfo.code_ecole && (
-              <p className="text-xs font-mono font-bold text-emerald-400 mt-1">
+              <p className="text-xs font-mono font-bold text-[#049ffb] mt-1">
                 Code école : {schoolInfo.code_ecole}
               </p>
             )}
@@ -491,12 +491,12 @@ export default function Login() {
           </div>
         ) : (
           <div className="flex justify-center items-center gap-3">
-            <div className="w-12 h-12 bg-emerald-500/20 border border-emerald-500/30 rounded-2xl flex items-center justify-center text-emerald-400 shadow-lg shadow-emerald-500/10">
+            <div className="w-12 h-12 bg-gradient-to-br from-[#013efb]/30 to-[#049ffb]/20 border border-[#049ffb]/40 rounded-2xl flex items-center justify-center text-[#049ffb] shadow-lg shadow-[#013efb]/15">
               <GraduationCap className="w-7 h-7" />
             </div>
             <div>
               <h1 className="text-2xl font-black tracking-tight text-white flex items-center gap-2">
-                Mégafixa<span className="text-emerald-400">Educ Pro</span>
+                Mégafixa<span className="bg-gradient-to-r from-[#049ffb] to-[#fb5c03] bg-clip-text text-transparent">Educ Pro</span>
               </h1>
               <p className="text-xs font-semibold text-slate-400">
                 Système de Gestion Scolaire Intégré
@@ -553,7 +553,7 @@ export default function Login() {
                         value={forgotEmail}
                         onChange={(e) => setForgotEmail(e.target.value)}
                         placeholder="votre.email@ecole.com"
-                        className="block w-full pl-10 pr-4 py-3 bg-slate-900/90 border border-slate-700 rounded-xl text-white placeholder-slate-500 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-transparent transition-all"
+                        className="block w-full pl-10 pr-4 py-3 bg-slate-900/90 border border-slate-700 rounded-xl text-white placeholder-slate-500 text-sm focus:outline-none focus:ring-2 focus:ring-[#049ffb] focus:border-transparent transition-all"
                       />
                     </div>
                   </div>
@@ -561,7 +561,7 @@ export default function Login() {
                   <button
                     type="submit"
                     disabled={forgotLoading}
-                    className="w-full py-3.5 px-4 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold text-sm rounded-xl transition-all shadow-lg shadow-emerald-600/25 flex items-center justify-center gap-2"
+                    className="w-full py-3.5 px-4 bg-[#013efb] hover:bg-[#0134db] disabled:opacity-50 text-white font-bold text-sm rounded-xl transition-all shadow-lg shadow-[#013efb]/25 flex items-center justify-center gap-2"
                   >
                     {forgotLoading ? (
                       <span className="inline-block animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent" />
@@ -593,10 +593,10 @@ export default function Login() {
                         <button
                           type="button"
                           onClick={() => { setForgotMethod('question'); setForgotStep(3); }}
-                          className="w-full p-4 bg-emerald-600/10 hover:bg-emerald-600/20 border border-emerald-500/30 hover:border-emerald-500 rounded-2xl text-left transition-all group"
+                          className="w-full p-4 bg-[#013efb]/10 hover:bg-[#013efb]/20 border border-[#049ffb]/30 hover:border-[#049ffb] rounded-2xl text-left transition-all group"
                         >
                           <div className="flex items-center gap-3">
-                            <div className="w-10 h-10 rounded-xl bg-emerald-500/20 flex items-center justify-center text-emerald-400 group-hover:scale-110 transition-transform">
+                            <div className="w-10 h-10 rounded-xl bg-[#013efb]/20 flex items-center justify-center text-[#049ffb] group-hover:scale-110 transition-transform">
                               <ShieldCheck size={20} />
                             </div>
                             <div>
@@ -654,8 +654,8 @@ export default function Login() {
               ) : (
                 <form onSubmit={handleResetPassword} className="space-y-5">
                   {simulatedCodeNotice && forgotMethod === 'email' && (
-                    <div className="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs font-bold flex items-center gap-2">
-                      <Sparkles className="w-4 h-4 text-emerald-400 flex-shrink-0" />
+                    <div className="p-3.5 rounded-xl bg-[#049ffb]/10 border border-[#049ffb]/30 text-[#8ab3ff] text-xs font-bold flex items-center gap-2">
+                      <Sparkles className="w-4 h-4 text-[#049ffb] flex-shrink-0" />
                       <span>{simulatedCodeNotice}</span>
                     </div>
                   )}
@@ -663,7 +663,7 @@ export default function Login() {
                   {forgotMethod === 'question' ? (
                     <div>
                       <label className="block text-xs font-bold uppercase tracking-wider text-slate-300 mb-1.5">
-                        Question : <span className="text-emerald-400">{securityQuestion}</span>
+                        Question : <span className="text-[#049ffb]">{securityQuestion}</span>
                       </label>
                       <div className="relative">
                         <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
@@ -675,7 +675,7 @@ export default function Login() {
                           value={securityAnswer}
                           onChange={(e) => setSecurityAnswer(e.target.value)}
                           placeholder="Votre réponse secrète"
-                          className="block w-full pl-10 pr-4 py-3 bg-slate-900/90 border border-slate-700 rounded-xl text-white placeholder-slate-500 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-transparent transition-all"
+                          className="block w-full pl-10 pr-4 py-3 bg-slate-900/90 border border-slate-700 rounded-xl text-white placeholder-slate-500 text-sm focus:outline-none focus:ring-2 focus:ring-[#049ffb] focus:border-transparent transition-all"
                         />
                       </div>
                     </div>
@@ -694,7 +694,7 @@ export default function Login() {
                           value={forgotCode}
                           onChange={(e) => setForgotCode(e.target.value)}
                           placeholder="Code à 6 chiffres"
-                          className="block w-full pl-10 pr-4 py-3 bg-slate-900/90 border border-slate-700 rounded-xl text-white placeholder-slate-500 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-transparent tracking-widest font-mono"
+                          className="block w-full pl-10 pr-4 py-3 bg-slate-900/90 border border-slate-700 rounded-xl text-white placeholder-slate-500 text-sm focus:outline-none focus:ring-2 focus:ring-[#049ffb] focus:border-transparent tracking-widest font-mono"
                         />
                       </div>
                     </div>
@@ -714,7 +714,7 @@ export default function Login() {
                         value={newPassword}
                         onChange={(e) => setNewPassword(e.target.value)}
                         placeholder="Min. 8 car. (Maj, min, chiffre)"
-                        className="block w-full pl-10 pr-4 py-3 bg-slate-900/90 border border-slate-700 rounded-xl text-white placeholder-slate-500 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-transparent"
+                        className="block w-full pl-10 pr-4 py-3 bg-slate-900/90 border border-slate-700 rounded-xl text-white placeholder-slate-500 text-sm focus:outline-none focus:ring-2 focus:ring-[#049ffb] focus:border-transparent"
                       />
                     </div>
                     {newPassword && (
@@ -725,7 +725,7 @@ export default function Login() {
                   <button
                     type="submit"
                     disabled={forgotLoading}
-                    className="w-full py-3.5 px-4 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold text-sm rounded-xl transition-all shadow-lg shadow-emerald-600/25 flex items-center justify-center gap-2"
+                    className="w-full py-3.5 px-4 bg-[#013efb] hover:bg-[#0134db] disabled:opacity-50 text-white font-bold text-sm rounded-xl transition-all shadow-lg shadow-[#013efb]/25 flex items-center justify-center gap-2"
                   >
                     {forgotLoading ? (
                       <span className="inline-block animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent" />
@@ -757,7 +757,7 @@ export default function Login() {
                   Identifiant ou Email
                 </label>
                 <div className="relative">
-                  <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-emerald-400">
+                  <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-[#049ffb]">
                     <UserCheck className="h-4 w-4" />
                   </div>
                   <input
@@ -769,11 +769,11 @@ export default function Login() {
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
                     placeholder="ex: superadmin ou votre.email@domaine.com"
-                    className="block w-full pl-10 pr-4 py-3 bg-slate-900/90 border border-slate-700 rounded-xl text-white placeholder-slate-500 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-transparent transition-all font-medium"
+                    className="block w-full pl-10 pr-4 py-3 bg-slate-900/90 border border-slate-700 rounded-xl text-white placeholder-slate-500 text-sm focus:outline-none focus:ring-2 focus:ring-[#049ffb] focus:border-transparent transition-all font-medium"
                   />
                 </div>
                 <p className="mt-1 text-[11px] text-slate-400">
-                  Enseignants & Super Admin SaaS : saisissez votre identifiant (ex: <span className="text-emerald-400 font-mono font-bold">superadmin</span>) ou votre email.
+                  Enseignants & Super Admin SaaS : saisissez votre identifiant (ex: <span className="text-[#049ffb] font-mono font-bold">superadmin</span>) ou votre email.
                 </p>
               </div>
 
@@ -785,7 +785,7 @@ export default function Login() {
                   <button
                     type="button"
                     onClick={() => { setIsForgotMode(true); setForgotEmail(email); }}
-                    className="text-xs font-bold text-emerald-400 hover:text-emerald-300 transition-colors"
+                    className="text-xs font-bold text-[#049ffb] hover:text-[#fb5c03] transition-colors"
                   >
                     Oublié ?
                   </button>
@@ -800,7 +800,7 @@ export default function Login() {
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     placeholder="••••••••"
-                    className="block w-full pl-10 pr-10 py-3 bg-slate-900/90 border border-slate-700 rounded-xl text-white placeholder-slate-500 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-transparent transition-all"
+                    className="block w-full pl-10 pr-10 py-3 bg-slate-900/90 border border-slate-700 rounded-xl text-white placeholder-slate-500 text-sm focus:outline-none focus:ring-2 focus:ring-[#049ffb] focus:border-transparent transition-all"
                   />
                   <button
                     type="button"
@@ -838,7 +838,7 @@ export default function Login() {
               <button
                 type="submit"
                 disabled={loading}
-                className="w-full py-3.5 px-4 bg-emerald-600 hover:bg-emerald-500 active:scale-[0.99] disabled:opacity-50 text-white font-bold text-sm rounded-xl transition-all shadow-lg shadow-emerald-600/25 flex items-center justify-center gap-2"
+                className="w-full py-3.5 px-4 bg-gradient-to-r from-[#013efb] to-[#049ffb] hover:brightness-110 active:scale-[0.99] disabled:opacity-50 text-white font-bold text-sm rounded-xl transition-all shadow-lg shadow-[#013efb]/30 flex items-center justify-center gap-2"
               >
                 {loading ? (
                   <span className="inline-block animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent" />
@@ -897,11 +897,11 @@ export default function Login() {
                     setSchoolRequestInitialMode('creation');
                     setShowSchoolRequestModal(true);
                   }}
-                  className="w-full py-3.5 px-4 bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-700 hover:from-emerald-500 hover:to-teal-500 text-white font-black text-sm rounded-xl transition-all shadow-lg shadow-emerald-900/30 flex items-center justify-center gap-2.5 cursor-pointer border border-emerald-400/40 group"
+                  className="w-full py-3.5 px-4 bg-gradient-to-r from-[#013efb] via-[#049ffb] to-[#fb5c03] hover:brightness-110 text-white font-black text-sm rounded-xl transition-all shadow-lg shadow-[#013efb]/30 flex items-center justify-center gap-2.5 cursor-pointer border border-[#049ffb]/40 group"
                 >
-                  <School className="w-5 h-5 text-emerald-200 group-hover:scale-110 transition-transform" />
+                  <School className="w-5 h-5 text-white group-hover:scale-110 transition-transform" />
                   <span>Demande de création de compte école</span>
-                  <ArrowRight className="w-4 h-4 text-emerald-200 group-hover:translate-x-1 transition-transform" />
+                  <ArrowRight className="w-4 h-4 text-white group-hover:translate-x-1 transition-transform" />
                 </button>
 
                 <button
@@ -929,7 +929,7 @@ export default function Login() {
                   setSchoolRequestInitialMode('creation');
                   setShowSchoolRequestModal(true);
                 }}
-                className="font-black text-emerald-400 hover:text-emerald-300 transition-colors underline cursor-pointer"
+                className="font-black text-[#049ffb] hover:text-[#fb5c03] transition-colors underline cursor-pointer"
               >
                 Faire une demande de création de compte
               </button>

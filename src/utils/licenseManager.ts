@@ -22,7 +22,7 @@ export const KNOWN_PLANS: Record<string, PlanMeta> = {
     priceFormatted: '150 000 FCFA',
     priceNumeric: 150000,
     period: '/ an',
-    color: '#f59e0b',
+    color: '#fb5c03',
     maxStudents: 'Élèves illimités',
     features: [
       'Gestion complète des cycles Maternelle, Primaire et Secondaire',
@@ -48,7 +48,7 @@ export const KNOWN_PLANS: Record<string, PlanMeta> = {
     priceFormatted: '100 000 FCFA',
     priceNumeric: 100000,
     period: '/ an',
-    color: '#6366f1',
+    color: '#049ffb',
     maxStudents: 'Jusqu\'à 1 500 élèves',
     features: [
       'Gestion complète des classes, matières, coefficients et emplois du temps',
@@ -71,7 +71,7 @@ export const KNOWN_PLANS: Record<string, PlanMeta> = {
     priceFormatted: '75 000 FCFA',
     priceNumeric: 75000,
     period: '/ an',
-    color: '#10b981',
+    color: '#013efb',
     maxStudents: 'Jusqu\'à 1 000 élèves',
     features: [
       'Gestion des classes, matières, coefficients et emplois du temps',
@@ -92,7 +92,7 @@ export const KNOWN_PLANS: Record<string, PlanMeta> = {
     priceFormatted: '25 000 FCFA',
     priceNumeric: 25000,
     period: '/ trimestre',
-    color: '#3b82f6',
+    color: '#049ffb',
     maxStudents: 'Jusqu\'à 300 élèves',
     features: [
       'Gestion des classes, matières et coefficients',
@@ -260,7 +260,7 @@ export function buildSubscriptionFiche(params: {
       border: 1px solid #e2e8f0;
     }
     .header {
-      background: linear-gradient(135deg, #064e3b 0%, #047857 50%, #0f172a 100%);
+      background: linear-gradient(135deg, #013efb 0%, #049ffb 60%, #0f172a 100%);
       padding: 40px 32px;
       text-align: center;
       color: #ffffff;
@@ -286,15 +286,15 @@ export function buildSubscriptionFiche(params: {
     .header p {
       margin: 0;
       font-size: 13px;
-      color: #a7f3d0;
+      color: #dbe7ff;
       font-weight: 500;
     }
     .content {
       padding: 36px 32px;
     }
     .congrats-card {
-      background: linear-gradient(180deg, #ecfdf5 0%, #f0fdf4 100%);
-      border: 1px solid #a7f3d0;
+      background: linear-gradient(180deg, #eff4ff 0%, #f8fafc 100%);
+      border: 1px solid #bad3ff;
       border-radius: 20px;
       padding: 24px;
       margin-bottom: 30px;
@@ -303,20 +303,20 @@ export function buildSubscriptionFiche(params: {
       margin: 0 0 10px 0;
       font-size: 17px;
       font-weight: 800;
-      color: #065f46;
+      color: #013efb;
     }
     .congrats-card p {
       margin: 0 0 10px 0;
       font-size: 13px;
       line-height: 1.6;
-      color: #166534;
+      color: #1e293b;
     }
     .congrats-card p:last-child {
       margin-bottom: 0;
     }
     .key-box {
       background: #0f172a;
-      border: 2px dashed #10b981;
+      border: 2px dashed #049ffb;
       border-radius: 20px;
       padding: 26px 20px;
       text-align: center;
@@ -328,7 +328,7 @@ export function buildSubscriptionFiche(params: {
       font-weight: 800;
       text-transform: uppercase;
       letter-spacing: 0.15em;
-      color: #34d399;
+      color: #049ffb;
       margin-bottom: 8px;
     }
     .key-value {
@@ -353,7 +353,7 @@ export function buildSubscriptionFiche(params: {
     }
     .btn-activate {
       display: inline-block;
-      background: #10b981;
+      background: #fb5c03;
       color: #ffffff !important;
       text-decoration: none;
       padding: 14px 32px;
@@ -361,7 +361,7 @@ export function buildSubscriptionFiche(params: {
       font-size: 14px;
       font-weight: 800;
       margin-top: 16px;
-      box-shadow: 0 10px 15px -3px rgba(16, 185, 129, 0.3);
+      box-shadow: 0 10px 15px -3px rgba(251, 92, 3, 0.35);
       transition: background 0.2s;
     }
     .section-title {

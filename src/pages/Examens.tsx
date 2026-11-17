@@ -376,7 +376,7 @@ const Examens: React.FC<ExamensProps> = ({ cycle }) => {
         body: JSON.stringify({ epreuveIds: sessionEpreuveIds })
       });
       if (res.ok) {
-        alert("Épreuves de session mises à jour !");
+        toast.success("Épreuves de session mises à jour !");
       }
     } catch (e) {
       console.error(e);

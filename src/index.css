@@ -6,17 +6,20 @@
 @custom-variant dark (&:is(.dark *));
 
 @theme {
-  --color-primary: var(--school-primary, rgb(16, 185, 129));
-  --color-primary-50: rgb(236, 253, 245);
-  --color-primary-100: rgb(209, 250, 229);
-  --color-primary-200: rgb(167, 243, 208);
-  --color-primary-300: rgb(110, 231, 183);
-  --color-primary-400: rgb(52, 211, 153);
-  --color-primary-500: var(--school-primary, rgb(16, 185, 129));
-  --color-primary-600: rgb(5, 150, 105);
-  --color-primary-700: rgb(4, 120, 87);
-  --color-primary-800: rgb(6, 95, 70);
-  --color-primary-900: rgb(6, 78, 59);
+  --color-primary: var(--school-primary, #013efb);
+  --color-primary-50: #eff4ff;
+  --color-primary-100: #dbe7ff;
+  --color-primary-200: #bad3ff;
+  --color-primary-300: #8ab3ff;
+  --color-primary-400: #4d86ff;
+  --color-primary-500: var(--school-primary, #013efb);
+  --color-primary-600: #0134db;
+  --color-primary-700: #012ab8;
+  --color-primary-800: #042594;
+  --color-primary-900: #092275;
+  --color-brand-blue: #013efb;
+  --color-brand-orange: #fb5c03;
+  --color-brand-cyan: #049ffb;
   --font-school: var(--school-font, "Geist Variable", sans-serif);
   --font-heading: var(--font-sans);
   --font-sans: 'Geist Variable', sans-serif;
@@ -60,7 +63,10 @@
 }
 
 :root {
-  --school-primary: rgb(16, 185, 129);
+  --school-primary: #013efb;
+  --brand-primary: #013efb;
+  --brand-secondary: #fb5c03;
+  --brand-accent: #049ffb;
   --school-font: "Geist Variable", sans-serif;
   --school-font-size: 16px;
   --background: rgb(255, 255, 255);
@@ -69,7 +75,7 @@
   --card-foreground: rgb(15, 23, 42);
   --popover: rgb(255, 255, 255);
   --popover-foreground: rgb(15, 23, 42);
-  --primary: rgb(16, 185, 129);
+  --primary: #013efb;
   --primary-foreground: rgb(255, 255, 255);
   --secondary: rgb(241, 245, 249);
   --secondary-foreground: rgb(15, 23, 42);
@@ -80,21 +86,21 @@
   --destructive: rgb(239, 68, 68);
   --border: rgb(226, 232, 240);
   --input: rgb(226, 232, 240);
-  --ring: rgb(148, 163, 184);
-  --chart-1: rgb(59, 130, 246);
-  --chart-2: rgb(16, 185, 129);
-  --chart-3: rgb(245, 158, 11);
+  --ring: #049ffb;
+  --chart-1: #013efb;
+  --chart-2: #049ffb;
+  --chart-3: #fb5c03;
   --chart-4: rgb(139, 92, 246);
-  --chart-5: rgb(236, 72, 153);
+  --chart-5: rgb(16, 185, 129);
   --radius: 0.625rem;
   --sidebar: rgb(248, 250, 252);
   --sidebar-foreground: rgb(15, 23, 42);
-  --sidebar-primary: rgb(16, 185, 129);
+  --sidebar-primary: #013efb;
   --sidebar-primary-foreground: rgb(255, 255, 255);
-  --sidebar-accent: rgb(241, 245, 249);
+  --sidebar-accent: rgb(239, 244, 255);
   --sidebar-accent-foreground: rgb(15, 23, 42);
   --sidebar-border: rgb(226, 232, 240);
-  --sidebar-ring: rgb(148, 163, 184);
+  --sidebar-ring: #049ffb;
 }
 
 body {
@@ -117,7 +123,7 @@ body {
   --card-foreground: rgb(248, 250, 252);
   --popover: rgb(30, 41, 59);
   --popover-foreground: rgb(248, 250, 252);
-  --primary: rgb(16, 185, 129);
+  --primary: #013efb;
   --primary-foreground: rgb(255, 255, 255);
   --secondary: rgb(51, 65, 85);
   --secondary-foreground: rgb(248, 250, 252);
@@ -128,20 +134,20 @@ body {
   --destructive: rgb(248, 113, 113);
   --border: rgb(51, 65, 85);
   --input: rgb(51, 65, 85);
-  --ring: rgb(100, 116, 139);
-  --chart-1: rgb(96, 165, 250);
-  --chart-2: rgb(52, 211, 153);
-  --chart-3: rgb(251, 191, 36);
+  --ring: #049ffb;
+  --chart-1: #049ffb;
+  --chart-2: #013efb;
+  --chart-3: #fb5c03;
   --chart-4: rgb(167, 139, 250);
-  --chart-5: rgb(244, 114, 182);
+  --chart-5: rgb(52, 211, 153);
   --sidebar: rgb(15, 23, 42);
   --sidebar-foreground: rgb(248, 250, 252);
-  --sidebar-primary: rgb(16, 185, 129);
+  --sidebar-primary: #013efb;
   --sidebar-primary-foreground: rgb(255, 255, 255);
   --sidebar-accent: rgb(30, 41, 59);
   --sidebar-accent-foreground: rgb(248, 250, 252);
   --sidebar-border: rgb(51, 65, 85);
-  --sidebar-ring: rgb(100, 116, 139);
+  --sidebar-ring: #049ffb;
 }
 
 @media print {
@@ -155,11 +161,22 @@ body {
 @layer base {
   * {
     @apply border-border outline-ring/50;
-  }
-  body {
-    @apply bg-background text-foreground;
+    -webkit-tap-highlight-color: transparent;
   }
   html {
     @apply font-sans;
+    overflow-x: clip;
+    scroll-behavior: smooth;
+    -webkit-text-size-adjust: 100%;
+  }
+  body {
+    @apply bg-background text-foreground;
+    overflow-x: clip;
+  }
+  button, a, [role="button"], select, input, textarea {
+    touch-action: manipulation;
+  }
+  .overflow-x-auto, .overflow-y-auto {
+    -webkit-overflow-scrolling: touch;
   }
 }

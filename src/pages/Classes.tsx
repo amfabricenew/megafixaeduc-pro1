@@ -778,7 +778,7 @@ export default function Classes({ cycle = 'all' }: ClassesProps) {
         : [['N°', 'Matricule', 'Nom & Prénoms', 'Sexe', 'Contact Parent']],
       body: tableData,
       theme: 'grid',
-      headStyles: { fillColor: isAbandonsTab ? '#e11d48' : '#10b981', textColor: '#ffffff' }
+      headStyles: { fillColor: isAbandonsTab ? '#e11d48' : '#013efb', textColor: '#ffffff' }
     });
     
     doc.save(isAbandonsTab 
@@ -1719,7 +1719,7 @@ export default function Classes({ cycle = 'all' }: ClassesProps) {
 
                       {/* Table for Active Students */}
                       {classeStudentsTab === 'actifs' && (
-                        <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-xs">
+                        <div className="bg-white rounded-2xl border border-slate-200 overflow-x-auto shadow-xs">
                           <table className="w-full text-left border-collapse">
                             <thead>
                               <tr className="bg-slate-50 border-b border-slate-200">
@@ -1774,7 +1774,7 @@ export default function Classes({ cycle = 'all' }: ClassesProps) {
 
                       {/* Table for Abandoned Students */}
                       {classeStudentsTab === 'abandons' && (
-                        <div className="bg-white rounded-2xl border border-rose-200 overflow-hidden shadow-xs">
+                        <div className="bg-white rounded-2xl border border-rose-200 overflow-x-auto shadow-xs">
                           <table className="w-full text-left border-collapse">
                             <thead>
                               <tr className="bg-rose-50/70 border-b border-rose-200">
@@ -1933,7 +1933,7 @@ export default function Classes({ cycle = 'all' }: ClassesProps) {
                         Assigner une matière
                       </button>
                     </div>
-                    <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+                    <div className="bg-white rounded-2xl border border-slate-200 overflow-x-auto">
                       <table className="w-full text-left border-collapse">
                       <thead>
                         <tr className="bg-slate-50 border-b border-slate-200">

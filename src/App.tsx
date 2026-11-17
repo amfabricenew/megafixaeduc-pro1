@@ -5,7 +5,6 @@
 
 import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import React, { Suspense, lazy } from 'react';
-import Layout from './components/Layout';
 import { ThemeProvider } from './components/ThemeProvider';
 import { TranslationProvider } from './contexts/TranslationContext';
 import { ConfirmProvider } from './contexts/ConfirmContext';
@@ -15,12 +14,7 @@ import { Toaster } from 'react-hot-toast';
 import { hasPageAccess } from './utils/permissions';
 import { isPathAllowedByPlan } from './utils/subscriptions';
 import SubscriptionGatedView from './components/SubscriptionGatedView';
-import FloatingNotificationOverlay from './components/FloatingNotificationOverlay';
-import AIAssistantWidget from './components/AIAssistantWidget';
-import Login from './pages/Login';
-import PublicTeacherForm from './pages/PublicTeacherForm';
 import ErrorBoundary from './components/ErrorBoundary';
-import SuperAdminLayout from './components/super-admin/SuperAdminLayout';
 import { clearAppCachesAndUpdateSW } from './utils/appUpdater';
 
 // Component that renders system overlays ONLY on non-isolated pages
@@ -39,10 +33,10 @@ function GlobalOverlays() {
   }
 
   return (
-    <>
+    <Suspense fallback={null}>
       <FloatingNotificationOverlay />
       <AIAssistantWidget />
-    </>
+    </Suspense>
   );
 }
 
@@ -124,7 +118,13 @@ const lazyWithRetry = <T extends React.ComponentType<any>>(
     throw new Error('Impossible de charger le module demandé');
   });
 
-// Lazy load pages
+// Lazy load shell layouts, overlays & pages for ultra-fast first paint
+const Layout = lazyWithRetry(() => import('./components/Layout'));
+const SuperAdminLayout = lazyWithRetry(() => import('./components/super-admin/SuperAdminLayout'));
+const FloatingNotificationOverlay = lazyWithRetry(() => import('./components/FloatingNotificationOverlay'));
+const AIAssistantWidget = lazyWithRetry(() => import('./components/AIAssistantWidget'));
+const Login = lazyWithRetry(() => import('./pages/Login'));
+const PublicTeacherForm = lazyWithRetry(() => import('./pages/PublicTeacherForm'));
 const Dashboard = lazyWithRetry(() => import('./pages/Dashboard'));
 const Students = lazyWithRetry(() => import('./pages/Students'));
 const Teachers = lazyWithRetry(() => import('./pages/Teachers'));
@@ -194,7 +194,7 @@ const SuperAdminProfile = lazyWithRetry(() => import('./pages/super-admin/SuperA
 const LoadingFallback = () => (
   <div className="h-screen w-screen flex items-center justify-center bg-slate-50">
     <div className="flex flex-col items-center gap-4">
-      <div className="w-12 h-12 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin"></div>
+      <div className="w-12 h-12 border-4 border-[#013efb] border-t-transparent rounded-full animate-spin"></div>
       <p className="text-slate-500 font-medium animate-pulse">Chargement...</p>
     </div>
   </div>

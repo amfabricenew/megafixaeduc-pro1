@@ -76,13 +76,13 @@ const COMMON_EQUIPMENTS = [
 ];
 
 const PRESET_COLORS = [
+  { name: 'Bleu Logo', hex: '#013efb' },
+  { name: 'Orange Logo', hex: '#fb5c03' },
+  { name: 'Cyan Logo', hex: '#049ffb' },
   { name: 'Émeraude', hex: '#10b981' },
-  { name: 'Bleu Océan', hex: '#3b82f6' },
   { name: 'Indigo', hex: '#6366f1' },
   { name: 'Violet', hex: '#8b5cf6' },
-  { name: 'Ambre', hex: '#f59e0b' },
   { name: 'Rose', hex: '#ec4899' },
-  { name: 'Cyan', hex: '#06b6d4' },
   { name: 'Ardoise', hex: '#64748b' },
 ];
 
@@ -110,7 +110,7 @@ export default function BatimentsSalles() {
     code: '',
     description: '',
     nombre_etages: 1,
-    couleur: '#10b981'
+    couleur: '#013efb'
   });
 
   const [showSalleModal, setShowSalleModal] = useState(false);
@@ -229,7 +229,7 @@ export default function BatimentsSalles() {
         code: bat.code || '',
         description: bat.description || '',
         nombre_etages: bat.nombre_etages || 1,
-        couleur: bat.couleur || '#10b981'
+        couleur: bat.couleur || '#013efb'
       });
     } else {
       setEditingBatiment(null);
@@ -238,7 +238,7 @@ export default function BatimentsSalles() {
         code: '',
         description: '',
         nombre_etages: 1,
-        couleur: '#10b981'
+        couleur: '#013efb'
       });
     }
     setShowBatimentModal(true);
@@ -566,7 +566,7 @@ export default function BatimentsSalles() {
       head: [['N°', 'Nom de la salle', 'Code', 'Bâtiment', 'Étage', 'Capacité', 'Classe Attribuée', 'Type']],
       body: tableData,
       theme: 'grid',
-      headStyles: { fillColor: '#10b981', textColor: '#ffffff' }
+      headStyles: { fillColor: '#013efb', textColor: '#ffffff' }
     });
 
     doc.save(`attribution_salles_${new Date().toISOString().split('T')[0]}.pdf`);
@@ -575,7 +575,7 @@ export default function BatimentsSalles() {
   return (
     <div className="space-y-6 pb-12">
       {/* Header Banner */}
-      <div className="bg-gradient-to-r from-emerald-600 to-teal-700 rounded-3xl p-6 sm:p-8 text-white shadow-xl relative overflow-hidden">
+      <div className="bg-gradient-to-r from-[#013efb] via-[#0134db] to-[#049ffb] rounded-3xl p-6 sm:p-8 text-white shadow-xl relative overflow-hidden">
         <div className="absolute right-0 top-0 w-96 h-96 bg-white/10 rounded-full blur-3xl -mr-20 -mt-20 pointer-events-none"></div>
         <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-6">
           <div className="space-y-2">
@@ -746,7 +746,7 @@ export default function BatimentsSalles() {
                   {/* Header Color Accent */}
                   <div 
                     className="p-5 text-white flex items-start justify-between"
-                    style={{ backgroundColor: bat.couleur || '#10b981' }}
+                    style={{ backgroundColor: bat.couleur || '#013efb' }}
                   >
                     <div className="space-y-1">
                       <div className="flex items-center gap-2">
@@ -1003,7 +1003,7 @@ export default function BatimentsSalles() {
                               <div className="flex items-center gap-1.5">
                                 <div 
                                   className="w-2.5 h-2.5 rounded-full" 
-                                  style={{ backgroundColor: salle.batiment_couleur || '#10b981' }}
+                                  style={{ backgroundColor: salle.batiment_couleur || '#013efb' }}
                                 />
                                 <span className="font-bold text-slate-800">{salle.batiment_nom}</span>
                               </div>

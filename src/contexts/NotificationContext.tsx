@@ -83,17 +83,21 @@ export function getNotificationTargetRoute(notif: AppNotification): string | nul
   return null;
 }
 
-// Web Audio synthesizer for gentle notification chime
+// Reuse a single Web Audio context to avoid browser AudioContext limits & memory leaks
+let sharedAudioCtx: AudioContext | null = null;
+
 function playNotificationChime() {
   try {
     const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
     if (!AudioContextClass) return;
-    const ctx = new AudioContextClass();
+    if (!sharedAudioCtx || sharedAudioCtx.state === 'closed') {
+      sharedAudioCtx = new AudioContextClass();
+    }
+    const ctx = sharedAudioCtx;
     if (ctx.state === 'suspended') {
       ctx.resume().catch(() => {});
     }
     const now = ctx.currentTime;
-    // Two-tone soft harmonious chime: 587.33Hz (D5) -> 880Hz (A5)
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = 'sine';
@@ -105,7 +109,7 @@ function playNotificationChime() {
     gain.connect(ctx.destination);
     osc.start(now);
     osc.stop(now + 0.45);
-  } catch (err) {
+  } catch {
     // Non-critical audio chime error
   }
 }
@@ -120,72 +124,106 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode }> = ({ 
   const [floatingNotifs, setFloatingNotifs] = useState<AppNotification[]>([]);
   const [selectedDetailNotif, setSelectedDetailNotif] = useState<AppNotification | null>(null);
 
-  // Keep track of previously seen notification IDs to trigger chime only on truly new items
+  const userId = user?.id ?? null;
   const knownNotifIdsRef = useRef<Set<number>>(new Set());
   const initialLoadRef = useRef<boolean>(true);
+  const notificationsRef = useRef<AppNotification[]>([]);
+  const lastSignatureRef = useRef<string>('');
+  const lastFetchAtRef = useRef<number>(0);
+  const fetchInFlightRef = useRef<Promise<void> | null>(null);
+
+  useEffect(() => {
+    notificationsRef.current = notifications;
+  }, [notifications]);
 
   const fetchNotifications = useCallback(async () => {
-    if (!user) {
+    if (!userId) {
+      lastSignatureRef.current = '';
       setNotifications([]);
       setUnreadCount(0);
       setFloatingNotifs([]);
       return;
     }
 
-    try {
-      const res = await apiFetch('/api/notifications');
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data)) {
-          setNotifications(data);
-          const unread = data.filter((n: AppNotification) => !n.lu);
-          setUnreadCount(unread.length);
-
-          // Detect new incoming notifications for audio alert
-          const newIncoming = unread.filter(n => !knownNotifIdsRef.current.has(n.id));
-          if (!initialLoadRef.current && newIncoming.length > 0) {
-            playNotificationChime();
-          }
-
-          // Register all current IDs
-          data.forEach((n: AppNotification) => knownNotifIdsRef.current.add(n.id));
-          initialLoadRef.current = false;
-
-          // The user requested: "Lorsqu'une notification viens, qu'elle s'affiche devant la page concernée
-          // jusqu'à l'ouverture de la notification, après ouverture, elle peut disparaitre."
-          // All unread notifications that haven't been opened are kept in floating state until opened.
-          setFloatingNotifs(unread);
-        } else {
-          setNotifications([]);
-          setUnreadCount(0);
-          setFloatingNotifs([]);
-        }
-      }
-    } catch (err) {
-      console.error("Error fetching notifications:", err);
+    if (fetchInFlightRef.current) {
+      return fetchInFlightRef.current;
     }
-  }, [user]);
+    const now = Date.now();
+    if (now - lastFetchAtRef.current < 1500) {
+      return;
+    }
+    lastFetchAtRef.current = now;
 
-  // Initial load and periodic polling every 10 seconds
+    const promise = (async () => {
+      try {
+        const res = await apiFetch('/api/notifications');
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data)) {
+            const signature = data.map((n: AppNotification) => `${n.id}:${n.lu}`).join('|');
+            const unread = data.filter((n: AppNotification) => !n.lu);
+
+            const newIncoming = unread.filter(n => !knownNotifIdsRef.current.has(n.id));
+            if (!initialLoadRef.current && newIncoming.length > 0) {
+              playNotificationChime();
+            }
+
+            data.forEach((n: AppNotification) => knownNotifIdsRef.current.add(n.id));
+            initialLoadRef.current = false;
+
+            if (signature !== lastSignatureRef.current) {
+              lastSignatureRef.current = signature;
+              setNotifications(data);
+              setUnreadCount(unread.length);
+              setFloatingNotifs(unread);
+            }
+          } else if (lastSignatureRef.current !== '') {
+            lastSignatureRef.current = '';
+            setNotifications([]);
+            setUnreadCount(0);
+            setFloatingNotifs([]);
+          }
+        }
+      } catch (err) {
+        console.error("Error fetching notifications:", err);
+      } finally {
+        fetchInFlightRef.current = null;
+      }
+    })();
+
+    fetchInFlightRef.current = promise;
+    return promise;
+  }, [userId]);
+
   useEffect(() => {
-    if (!user) return;
+    if (!userId) return;
 
     fetchNotifications();
-    const interval = setInterval(fetchNotifications, 30000); // 30s poll is sufficient for non-critical notifications
+    const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      fetchNotifications();
+    }, 30000);
 
     const handleRefresh = () => {
+      lastFetchAtRef.current = 0;
       fetchNotifications();
     };
 
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key === 'megafixa_last_update') {
+        fetchNotifications();
+      }
+    };
+
     window.addEventListener('refresh_notifications', handleRefresh);
-    window.addEventListener('storage', handleRefresh);
+    window.addEventListener('storage', handleStorage);
 
     return () => {
       clearInterval(interval);
       window.removeEventListener('refresh_notifications', handleRefresh);
-      window.removeEventListener('storage', handleRefresh);
+      window.removeEventListener('storage', handleStorage);
     };
-  }, [user, fetchNotifications]);
+  }, [userId, fetchNotifications]);
 
   // Mark notification as read in the backend
   const markAsRead = useCallback(async (id: number) => {
@@ -225,7 +263,7 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode }> = ({ 
     if (!targetPath) return;
     const normTarget = targetPath.split('?')[0].split('#')[0].toLowerCase();
     
-    const matchingNotifs = notifications.filter(notif => {
+    const matchingNotifs = notificationsRef.current.filter(notif => {
       if (notif.lu) return false;
       const t = getNotificationTargetRoute(notif);
       if (!t) return false;
@@ -257,7 +295,7 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode }> = ({ 
     } catch (err) {
       console.error("Error marking path notifications as read:", err);
     }
-  }, [notifications]);
+  }, []);
 
   const lastMarkedPathRef = useRef<string>('');
 
@@ -323,18 +361,18 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode }> = ({ 
   const deleteNotification = useCallback(async (id: number, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
     try {
+      const targetNotif = notificationsRef.current.find(n => n.id === id);
       await apiFetch(`/api/notifications/${id}`, { method: 'DELETE' });
       setNotifications(prev => prev.filter(n => n.id !== id));
       setFloatingNotifs(prev => prev.filter(n => n.id !== id));
-      setUnreadCount(prev => {
-        const notif = notifications.find(n => n.id === id);
-        return notif && !notif.lu ? Math.max(0, prev - 1) : prev;
-      });
+      if (targetNotif && !targetNotif.lu) {
+        setUnreadCount(prev => Math.max(0, prev - 1));
+      }
       window.dispatchEvent(new CustomEvent('refresh_notifications'));
     } catch (err) {
       console.error("Failed to delete notification:", err);
     }
-  }, [notifications]);
+  }, []);
 
   const closeDetailModal = useCallback(() => {
     setSelectedDetailNotif(null);

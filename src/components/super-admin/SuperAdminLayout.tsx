@@ -1,5 +1,4 @@
 import React from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
 import { 
   LayoutDashboard, 
   Users, 
@@ -157,7 +156,9 @@ export default function SuperAdminLayout() {
   const { user, logout } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
-  const [isSidebarOpen, setIsSidebarOpen] = React.useState(true);
+  const [isSidebarOpen, setIsSidebarOpen] = React.useState(() =>
+    typeof window !== 'undefined' ? window.innerWidth >= 768 : true
+  );
   const [openMenus, setOpenMenus] = React.useState<string[]>([]);
 
   const toggleMenu = (title: string) => {
@@ -220,7 +221,10 @@ export default function SuperAdminLayout() {
 
   React.useEffect(() => {
     fetchNotifications();
-    const interval = setInterval(fetchNotifications, 20000);
+    const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      fetchNotifications();
+    }, 20000);
     return () => clearInterval(interval);
   }, [fetchNotifications]);
 
@@ -257,12 +261,21 @@ export default function SuperAdminLayout() {
   }, [superAdminLocation.pathname, superAdminLocation.search, superAdminLocation.hash]);
 
   return (
-    <div className="min-h-screen bg-slate-50 flex">
+    <div className="min-h-screen bg-slate-50 flex relative overflow-x-clip">
+      {/* Mobile Backdrop */}
+      {isSidebarOpen && (
+        <div
+          onClick={() => setIsSidebarOpen(false)}
+          className="fixed inset-0 bg-slate-900/50 backdrop-blur-[1px] z-40 md:hidden"
+          aria-hidden="true"
+        />
+      )}
+
       {/* Sidebar */}
       <aside 
         className={cn(
-          "bg-white border-r border-slate-200 transition-all duration-300 flex flex-col z-50",
-          isSidebarOpen ? "w-72" : "w-20"
+          "bg-white border-r border-slate-200 transition-all duration-300 flex flex-col z-50 fixed inset-y-0 left-0 md:relative md:translate-x-0 shadow-2xl md:shadow-none",
+          isSidebarOpen ? "w-72 translate-x-0" : "w-72 -translate-x-full md:w-20 md:translate-x-0"
         )}
       >
         <div className="p-4 border-b border-slate-100 flex items-center justify-between">
@@ -293,14 +306,14 @@ export default function SuperAdminLayout() {
                       className={cn(
                         "w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm font-medium transition-all group",
                         openMenus.includes(item.title) 
-                          ? "bg-slate-50 text-indigo-600" 
+                          ? "bg-slate-50 text-[#013efb]" 
                           : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"
                       )}
                     >
                       <div className="flex items-center gap-3">
                         <item.icon size={20} className={cn(
                           "shrink-0",
-                          openMenus.includes(item.title) ? "text-indigo-600" : "text-slate-400 group-hover:text-slate-600"
+                          openMenus.includes(item.title) ? "text-[#013efb]" : "text-slate-400 group-hover:text-slate-600"
                         )} />
                         {isSidebarOpen && <span>{item.title}</span>}
                       </div>
@@ -309,47 +322,50 @@ export default function SuperAdminLayout() {
                       )}
                     </button>
                     
-                    <AnimatePresence>
-                      {isMenuOpen(item.title) && isSidebarOpen && (
-                        <motion.div
-                          initial={{ height: 0, opacity: 0 }}
-                          animate={{ height: "auto", opacity: 1 }}
-                          exit={{ height: 0, opacity: 0 }}
-                          className="overflow-hidden"
-                        >
-                          <div className="ml-9 mt-1 space-y-1 border-l-2 border-slate-100">
-                            {item.submenu.map((sub) => (
-                              <Link
-                                key={sub.path}
-                                to={sub.path}
-                                className={cn(
-                                  "block px-3 py-1.5 text-xs font-medium rounded-r-lg transition-all",
-                                  isPathActive(sub.path)
-                                    ? "text-indigo-600 bg-indigo-50 border-l-2 border-indigo-600 -ml-[2px]"
-                                    : "text-slate-500 hover:text-slate-900 hover:bg-slate-50"
-                                )}
-                              >
-                                {sub.title}
-                              </Link>
-                            ))}
-                          </div>
-                        </motion.div>
-                      )}
-                    </AnimatePresence>
+                    {isMenuOpen(item.title) && isSidebarOpen && (
+                      <div className="overflow-hidden transition-all duration-200">
+                        <div className="ml-9 mt-1 space-y-1 border-l-2 border-slate-100">
+                          {item.submenu.map((sub) => (
+                            <Link
+                              key={sub.path}
+                              to={sub.path}
+                              onClick={() => {
+                                if (typeof window !== 'undefined' && window.innerWidth < 768) {
+                                  setIsSidebarOpen(false);
+                                }
+                              }}
+                              className={cn(
+                                "block px-3 py-1.5 text-xs font-medium rounded-r-lg transition-all",
+                                isPathActive(sub.path)
+                                  ? "text-[#013efb] bg-[#013efb]/10 border-l-2 border-[#013efb] -ml-[2px]"
+                                  : "text-slate-500 hover:text-slate-900 hover:bg-slate-50"
+                              )}
+                            >
+                              {sub.title}
+                            </Link>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </>
                 ) : (
                   <Link
                     to={item.path || '#'}
+                    onClick={() => {
+                      if (typeof window !== 'undefined' && window.innerWidth < 768) {
+                        setIsSidebarOpen(false);
+                      }
+                    }}
                     className={cn(
                       "flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-all group",
                       isPathActive(item.path || '')
-                        ? "bg-indigo-50 text-indigo-600"
+                        ? "bg-[#013efb]/10 text-[#013efb]"
                         : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"
                     )}
                   >
                     <item.icon size={20} className={cn(
                       "shrink-0",
-                      isPathActive(item.path || '') ? "text-indigo-600" : "text-slate-400 group-hover:text-slate-600"
+                      isPathActive(item.path || '') ? "text-[#013efb]" : "text-slate-400 group-hover:text-slate-600"
                     )} />
                     {isSidebarOpen && <span>{item.title}</span>}
                   </Link>
@@ -365,20 +381,20 @@ export default function SuperAdminLayout() {
             type="button"
             onClick={() => toggleAIAssistant()}
             className={cn(
-              "w-full flex items-center justify-between px-3 py-2.5 rounded-xl bg-gradient-to-r from-indigo-600 via-indigo-700 to-primary-700 hover:from-indigo-700 hover:to-primary-800 text-white shadow-sm hover:shadow transition-all group cursor-pointer",
+              "w-full flex items-center justify-between px-3 py-2.5 rounded-xl bg-gradient-to-r from-[#013efb] via-[#049ffb] to-[#fb5c03] hover:brightness-110 text-white shadow-sm hover:shadow transition-all group cursor-pointer",
               !isSidebarOpen && "justify-center px-2 py-2"
             )}
             title="Assistant IA MégafixaBot"
           >
             <div className="flex items-center gap-2.5 min-w-0">
               <div className="w-7 h-7 rounded-lg bg-white/20 backdrop-blur-xs flex items-center justify-center shrink-0 border border-white/25 group-hover:scale-110 transition-transform">
-                <Sparkles size={15} className="text-amber-300" />
+                <Sparkles size={15} className="text-white" />
               </div>
               {isSidebarOpen && (
                 <div className="text-left min-w-0">
                   <p className="text-xs font-bold leading-tight truncate flex items-center gap-1">
                     Assistant IA
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                    <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse"></span>
                   </p>
                   <p className="text-[10px] text-white/80 leading-tight truncate">MégafixaBot 7j/7</p>
                 </div>
@@ -404,16 +420,24 @@ export default function SuperAdminLayout() {
       </aside>
 
       {/* Main Content */}
-      <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
+      <main className="flex-1 flex flex-col min-w-0 overflow-x-clip">
         {/* Header */}
-        <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-6 sticky top-0 z-40">
-          <div className="flex items-center gap-4 flex-1">
+        <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-4 md:px-6 sticky top-0 z-30">
+          <div className="flex items-center gap-3 flex-1 min-w-0">
+            <button
+              type="button"
+              onClick={() => setIsSidebarOpen(true)}
+              className="md:hidden p-2 rounded-xl text-slate-600 hover:bg-slate-100 shrink-0"
+              aria-label="Ouvrir le menu"
+            >
+              <Menu size={22} />
+            </button>
             <div className="relative max-w-md w-full hidden md:block">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
               <input 
                 type="text" 
                 placeholder="Rechercher une école, un utilisateur, une facture..."
-                className="w-full pl-10 pr-4 py-2 bg-slate-50 border-none rounded-full text-sm focus:ring-2 focus:ring-indigo-500/20"
+                className="w-full pl-10 pr-4 py-2 bg-slate-50 border-none rounded-full text-sm focus:ring-2 focus:ring-[#013efb]/20"
               />
             </div>
           </div>
@@ -425,7 +449,7 @@ export default function SuperAdminLayout() {
                 onClick={() => setShowNotifDropdown(!showNotifDropdown)}
                 className={cn(
                   "p-2 rounded-full relative transition-colors cursor-pointer",
-                  showNotifDropdown ? "bg-indigo-50 text-indigo-600" : "text-slate-500 hover:bg-slate-100"
+                  showNotifDropdown ? "bg-[#013efb]/10 text-[#013efb]" : "text-slate-500 hover:bg-slate-100"
                 )}
                 title="Notifications Système Super Admin"
               >
@@ -437,14 +461,10 @@ export default function SuperAdminLayout() {
                 )}
               </button>
 
-              <AnimatePresence>
-                {showNotifDropdown && (
-                  <motion.div
-                    initial={{ opacity: 0, y: 10, scale: 0.95 }}
-                    animate={{ opacity: 1, y: 0, scale: 1 }}
-                    exit={{ opacity: 0, y: 10, scale: 0.95 }}
-                    className="absolute right-0 mt-2 w-80 sm:w-96 bg-white rounded-2xl shadow-2xl border border-slate-200 z-50 overflow-hidden text-left"
-                  >
+              {showNotifDropdown && (
+                <div
+                  className="absolute right-0 mt-2 w-80 sm:w-96 bg-white rounded-2xl shadow-2xl border border-slate-200 z-50 overflow-hidden text-left animate-in fade-in duration-150"
+                >
                     <div className="p-4 bg-slate-50 border-b border-slate-100 flex items-center justify-between">
                       <div className="flex items-center gap-2">
                         <Bell size={16} className="text-indigo-600" />
@@ -530,9 +550,8 @@ export default function SuperAdminLayout() {
                         Gérer les établissements (Clients) →
                       </Link>
                     </div>
-                  </motion.div>
+                  </div>
                 )}
-              </AnimatePresence>
             </div>
             <div className="h-8 w-px bg-slate-200 mx-1"></div>
             <LanguageSelector variant="dropdown" />
@@ -550,7 +569,7 @@ export default function SuperAdminLayout() {
         </header>
 
         {/* Content Area */}
-        <div ref={superAdminContentRef} data-scroll-container="main" className="flex-1 overflow-y-auto p-6 scrollbar-hide">
+        <div ref={superAdminContentRef} data-scroll-container="main" className="flex-1 overflow-y-auto p-4 md:p-6 scrollbar-hide">
           <div className="max-w-7xl mx-auto">
             <Outlet />
           </div>

@@ -40,7 +40,7 @@ const MOCK_DATA = [
   { name: 'Jun', value: 900, retention: 92, churn: 1.2 },
 ];
 
-const COLORS = ['#6366f1', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6'];
+const COLORS = ['#013efb', '#fb5c03', '#049ffb', '#ef4444', '#8b5cf6'];
 
 const TABS = [
   { id: 'overview', label: 'Vue d\'ensemble', icon: BarChart3 },
@@ -72,7 +72,7 @@ export default function SuperAdminAnalytics() {
             <Calendar size={18} />
             Derniers 30 jours
           </button>
-          <button className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-xl text-sm font-bold shadow-lg shadow-indigo-200 hover:bg-indigo-700">
+          <button className="flex items-center gap-2 px-4 py-2 bg-[#013efb] text-white rounded-xl text-sm font-bold shadow-lg shadow-[#013efb]/20 hover:bg-[#0134db]">
             <Download size={18} />
             Exporter Rapport
           </button>
@@ -88,7 +88,7 @@ export default function SuperAdminAnalytics() {
             className={cn(
               "flex items-center gap-2 px-6 py-2 rounded-xl text-sm font-bold transition-all",
               activeTab === tab.id 
-                ? "bg-white text-indigo-600 shadow-sm" 
+                ? "bg-white text-[#013efb] shadow-sm" 
                 : "text-slate-500 hover:text-slate-700"
             )}
           >
@@ -132,8 +132,8 @@ export default function SuperAdminAnalytics() {
                   <AreaChart data={MOCK_DATA}>
                     <defs>
                       <linearGradient id="colorRetention" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="#6366f1" stopOpacity={0.1}/>
-                        <stop offset="95%" stopColor="#6366f1" stopOpacity={0}/>
+                        <stop offset="5%" stopColor="#013efb" stopOpacity={0.18}/>
+                        <stop offset="95%" stopColor="#049ffb" stopOpacity={0}/>
                       </linearGradient>
                     </defs>
                     <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
@@ -142,7 +142,7 @@ export default function SuperAdminAnalytics() {
                     <Tooltip 
                       contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
                     />
-                    <Area type="monotone" dataKey="retention" stroke="#6366f1" fillOpacity={1} fill="url(#colorRetention)" strokeWidth={3} />
+                    <Area type="monotone" dataKey="retention" stroke="#013efb" fillOpacity={1} fill="url(#colorRetention)" strokeWidth={3} />
                   </AreaChart>
                 </ResponsiveContainer>
               </div>

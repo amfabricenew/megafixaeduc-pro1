@@ -202,8 +202,8 @@ export default function LandingPage() {
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 font-sans selection:bg-primary-500 selection:text-white">
       {/* Top Notification Bar */}
-      <div className="bg-gradient-to-r from-primary-700 via-primary-600 to-indigo-700 text-white py-2 px-4 text-xs md:text-sm text-center font-medium flex items-center justify-center gap-2 shadow-inner">
-        <Sparkles size={16} className="text-amber-300 animate-pulse" />
+      <div className="bg-gradient-to-r from-[#013efb] via-[#049ffb] to-[#fb5c03] text-white py-2 px-4 text-xs md:text-sm text-center font-medium flex items-center justify-center gap-2 shadow-inner">
+        <Sparkles size={16} className="text-white animate-pulse" />
         <span>Bienvenue sur <strong>MégafixaEduc Pro</strong> — La plateforme moderne de gestion scolaire intégrée.</span>
       </div>
 
@@ -236,7 +236,7 @@ export default function LandingPage() {
               </button>
               <button onClick={() => scrollToSection('galerie')} className="hover:text-primary-600 transition-colors flex items-center gap-1.5">
                 <span>{t('Vie Scolaire')}</span>
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                <span className="w-1.5 h-1.5 rounded-full bg-[#fb5c03] animate-pulse" />
               </button>
               <button onClick={() => scrollToSection('fonctionnalites')} className="hover:text-primary-600 transition-colors">
                 {t('Fonctionnalités')}
@@ -266,7 +266,7 @@ export default function LandingPage() {
                   {user.role === 'super_admin' ? (
                     <Link
                       to="/super-admin"
-                      className="px-4 py-2 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl transition-all flex items-center gap-1.5 shadow-md shadow-indigo-600/20"
+                      className="px-4 py-2 text-xs font-bold text-white bg-[#013efb] hover:bg-[#0134db] rounded-xl transition-all flex items-center gap-1.5 shadow-md shadow-[#013efb]/20"
                     >
                       <ShieldCheck size={16} />
                       {t('Back-office Admin')}
@@ -352,7 +352,7 @@ export default function LandingPage() {
                 className="block w-full text-left py-2 font-medium text-slate-700 hover:text-primary-600 flex items-center justify-between"
               >
                 <span>{t('Vie Scolaire & Galerie')}</span>
-                <span className="text-xs bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded-full">Photos</span>
+                <span className="text-xs bg-[#049ffb]/15 text-[#013efb] font-bold px-2 py-0.5 rounded-full">Photos</span>
               </button>
               <button 
                 onClick={() => scrollToSection('fonctionnalites')}
@@ -430,9 +430,9 @@ export default function LandingPage() {
                 <button
                   type="button"
                   onClick={() => { setMobileMenuOpen(false); handleInstallClick(); }}
-                  className="w-full text-center py-2.5 font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-xl flex items-center justify-center gap-2"
+                  className="w-full text-center py-2.5 font-bold text-[#013efb] bg-[#049ffb]/10 border border-[#049ffb]/30 rounded-xl flex items-center justify-center gap-2"
                 >
-                  <Download size={18} className="text-emerald-600" />
+                  <Download size={18} className="text-[#fb5c03]" />
                   {t("Installer l'application sur l'appareil")}
                 </button>
               </div>
@@ -463,9 +463,9 @@ export default function LandingPage() {
             className="text-4xl sm:text-5xl md:text-6xl font-black text-slate-900 tracking-tight max-w-4xl mx-auto leading-[1.15]"
           >
             {language === 'en' ? (
-              <>Manage your school with <span className="bg-gradient-to-r from-primary-600 via-indigo-600 to-purple-600 bg-clip-text text-transparent">simplicity & precision</span></>
+              <>Manage your school with <span className="bg-gradient-to-r from-[#013efb] via-[#049ffb] to-[#fb5c03] bg-clip-text text-transparent">simplicity & precision</span></>
             ) : (
-              <>Pilotez votre établissement scolaire avec <span className="bg-gradient-to-r from-primary-600 via-indigo-600 to-purple-600 bg-clip-text text-transparent">simplicité & précision</span></>
+              <>Pilotez votre établissement scolaire avec <span className="bg-gradient-to-r from-[#013efb] via-[#049ffb] to-[#fb5c03] bg-clip-text text-transparent">simplicité & précision</span></>
             )}
           </motion.h1>
 
@@ -502,15 +502,15 @@ export default function LandingPage() {
               to="/parent-login"
               className="px-6 py-4 text-sm font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-2xl transition-all flex items-center gap-2"
             >
-              <Users size={18} className="text-indigo-600" />
+              <Users size={18} className="text-[#049ffb]" />
               {t("Espace Parent")}
             </Link>
             <button
               type="button"
               onClick={handleInstallClick}
-              className="px-8 py-4 text-base font-extrabold text-emerald-900 bg-gradient-to-r from-emerald-400 via-teal-400 to-emerald-500 hover:from-emerald-500 hover:to-teal-500 rounded-2xl shadow-xl shadow-emerald-500/20 transition-all flex items-center gap-3 hover:scale-105 active:scale-95 border border-emerald-300"
+              className="px-8 py-4 text-base font-extrabold text-white bg-gradient-to-r from-[#013efb] via-[#049ffb] to-[#fb5c03] hover:brightness-110 rounded-2xl shadow-xl shadow-[#013efb]/25 transition-all flex items-center gap-3 hover:scale-105 active:scale-95 border border-[#049ffb]/40"
             >
-              <Download size={22} className="text-emerald-950 stroke-[2.5]" />
+              <Download size={22} className="text-white stroke-[2.5]" />
               <span>{isInstalled ? t("Application Déjà Installée") : t("Installer l'application sur l'appareil")}</span>
             </button>
           </motion.div>
@@ -523,19 +523,19 @@ export default function LandingPage() {
             className="mt-16 grid grid-cols-2 md:grid-cols-4 gap-4 max-w-4xl mx-auto"
           >
             <div className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-sm text-center">
-              <span className="block text-2xl md:text-3xl font-black text-primary-600">100%</span>
+              <span className="block text-2xl md:text-3xl font-black text-[#013efb]">100%</span>
               <span className="text-xs font-bold text-slate-500 uppercase tracking-wider mt-1 block">{t("Sécurisé & Conforme")}</span>
             </div>
             <div className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-sm text-center">
-              <span className="block text-2xl md:text-3xl font-black text-indigo-600">{t("Bulletins")}</span>
+              <span className="block text-2xl md:text-3xl font-black text-[#049ffb]">{t("Bulletins")}</span>
               <span className="text-xs font-bold text-slate-500 uppercase tracking-wider mt-1 block">{t("Génération Instantanée")}</span>
             </div>
             <div className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-sm text-center">
-              <span className="block text-2xl md:text-3xl font-black text-purple-600">{t("SMS / Email")}</span>
+              <span className="block text-2xl md:text-3xl font-black text-[#fb5c03]">{t("SMS / Email")}</span>
               <span className="text-xs font-bold text-slate-500 uppercase tracking-wider mt-1 block">{t("Alertes Automatisées")}</span>
             </div>
             <div className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-sm text-center">
-              <span className="block text-2xl md:text-3xl font-black text-emerald-600">24/7</span>
+              <span className="block text-2xl md:text-3xl font-black text-[#013efb]">24/7</span>
               <span className="text-xs font-bold text-slate-500 uppercase tracking-wider mt-1 block">{t("Accès Multi-Supports")}</span>
             </div>
           </motion.div>
@@ -709,29 +709,29 @@ export default function LandingPage() {
             </div>
 
             {/* Formule Standard (Populaire) */}
-            <div className="bg-gradient-to-b from-white to-emerald-50/30 rounded-3xl border-2 border-emerald-500 p-8 shadow-xl hover:shadow-2xl transition-all duration-300 flex flex-col justify-between relative transform lg:-translate-y-2">
-              <div className="absolute -top-3.5 left-1/2 -translate-x-1/2 bg-gradient-to-r from-emerald-600 to-teal-600 text-white text-[11px] font-black uppercase tracking-widest px-4 py-1 rounded-full shadow-md flex items-center gap-1.5">
-                <Sparkles size={12} className="text-amber-300" />
+            <div className="bg-gradient-to-b from-white to-[#049ffb]/10 rounded-3xl border-2 border-[#013efb] p-8 shadow-xl hover:shadow-2xl transition-all duration-300 flex flex-col justify-between relative transform lg:-translate-y-2">
+              <div className="absolute -top-3.5 left-1/2 -translate-x-1/2 bg-gradient-to-r from-[#013efb] via-[#049ffb] to-[#fb5c03] text-white text-[11px] font-black uppercase tracking-widest px-4 py-1 rounded-full shadow-md flex items-center gap-1.5">
+                <Sparkles size={12} className="text-white" />
                 <span>{t("Formule la plus populaire")}</span>
               </div>
 
               <div>
                 <div className="flex items-center justify-between mb-4 mt-2">
-                  <span className="text-xs font-black uppercase tracking-wider text-emerald-700 bg-emerald-100 border border-emerald-300 px-3 py-1 rounded-full">
+                  <span className="text-xs font-black uppercase tracking-wider text-[#013efb] bg-[#013efb]/10 border border-[#013efb]/30 px-3 py-1 rounded-full">
                     {t("Académique Standard")}
                   </span>
-                  <span className="text-xs text-emerald-800 font-bold">{t("Jusqu'à 1 000 élèves")}</span>
+                  <span className="text-xs text-[#013efb] font-bold">{t("Jusqu'à 1 000 élèves")}</span>
                 </div>
                 <h3 className="text-2xl font-black text-slate-900">{t("Formule Standard")}</h3>
                 <p className="text-xs text-slate-500 mt-1 mb-6">{t("Organisation complète avec badges officiels et promotions de fin d'année.")}</p>
 
-                <div className="mb-6 pb-6 border-b border-emerald-100">
+                <div className="mb-6 pb-6 border-b border-[#049ffb]/20">
                   <div className="flex items-baseline gap-1">
-                    <span className="text-3xl sm:text-4xl font-black text-emerald-950 tracking-tight">75 000</span>
+                    <span className="text-3xl sm:text-4xl font-black text-slate-900 tracking-tight">75 000</span>
                     <span className="text-sm font-bold text-slate-600">FCFA</span>
                     <span className="text-xs text-slate-400 font-medium">{t("/ an")}</span>
                   </div>
-                  <p className="text-[11px] text-emerald-700 font-medium mt-1">{t("Licence annuelle complète")}</p>
+                  <p className="text-[11px] text-[#013efb] font-medium mt-1">{t("Licence annuelle complète")}</p>
                 </div>
 
                 <div className="space-y-3 mb-8">
@@ -744,7 +744,7 @@ export default function LandingPage() {
                     'Paramétrage complet des années scolaires & rôles'
                   ].map((feat, idx) => (
                     <div key={idx} className="flex items-start gap-2.5 text-xs text-slate-700 font-medium">
-                      <div className="w-4 h-4 rounded-full bg-emerald-500 text-white flex items-center justify-center shrink-0 mt-0.5 shadow-xs">
+                      <div className="w-4 h-4 rounded-full bg-[#013efb] text-white flex items-center justify-center shrink-0 mt-0.5 shadow-xs">
                         <Check size={11} className="stroke-[3]" />
                       </div>
                       <span>{t(feat)}</span>
@@ -755,7 +755,7 @@ export default function LandingPage() {
 
               <Link
                 to="/paiement-abonnement?plan=standard"
-                className="w-full py-4 px-6 rounded-2xl font-black text-xs uppercase tracking-wider text-center text-white bg-emerald-600 hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-600/30 flex items-center justify-center gap-2 hover:scale-[1.02] active:scale-[0.98]"
+                className="w-full py-4 px-6 rounded-2xl font-black text-xs uppercase tracking-wider text-center text-white bg-[#013efb] hover:bg-[#0134db] transition-all shadow-lg shadow-[#013efb]/30 flex items-center justify-center gap-2 hover:scale-[1.02] active:scale-[0.98]"
               >
                 <span>{t("Choisir Formule Standard")}</span>
                 <ArrowRight size={15} />
@@ -1242,7 +1242,7 @@ export default function LandingPage() {
             >
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3">
-                  <div className="p-3 bg-emerald-100 text-emerald-700 rounded-2xl">
+                  <div className="p-3 bg-[#013efb]/10 text-[#013efb] rounded-2xl">
                     <Download size={24} />
                   </div>
                   <div>

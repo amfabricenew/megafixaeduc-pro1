@@ -61,12 +61,13 @@ const FONTS = [
 ];
 
 const COLORS = [
+  { name: 'Bleu Logo (Initial)', value: '#013efb' },
+  { name: 'Orange Logo', value: '#fb5c03' },
+  { name: 'Cyan Logo', value: '#049ffb' },
   { name: 'Emerald', value: '#10b981' },
-  { name: 'Blue', value: '#3b82f6' },
   { name: 'Indigo', value: '#6366f1' },
   { name: 'Violet', value: '#8b5cf6' },
   { name: 'Rose', value: '#f43f5e' },
-  { name: 'Amber', value: '#f59e0b' },
   { name: 'Slate', value: '#475569' }
 ];
 
@@ -305,7 +306,7 @@ export default function SchoolInfo() {
     devise: 'FCFA',
     logo: '',
     langue: 'fr',
-    couleur_primaire: '#10b981',
+    couleur_primaire: '#013efb',
     police: 'inter',
     taille_police: 16,
     timezone: 'Africa/Abidjan',
@@ -621,7 +622,7 @@ export default function SchoolInfo() {
           devise: data.devise ?? 'FCFA',
           logo: data.logo ?? '',
           langue: data.langue ?? 'fr',
-          couleur_primaire: data.couleur_primaire ?? '#10b981',
+          couleur_primaire: data.couleur_primaire ?? '#013efb',
           police: data.police ?? 'inter',
           taille_police: Number(data.taille_police) || 16,
           timezone: data.timezone ?? 'Africa/Abidjan',
@@ -1030,7 +1031,7 @@ export default function SchoolInfo() {
 
                 <div className="space-y-3">
                   <label className="text-sm font-bold text-slate-700">{t('primary_color')}</label>
-                  <div className="grid grid-cols-7 gap-2">
+                  <div className="grid grid-cols-4 sm:grid-cols-8 gap-2">
                     {COLORS.map(color => (
                       <button
                         key={color.value}

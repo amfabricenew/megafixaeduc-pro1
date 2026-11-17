@@ -20,9 +20,10 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const updateTheme = (info: SchoolInfo) => {
     const root = document.documentElement;
-    if (info.couleur_primaire) {
-      root.style.setProperty('--school-primary', info.couleur_primaire);
-    }
+    const primaryColor = info.couleur_primaire || '#013efb';
+    root.style.setProperty('--school-primary', primaryColor);
+    root.style.setProperty('--primary', primaryColor);
+    root.style.setProperty('--sidebar-primary', primaryColor);
     if (info.police && FONTS[info.police]) {
       root.style.setProperty('--school-font', FONTS[info.police]);
     }

@@ -47,9 +47,9 @@ const REVENUE_DATA = [
 
 const PLAN_DISTRIBUTION = [
   { name: 'Essai', value: 400, color: '#94a3b8' },
-  { name: 'Standard', value: 300, color: '#10b981' },
-  { name: 'Premium', value: 300, color: '#6366f1' },
-  { name: 'Enterprise', value: 200, color: '#f59e0b' },
+  { name: 'Standard', value: 300, color: '#013efb' },
+  { name: 'Premium', value: 300, color: '#049ffb' },
+  { name: 'Enterprise', value: 200, color: '#fb5c03' },
 ];
 
 export default function SuperAdminDashboard() {

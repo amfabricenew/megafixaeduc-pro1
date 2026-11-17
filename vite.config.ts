@@ -20,6 +20,8 @@ export default defineConfig(({mode}) => {
           cleanupOutdatedCaches: true,
           navigateFallback: '/index.html',
           navigateFallbackDenylist: [/^\/api\//, /^\/uploads\//],
+          maximumFileSizeToCacheInBytes: 3 * 1024 * 1024,
+          globIgnores: ['**/logo_megafixa_badge.png', '**/logo_megafixa_circle.png'],
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2,jpg}'],
           runtimeCaching: [
             {
@@ -56,7 +58,7 @@ export default defineConfig(({mode}) => {
           name: 'MEGAFIXAEDUC_PRO',
           short_name: 'MEGAFIXAEDUC_PRO',
           description: 'MEGAFIXAEDUC_PRO - Système complet de gestion scolaire moderne',
-          theme_color: '#10b981',
+          theme_color: '#013efb',
           background_color: '#ffffff',
           display: 'standalone',
           start_url: '/',
@@ -132,6 +134,35 @@ export default defineConfig(({mode}) => {
     build: {
       outDir: 'dist',
       emptyOutDir: true,
+      chunkSizeWarningLimit: 800,
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            if (!id.includes('node_modules')) return;
+            if (id.includes('react-dom') || id.includes('react-router') || id.includes('/react/')) {
+              return 'vendor-react';
+            }
+            if (id.includes('firebase') || id.includes('@firebase')) {
+              return 'vendor-firebase';
+            }
+            if (id.includes('framer-motion') || id.includes('/motion/')) {
+              return 'vendor-motion';
+            }
+            if (id.includes('recharts') || id.includes('d3-')) {
+              return 'vendor-charts';
+            }
+            if (id.includes('jspdf') || id.includes('html2canvas') || id.includes('html-to-image') || id.includes('jszip')) {
+              return 'vendor-export';
+            }
+            if (id.includes('xlsx')) {
+              return 'vendor-xlsx';
+            }
+            if (id.includes('lucide-react')) {
+              return 'vendor-icons';
+            }
+          },
+        },
+      },
     },
     server: {
       // HMR is disabled in AI Studio via DISABLE_HMR env var.

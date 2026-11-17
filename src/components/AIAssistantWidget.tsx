@@ -148,34 +148,36 @@ export default function AIAssistantWidget() {
     "Générer cartes scolaires avec QR"
   ];
 
+  const canDragDesktop = typeof window !== 'undefined' && window.innerWidth >= 768;
+
   return (
     <AnimatePresence>
       {isOpen && (
         <motion.div 
           key="ai-assistant-modal"
-          drag
+          drag={canDragDesktop}
           dragMomentum={false}
           dragElastic={0.1}
-          initial={{ opacity: 0, scale: 0.9, y: 20 }}
+          initial={{ opacity: 0, scale: 0.95, y: 16 }}
           animate={{ opacity: 1, scale: 1, y: 0 }}
-          exit={{ opacity: 0, scale: 0.9, y: 20 }}
-          transition={{ duration: 0.2 }}
-          className="fixed bottom-4 right-4 sm:right-8 z-[99999] pointer-events-auto select-none cursor-grab active:cursor-grabbing"
+          exit={{ opacity: 0, scale: 0.95, y: 16 }}
+          transition={{ duration: 0.18 }}
+          className="fixed inset-x-2 bottom-2 sm:inset-x-auto sm:bottom-4 sm:right-8 z-[99999] pointer-events-auto"
         >
-          <div className="w-[94vw] sm:w-[440px] h-[580px] max-h-[80vh] bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 flex flex-col overflow-hidden mb-3 relative pointer-events-auto">
+          <div className="w-full sm:w-[440px] h-[82dvh] sm:h-[580px] max-h-[85dvh] bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 flex flex-col overflow-hidden mb-1 sm:mb-3 relative pointer-events-auto">
             {/* Header */}
-            <div className="p-4 bg-gradient-to-r from-primary-700 via-primary-600 to-indigo-700 text-white flex items-center justify-between shadow-md">
+            <div className={`p-3.5 sm:p-4 bg-gradient-to-r from-[#013efb] via-[#0134db] to-[#049ffb] text-white flex items-center justify-between shadow-md ${canDragDesktop ? 'cursor-grab active:cursor-grabbing select-none' : ''}`}>
               <div className="flex items-center gap-3">
-                <div className="w-10 h-10 bg-white/10 backdrop-blur-md rounded-2xl flex items-center justify-center border border-white/20">
-                  <Bot size={22} className="text-amber-300" />
+                <div className="w-10 h-10 bg-white/15 backdrop-blur-md rounded-2xl flex items-center justify-center border border-white/25">
+                  <Bot size={22} className="text-white" />
                 </div>
                 <div>
                   <div className="flex items-center gap-1.5">
                     <h3 className="font-extrabold text-sm text-white">MégafixaBot IA</h3>
-                    <span className="text-[10px] bg-amber-400/20 text-amber-200 border border-amber-300/30 px-1.5 py-0.5 rounded-full font-bold">Pro</span>
+                    <span className="text-[10px] bg-[#fb5c03] text-white border border-white/20 px-1.5 py-0.5 rounded-full font-bold">Pro</span>
                   </div>
-                  <p className="text-[11px] text-primary-100 flex items-center gap-1">
-                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                  <p className="text-[11px] text-white/85 flex items-center gap-1">
+                    <span className="w-2 h-2 rounded-full bg-[#fb5c03] animate-pulse"></span>
                     Assistant & Escalade Support 7j/7
                   </p>
                 </div>
@@ -332,7 +334,7 @@ export default function AIAssistantWidget() {
             </div>
 
             {/* Messages Area */}
-            <div className="flex-1 p-4 overflow-y-auto space-y-4 bg-slate-50/50 dark:bg-slate-900/50">
+            <div className="flex-1 p-4 overflow-y-auto space-y-4 bg-slate-50/50 dark:bg-slate-900/50 select-text touch-pan-y">
               {messages.map((m) => {
                 const hasProposals = m.text.includes("💡") || m.text.includes("Propositions");
                 const hasContacts = m.text.includes("📞") || m.text.includes("+229");

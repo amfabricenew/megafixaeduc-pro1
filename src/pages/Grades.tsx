@@ -1437,8 +1437,8 @@ export default function Grades({ cycle = 'all' }: GradesProps) {
     doc.rect(10, 10, 190, 277); // Main border
 
     // Header Data Configuration & Defaults
-    const primaryThemeColor = bulletinHeaderData?.couleur_principale || schoolInfo?.couleur_primaire || '#059669';
-    const themeRgb = hexToRgb(primaryThemeColor) || [5, 150, 105];
+    const primaryThemeColor = bulletinHeaderData?.couleur_principale || schoolInfo?.couleur_primaire || '#013efb';
+    const themeRgb = hexToRgb(primaryThemeColor) || [1, 62, 251];
 
     const nomEcole = bulletinHeaderData?.nom_ecole || schoolInfo?.nom || 'COMPLEXE SCOLAIRE';
     const sloganEcole = bulletinHeaderData?.slogan_ecole || schoolInfo?.slogan || bulletinHeaderData?.statut_ecole || (schoolInfo?.devise && !['fcfa', 'eur', 'usd', 'xof', 'cfa'].includes(schoolInfo.devise.toLowerCase().trim()) ? schoolInfo.devise : '') || '';
@@ -7127,7 +7127,7 @@ export default function Grades({ cycle = 'all' }: GradesProps) {
                   };
                 });
 
-                const COLORS = ['#10b981', '#ef4444', '#3b82f6', '#f59e0b', '#8b5cf6', '#ec4899'];
+                const COLORS = ['#013efb', '#fb5c03', '#049ffb', '#ef4444', '#8b5cf6', '#10b981'];
 
                 return (
                   <div className="space-y-8 pb-12">

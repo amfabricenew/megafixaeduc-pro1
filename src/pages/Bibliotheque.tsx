@@ -24,6 +24,7 @@ import {
   Video,
   Calendar
 } from 'lucide-react';
+import toast from 'react-hot-toast';
 import { apiFetch } from '../utils/api';
 import { useAuth } from '../contexts/AuthContext';
 
@@ -279,7 +280,7 @@ export const Bibliotheque: React.FC<BibliothequeProps> = ({ cycleProp = 'tous' }
       setResources(prev => prev.filter(r => r.id !== id));
       setSuccessMsg('Ressource supprimée avec succès.');
     } catch (err: any) {
-      alert(err.message || "Erreur lors de la suppression.");
+      toast.error(err.message || "Erreur lors de la suppression.");
     }
   };
 
@@ -298,7 +299,7 @@ export const Bibliotheque: React.FC<BibliothequeProps> = ({ cycleProp = 'tous' }
       } else if (resource.lien_externe) {
         window.open(resource.lien_externe, '_blank');
       } else {
-        alert("Téléchargement du document : " + resource.titre);
+        toast("Aucun fichier joint pour le document : " + resource.titre);
       }
     } catch (e) {
       console.error(e);

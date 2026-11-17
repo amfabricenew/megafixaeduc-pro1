@@ -8,8 +8,6 @@ import {
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { apiFetch } from '../utils/api';
-import { jsPDF } from '../utils/compressedPdf';
-import autoTable from 'jspdf-autotable';
 
 const JOURS_SEMAINE = ['Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi'];
 
@@ -483,8 +481,12 @@ export default function PublicTeacherForm() {
   };
 
   // PDF Download helper
-  const handleDownloadPDF = () => {
+  const handleDownloadPDF = async () => {
     try {
+      const [{ jsPDF }, { default: autoTable }] = await Promise.all([
+        import('../utils/compressedPdf'),
+        import('jspdf-autotable')
+      ]);
       const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
       const schoolName = formConfig?.school_nom || "ÉTABLISSEMENT SCOLAIRE";
 

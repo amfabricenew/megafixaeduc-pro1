@@ -86,16 +86,52 @@ if (FEDAPAY_SK && FedaPay && typeof (FedaPay as any).setApiKey === 'function') {
 const currentFilename = typeof __filename !== 'undefined' ? __filename : '';
 const currentDirname = typeof __dirname !== 'undefined' ? __dirname : (currentFilename ? path.dirname(currentFilename) : process.cwd());
 
+const DATABASE_PATH = process.env.DATABASE_PATH || 'megafixaEduc.db';
+const RESOLVED_DATABASE_PATH = path.resolve(DATABASE_PATH);
+const DATABASE_DIR = path.dirname(RESOLVED_DATABASE_PATH);
+const HAS_CUSTOM_DATA_DIR = DATABASE_DIR !== path.resolve(process.cwd());
+const PERSISTENT_DATA_DIR = HAS_CUSTOM_DATA_DIR ? DATABASE_DIR : process.cwd();
+
+const BACKUPS_DIR = process.env.BACKUPS_DIR
+  ? path.resolve(process.env.BACKUPS_DIR)
+  : path.join(PERSISTENT_DATA_DIR, 'backups');
+if (!fs.existsSync(BACKUPS_DIR)) {
+  try {
+    fs.mkdirSync(BACKUPS_DIR, { recursive: true });
+  } catch (e) {
+    console.warn(`[Persistence] Could not create BACKUPS_DIR (${BACKUPS_DIR}):`, e);
+  }
+}
+
+const UPLOADS_DIR = process.env.UPLOADS_DIR
+  ? path.resolve(process.env.UPLOADS_DIR)
+  : (HAS_CUSTOM_DATA_DIR ? path.join(PERSISTENT_DATA_DIR, 'uploads') : path.join(process.cwd(), 'public', 'uploads'));
+if (!fs.existsSync(UPLOADS_DIR)) {
+  try {
+    fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+  } catch (e) {
+    console.warn(`[Persistence] Could not create UPLOADS_DIR (${UPLOADS_DIR}):`, e);
+  }
+}
+
 const JWT_SECRET = (() => {
   const envSecret = process.env.JWT_SECRET;
   if (envSecret && envSecret.trim().length >= 32 && envSecret !== 'fallback_secret_for_dev_only') {
     return envSecret.trim();
   }
-  const secretPath = path.join(process.cwd(), '.jwt_secret');
+  const secretPath = path.join(PERSISTENT_DATA_DIR, '.jwt_secret');
+  const legacySecretPath = path.join(process.cwd(), '.jwt_secret');
   try {
     if (fs.existsSync(secretPath)) {
       const stored = fs.readFileSync(secretPath, 'utf8').trim();
       if (stored.length >= 32) return stored;
+    }
+    if (secretPath !== legacySecretPath && fs.existsSync(legacySecretPath)) {
+      const storedLegacy = fs.readFileSync(legacySecretPath, 'utf8').trim();
+      if (storedLegacy.length >= 32) {
+        try { fs.writeFileSync(secretPath, storedLegacy, { mode: 0o600 }); } catch {}
+        return storedLegacy;
+      }
     }
     const generated = crypto.randomBytes(64).toString('hex');
     fs.writeFileSync(secretPath, generated, { mode: 0o600 });
@@ -104,7 +140,6 @@ const JWT_SECRET = (() => {
     return crypto.randomBytes(64).toString('hex');
   }
 })();
-const DATABASE_PATH = process.env.DATABASE_PATH || 'megafixaEduc.db';
 const OFFLINE_MODE = process.env.OFFLINE_MODE === 'true';
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || (firebaseConfig as any)?.oAuthClientId;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
@@ -263,11 +298,16 @@ const flushAndCloseDb = () => {
   try {
     if (db && db.open) {
       try {
+        db.pragma('wal_checkpoint(TRUNCATE)');
+      } catch {}
+      try {
         saveLocalCheckpointSync();
       } catch (cpErr) {
         console.warn('[Persistence] Shutdown local checkpoint notice:', cpErr);
       }
-      db.pragma('wal_checkpoint(TRUNCATE)');
+      try {
+        db.pragma('wal_checkpoint(TRUNCATE)');
+      } catch {}
       db.close();
       console.log('[SQLite] Checkpoint completed and database closed.');
     }
@@ -343,9 +383,6 @@ try { db.prepare("ALTER TABLE school_smtp_configs ADD COLUMN brevo_api_key TEXT 
 
 // Robust Data Persistence Layer (Checkpoint System)
 // Preserves all existing schools, accounts, students, grades, financials, and settings across updates & redeployments.
-const BACKUPS_DIR = path.join(process.cwd(), 'backups');
-if (!fs.existsSync(BACKUPS_DIR)) fs.mkdirSync(BACKUPS_DIR, { recursive: true });
-
 const AUTO_BACKUP_PATH = path.join(BACKUPS_DIR, 'auto_persistence_checkpoint.sql');
 const SCHOOL_VAULT_PATH = path.join(BACKUPS_DIR, 'school_accounts_registry.json');
 const LAST_BUILD_FILE = path.join(BACKUPS_DIR, '.last_build_id');
@@ -512,6 +549,21 @@ function inspectSqlDumpStats(sql: string): SqlDumpStats {
   let requestInserts = 0;
   let licenseInserts = 0;
 
+  const BUILTIN_DEMO_EMAILS = [
+    'amfabricenew@gmail.com',
+    'ayedeguef@gmail.com',
+    'superadmin@megafixa.com',
+    'ayedegue@mail.com',
+    'admin@ecole.com',
+    'direction@ecole.com',
+    'secretaire@ecole.com',
+    'enseignant@ecole.com',
+    'comptable@ecole.com',
+    'parent@ecole.com',
+    'eleve@ecole.com'
+  ];
+  let nonTestUserCount = 0;
+
   for (const line of lines) {
     if (line.includes('INTO "school_info" ') || line.includes('INTO school_info ')) {
       schoolInserts++;
@@ -520,6 +572,11 @@ function inspectSqlDumpStats(sql: string): SqlDumpStats {
       }
     } else if (line.includes('INTO "utilisateurs" ') || line.includes('INTO utilisateurs ')) {
       userInserts++;
+      const lowerLine = line.toLowerCase();
+      const isBuiltInDemo = BUILTIN_DEMO_EMAILS.some(em => lowerLine.includes(`'${em}'`));
+      if (!isBuiltInDemo) {
+        nonTestUserCount++;
+      }
     } else if (line.includes('INTO "eleves" ') || line.includes('INTO eleves ')) {
       studentInserts++;
     } else if (line.includes('INTO "classes" ') || line.includes('INTO classes ')) {
@@ -537,7 +594,6 @@ function inspectSqlDumpStats(sql: string): SqlDumpStats {
     }
   }
 
-  const nonTestUserCount = Math.max(0, userInserts - 11);
   const nonDefaultSchool = nonDefaultSchoolCount > 0;
   const hasRealData = (
     schoolInserts > 1 ||
@@ -610,6 +666,7 @@ function generateFullSqlDump(): string {
 function createSafetyBackup(prefix = 'pre_update'): string | null {
   try {
     if (!db || !db.open) return null;
+    try { db.pragma('wal_checkpoint(PASSIVE)'); } catch {}
     const stats = getDatabaseStats();
     if (!stats.hasRealData && stats.schoolCount === 0) return null;
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -1110,6 +1167,7 @@ function wouldShrinkExistingStats(
 function saveLocalCheckpointSync(): boolean {
   try {
     if (!db || !db.open || !tableExists('school_info')) return false;
+    try { db.pragma('wal_checkpoint(PASSIVE)'); } catch {}
     const stats = getDatabaseStats();
     if (fs.existsSync(AUTO_BACKUP_PATH)) {
       try {
@@ -1163,6 +1221,7 @@ async function saveCheckpoint(reason = 'manual') {
   isSavingCheckpoint = true;
   try {
     if (!db || !db.open || !tableExists('school_info')) return;
+    try { db.pragma('wal_checkpoint(PASSIVE)'); } catch {}
     const stats = getDatabaseStats();
     const allowShrink = isWithinExplicitDeletionWindow();
 
@@ -4414,6 +4473,46 @@ try {
   console.error("Migration EA subjects error:", e);
 }
 
+// Performance indexes for multi-tenant isolation & frequent joins (safe idempotent startup creation)
+try {
+  const indexStatements = [
+    "CREATE INDEX IF NOT EXISTS idx_utilisateurs_school ON utilisateurs(school_id)",
+    "CREATE INDEX IF NOT EXISTS idx_utilisateurs_email ON utilisateurs(LOWER(TRIM(email)))",
+    "CREATE INDEX IF NOT EXISTS idx_utilisateurs_identifiant ON utilisateurs(LOWER(TRIM(identifiant)))",
+    "CREATE INDEX IF NOT EXISTS idx_annees_school ON annees_scolaires(school_id)",
+    "CREATE INDEX IF NOT EXISTS idx_classes_school_annee ON classes(school_id, annee_id)",
+    "CREATE INDEX IF NOT EXISTS idx_eleves_school_classe ON eleves(school_id, classe_id)",
+    "CREATE INDEX IF NOT EXISTS idx_eleves_matricule ON eleves(school_id, matricule)",
+    "CREATE INDEX IF NOT EXISTS idx_eleve_annees_lookup ON eleve_annees(school_id, annee_id, eleve_id)",
+    "CREATE INDEX IF NOT EXISTS idx_eleve_annees_classe ON eleve_annees(classe_id, annee_id)",
+    "CREATE INDEX IF NOT EXISTS idx_enseignants_school ON enseignants(school_id)",
+    "CREATE INDEX IF NOT EXISTS idx_enseignant_annees_lookup ON enseignant_annees(school_id, annee_id, enseignant_id)",
+    "CREATE INDEX IF NOT EXISTS idx_matieres_school ON matieres(school_id)",
+    "CREATE INDEX IF NOT EXISTS idx_classe_matieres_lookup ON classe_matieres(classe_id, matiere_id, school_id)",
+    "CREATE INDEX IF NOT EXISTS idx_enseignant_matieres_lookup ON enseignant_matieres(enseignant_id, matiere_id, school_id)",
+    "CREATE INDEX IF NOT EXISTS idx_notes_lookup ON notes(school_id, eleve_id, matiere_id, trimestre)",
+    "CREATE INDEX IF NOT EXISTS idx_notes_classe ON notes(school_id, classe_id, annee_id)",
+    "CREATE INDEX IF NOT EXISTS idx_paiements_lookup ON paiements(school_id, eleve_id, annee_id)",
+    "CREATE INDEX IF NOT EXISTS idx_paiements_date ON paiements(school_id, date_paiement)",
+    "CREATE INDEX IF NOT EXISTS idx_edt_lookup ON emplois_du_temps(school_id, classe_id, annee_id)",
+    "CREATE INDEX IF NOT EXISTS idx_edt_enseignant ON emplois_du_temps(school_id, enseignant_id)",
+    "CREATE INDEX IF NOT EXISTS idx_alertes_lookup ON alertes(school_id, eleve_id)",
+    "CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(utilisateur_id, lu)",
+    "CREATE INDEX IF NOT EXISTS idx_notifications_school ON notifications(school_id, date_creation)",
+    "CREATE INDEX IF NOT EXISTS idx_messages_internes_dest ON messages_internes(destinataire_id, lu)",
+    "CREATE INDEX IF NOT EXISTS idx_messages_internes_exp ON messages_internes(expediteur_id)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_logs_school ON audit_logs(school_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_epreuves_school ON epreuves(school_id, annee_id)",
+    "CREATE INDEX IF NOT EXISTS idx_bibliotheque_school ON bibliotheque_ressources(school_id)",
+    "CREATE INDEX IF NOT EXISTS idx_depenses_school ON depenses(school_id, annee_id)",
+    "CREATE INDEX IF NOT EXISTS idx_autres_recettes_school ON autres_recettes(school_id, annee_id)",
+    "CREATE INDEX IF NOT EXISTS idx_sessions_cours_lookup ON sessions_cours(school_id, enseignant_id, date_cours)"
+  ];
+  for (const sql of indexStatements) {
+    try { db.exec(sql); } catch {}
+  }
+} catch {}
+
 // Seed default primary & secondary subjects and evaluation configs for each school
 try {
   const schoolsList = db.prepare("SELECT id FROM school_info").all() as any[];
@@ -5378,7 +5477,7 @@ async function startServer() {
   });
 
   // Static uploads directory (for voice messages and documents)
-  const uploadsStaticDir = path.join(process.cwd(), 'public', 'uploads');
+  const uploadsStaticDir = UPLOADS_DIR;
   if (!fs.existsSync(path.join(uploadsStaticDir, 'audio'))) {
     fs.mkdirSync(path.join(uploadsStaticDir, 'audio'), { recursive: true });
   }
@@ -22655,6 +22754,9 @@ function executeYearTransition(
           .run(currentLibelle, yearDebut, yearFin, schoolId);
       }
 
+      saveLocalCheckpointSync();
+      saveCheckpoint('payment_provision_school').catch(() => {});
+
       // Get plan features
       const features = getPlanFeaturesList(tx.plan_name);
 
@@ -23268,6 +23370,9 @@ L'équipe MégafixaEduc Pro vous souhaite une excellente réussite académique !
 
       activateTx();
 
+      saveLocalCheckpointSync();
+      saveCheckpoint('activate_license_key').catch(() => {});
+
       // Log activity
       logActivity(req.userId || 1, 'LICENSE_KEY_ACTIVATED', 'SCHOOL', targetSchoolId, {
         license_key: cleanKey,
@@ -23742,6 +23847,8 @@ Cette clé servira lors du premier accès de votre établissement au système po
       const info = db.prepare("INSERT INTO utilisateurs (nom, email, mot_de_passe, role, approuve, is_first_login, can_write, school_id, otp_code, otp_expiry) VALUES (?, ?, ?, 'admin', 1, 0, 1, ?, NULL, NULL)")
         .run(nom, email, hashedPassword, schoolId);
       
+      saveLocalCheckpointSync();
+      saveCheckpoint('signup_school').catch(() => {});
       logActivity(info.lastInsertRowid as number, 'SIGNUP_ADMIN', 'USER', info.lastInsertRowid as number, { email, schoolId }, schoolId as number);
       
       const reqProto = req.headers['x-forwarded-proto'] || 'https';
@@ -26067,7 +26174,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         return res.status(400).json({ error: `Type de fichier (.${rawExt}) non autorisé pour des raisons de sécurité.` });
       }
 
-      const uploadsDir = path.join(process.cwd(), 'public', 'uploads', 'files');
+      const uploadsDir = path.join(UPLOADS_DIR, 'files');
       if (!fs.existsSync(uploadsDir)) {
         fs.mkdirSync(uploadsDir, { recursive: true });
       }
@@ -26123,7 +26230,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       const rawExt = baseName.includes('.') ? String(baseName.split('.').pop() || '').toLowerCase().replace(/[^a-z0-9]/g, '') : 'webm';
       const safeExt = allowedAudioExts.has(rawExt) ? rawExt : 'webm';
 
-      const uploadsDir = path.join(process.cwd(), 'public', 'uploads', 'audio');
+      const uploadsDir = path.join(UPLOADS_DIR, 'audio');
       if (!fs.existsSync(uploadsDir)) {
         fs.mkdirSync(uploadsDir, { recursive: true });
       }
@@ -27356,7 +27463,6 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
   // ==========================================
   // SAUVEGARDE ET RESTAURATION DES DONNÉES
   // ==========================================
-  const BACKUPS_DIR = path.join(process.cwd(), 'backups');
   if (!fs.existsSync(BACKUPS_DIR)) {
     try {
       fs.mkdirSync(BACKUPS_DIR, { recursive: true });
@@ -30218,6 +30324,9 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
 
       createSchoolTx();
 
+      saveLocalCheckpointSync();
+      saveCheckpoint('super_admin_create_school').catch(() => {});
+
       // Trigger Super Admin notification
       notifySuperAdminNewSchool({
         id: newSchoolId,
@@ -30976,6 +31085,9 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       });
 
       approveTx();
+
+      saveLocalCheckpointSync();
+      saveCheckpoint('approve_school_request').catch(() => {});
 
       // Generate PDF Fiche
       let pdfBuffer: Buffer | null = null;

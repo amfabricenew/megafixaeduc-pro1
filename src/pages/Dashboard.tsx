@@ -352,8 +352,8 @@ export default function Dashboard({ cycle = 'all' }: DashboardProps) {
                       paddingAngle={8}
                       dataKey="value"
                     >
-                      <Cell fill="#3b82f6" />
-                      <Cell fill="#10b981" />
+                      <Cell fill="#013efb" />
+                      <Cell fill="#049ffb" />
                     </Pie>
                     <Tooltip 
                       contentStyle={{ borderRadius: '16px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
@@ -364,8 +364,8 @@ export default function Dashboard({ cycle = 'all' }: DashboardProps) {
               
               <div className="w-full md:w-1/2 space-y-5">
                 {[
-                  { label: 'Nouveaux Élèves', count: Array.isArray(stats.registrationStats) ? stats.registrationStats.find((s: any) => s.statut === 'Nouveau')?.count || 0 : 0, color: 'bg-blue-500', percent: stats.elevesCount > 0 ? Math.round(((stats as any).registrationStats?.find((s: any) => s.statut === 'Nouveau')?.count || 0) / stats.elevesCount * 100) : 0 },
-                  { label: 'Anciens Élèves', count: Array.isArray(stats.registrationStats) ? (stats.registrationStats.find((s: any) => s.statut === 'Ancien' || s.statut === 'Passant')?.count || 0) : 0, color: 'bg-emerald-500', percent: stats.elevesCount > 0 ? Math.round(((stats as any).registrationStats?.find((s: any) => s.statut === 'Ancien' || s.statut === 'Passant')?.count || 0) / stats.elevesCount * 100) : 0 }
+                  { label: 'Nouveaux Élèves', count: Array.isArray(stats.registrationStats) ? stats.registrationStats.find((s: any) => s.statut === 'Nouveau')?.count || 0 : 0, color: 'bg-[#013efb]', percent: stats.elevesCount > 0 ? Math.round(((stats as any).registrationStats?.find((s: any) => s.statut === 'Nouveau')?.count || 0) / stats.elevesCount * 100) : 0 },
+                  { label: 'Anciens Élèves', count: Array.isArray(stats.registrationStats) ? (stats.registrationStats.find((s: any) => s.statut === 'Ancien' || s.statut === 'Passant')?.count || 0) : 0, color: 'bg-[#049ffb]', percent: stats.elevesCount > 0 ? Math.round(((stats as any).registrationStats?.find((s: any) => s.statut === 'Ancien' || s.statut === 'Passant')?.count || 0) / stats.elevesCount * 100) : 0 }
                 ].map((item, i) => (
                   <div key={i} className="space-y-2">
                     <div className="flex items-center justify-between">
@@ -407,7 +407,7 @@ export default function Dashboard({ cycle = 'all' }: DashboardProps) {
                       formatter={(val: any) => [`${Number(val).toLocaleString()} FCFA`, 'Paiements']}
                       contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
                     />
-                    <Bar dataKey="paiements" fill={cycle === 'primaire' ? '#10b981' : cycle === 'secondaire' ? '#3b82f6' : '#6366f1'} radius={[6, 6, 0, 0]} />
+                    <Bar dataKey="paiements" fill={cycle === 'primaire' ? '#049ffb' : cycle === 'secondaire' ? '#fb5c03' : '#013efb'} radius={[6, 6, 0, 0]} />
                   </BarChart>
                 </ResponsiveContainer>
               </div>

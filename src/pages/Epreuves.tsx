@@ -43,6 +43,7 @@ import {
   Printer,
   AlertCircle
 } from 'lucide-react';
+import toast from 'react-hot-toast';
 import { apiFetch } from '../utils/api';
 import { isPrimarySubject } from '../utils/subjectCatalog';
 import { useAuth } from '../contexts/AuthContext';
@@ -945,7 +946,7 @@ export const Epreuves: React.FC<EpreuvesProps> = ({ cycleProp = 'tous' }) => {
   const handleConfirmAnalyse = async () => {
     if (!selectedEpreuveForAnalyse) return;
     if (analyseAction === 'rejeter' && !motifRejet.trim()) {
-      alert("Veuillez indiquer le motif du rejet pour expliciter les corrections demandées à l'enseignant.");
+      toast.error("Veuillez indiquer le motif du rejet pour expliciter les corrections demandées à l'enseignant.");
       return;
     }
 
@@ -968,7 +969,7 @@ export const Epreuves: React.FC<EpreuvesProps> = ({ cycleProp = 'tous' }) => {
       fetchEpreuves();
       fetchStats();
     } catch (err: any) {
-      alert(err.message || "Erreur lors de l'analyse.");
+      toast.error(err.message || "Erreur lors de l'analyse.");
     } finally {
       setSubmittingAnalyse(false);
     }
@@ -984,7 +985,7 @@ export const Epreuves: React.FC<EpreuvesProps> = ({ cycleProp = 'tous' }) => {
       setSuccessMsg('Épreuve supprimée avec succès.');
       fetchStats();
     } catch (err: any) {
-      alert(err.message || "Erreur lors de la suppression.");
+      toast.error(err.message || "Erreur lors de la suppression.");
     }
   };
 
