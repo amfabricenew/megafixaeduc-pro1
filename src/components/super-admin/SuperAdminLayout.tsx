@@ -38,8 +38,8 @@ import { useAuth } from '../../contexts/AuthContext';
 import { toggleAIAssistant } from '../AIAssistantWidget';
 import logo from '../../LOGO_MEGFIXAEDEUC_PRO.png';
 import { LanguageSelector } from '../LanguageSelector';
-import { onAuthStateChanged } from 'firebase/auth';
-import { auth } from '../../lib/firebase';
+import { onAuthStateChanged, signInWithPopup } from 'firebase/auth';
+import { auth, googleProvider } from '../../lib/firebase';
 import { syncCloudVaultWithFirestore } from '../../utils/cloudVaultSync';
 
 function cn(...inputs: ClassValue[]) {
@@ -241,6 +241,9 @@ export default function SuperAdminLayout() {
     return () => clearInterval(interval);
   }, [fetchNotifications]);
 
+  const [cloudSyncLinked, setCloudSyncLinked] = React.useState<boolean | null>(null);
+  const [cloudSyncBusy, setCloudSyncBusy] = React.useState(false);
+
   // Mirror and reconcile persisted requests/accounts vault with Firestore when Super Admin has an active Firebase session
   React.useEffect(() => {
     if (user?.role !== 'super_admin') return;
@@ -259,16 +262,51 @@ export default function SuperAdminLayout() {
     };
 
     const unsubscribe = onAuthStateChanged(auth, (fbUser) => {
-      if (active && fbUser?.emailVerified) {
+      if (!active) return;
+      setCloudSyncLinked(Boolean(fbUser?.emailVerified));
+      if (fbUser?.emailVerified) {
         runCloudSync();
       }
     });
+
+    const token = localStorage.getItem('token');
+    if (token) {
+      fetch('/api/super-admin/persistence-status', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      })
+        .then(r => (r.ok ? r.json() : null))
+        .then(st => {
+          if (active && st?.cloudSyncAvailable) {
+            setCloudSyncLinked(true);
+          }
+        })
+        .catch(() => {});
+    }
 
     return () => {
       active = false;
       unsubscribe();
     };
   }, [user?.role, fetchNotifications]);
+
+  const handleLinkCloudVault = async () => {
+    if (cloudSyncBusy) return;
+    setCloudSyncBusy(true);
+    try {
+      await signInWithPopup(auth, googleProvider);
+      const res = await syncCloudVaultWithFirestore();
+      setCloudSyncLinked(true);
+      toast.success('Sauvegarde Cloud Vault synchronisée avec succès !');
+      if (res?.reconciled > 0) {
+        fetchNotifications();
+        window.dispatchEvent(new CustomEvent('megafixa-cloud-reconciled', { detail: res }));
+      }
+    } catch (e: any) {
+      toast.error(e?.message || 'Connexion Cloud annulée');
+    } finally {
+      setCloudSyncBusy(false);
+    }
+  };
 
   const markNotificationsAsRead = async (id?: number) => {
     try {
@@ -316,7 +354,7 @@ export default function SuperAdminLayout() {
       {/* Sidebar */}
       <aside 
         className={cn(
-          "bg-white border-r border-slate-200 transition-all duration-300 flex flex-col z-50 fixed inset-y-0 left-0 md:relative md:translate-x-0 shadow-2xl md:shadow-none",
+          "bg-white border-r border-slate-200 transition-all duration-300 flex flex-col z-50 fixed inset-y-0 left-0 md:relative md:translate-x-0 shadow-2xl md:shadow-none max-w-[85vw]",
           isSidebarOpen ? "w-72 translate-x-0" : "w-72 -translate-x-full md:w-20 md:translate-x-0"
         )}
       >
@@ -464,16 +502,20 @@ export default function SuperAdminLayout() {
       {/* Main Content */}
       <main className="flex-1 flex flex-col min-w-0 overflow-x-clip">
         {/* Header */}
-        <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-4 md:px-6 sticky top-0 z-30">
-          <div className="flex items-center gap-3 flex-1 min-w-0">
+        <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between gap-2 px-2.5 sm:px-4 md:px-6 sticky top-0 z-30 safe-top">
+          <div className="flex items-center gap-2 sm:gap-3 flex-1 min-w-0">
             <button
               type="button"
               onClick={() => setIsSidebarOpen(true)}
-              className="md:hidden p-2 rounded-xl text-slate-600 hover:bg-slate-100 shrink-0"
+              className="md:hidden w-11 h-11 min-w-[44px] min-h-[44px] -ml-1 flex items-center justify-center rounded-xl text-slate-700 hover:bg-slate-100 active:bg-slate-200 shrink-0"
               aria-label="Ouvrir le menu"
             >
-              <Menu size={22} />
+              <Menu size={24} />
             </button>
+            <div className="flex items-center gap-2 md:hidden min-w-0">
+              <img src={logo} alt="Logo" className="h-7 w-7 object-contain shrink-0" />
+              <span className="font-bold text-slate-800 text-xs sm:text-sm truncate">Super Admin</span>
+            </div>
             <div className="relative max-w-md w-full hidden md:block">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
               <input 
@@ -484,7 +526,19 @@ export default function SuperAdminLayout() {
             </div>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-1.5 sm:gap-3 shrink-0">
+            {cloudSyncLinked === false && (
+              <button
+                type="button"
+                onClick={handleLinkCloudVault}
+                disabled={cloudSyncBusy}
+                className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-full bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 text-[11px] font-bold transition-colors"
+                title="Lier le Cloud Vault Firestore pour garantir la réplication cloud"
+              >
+                <Globe size={13} className="text-amber-600" />
+                <span>{cloudSyncBusy ? 'Sync...' : 'Activer Cloud Vault'}</span>
+              </button>
+            )}
             {/* Real-time Notification Dropdown */}
             <div className="relative">
               <button 
@@ -505,7 +559,7 @@ export default function SuperAdminLayout() {
 
               {showNotifDropdown && (
                 <div
-                  className="absolute right-0 mt-2 w-80 sm:w-96 bg-white rounded-2xl shadow-2xl border border-slate-200 z-50 overflow-hidden text-left animate-in fade-in duration-150"
+                  className="absolute -right-10 sm:right-0 mt-2 w-[calc(100vw-1rem)] max-w-sm sm:w-96 bg-white rounded-2xl shadow-2xl border border-slate-200 z-50 overflow-hidden text-left animate-in fade-in duration-150"
                 >
                     <div className="p-4 bg-slate-50 border-b border-slate-100 flex items-center justify-between">
                       <div className="flex items-center gap-2">
@@ -611,7 +665,7 @@ export default function SuperAdminLayout() {
         </header>
 
         {/* Content Area */}
-        <div ref={superAdminContentRef} data-scroll-container="main" className="flex-1 overflow-y-auto p-4 md:p-6 scrollbar-hide">
+        <div ref={superAdminContentRef} data-scroll-container="main" className="flex-1 overflow-y-auto p-3 sm:p-4 md:p-6 scrollbar-hide">
           <div className="max-w-7xl mx-auto">
             <Outlet />
           </div>

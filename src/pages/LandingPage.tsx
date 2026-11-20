@@ -44,6 +44,7 @@ import FeaturesShowcase from '../components/FeaturesShowcase';
 import { LanguageSelector } from '../components/LanguageSelector';
 import { useTranslation } from '../contexts/TranslationContext';
 import logoOfficial from '../LOGO_MEGFIXAEDEUC_PRO.png';
+import { isUnlimitedLimit } from '../constants/productFeatures';
 
 export default function LandingPage() {
   const { t, language } = useTranslation();
@@ -711,7 +712,7 @@ export default function LandingPage() {
                 const isFree = Number(plan.price) === 0 || plan.type === 'trial';
                 const feats: string[] = Array.isArray(plan.features) ? plan.features : [];
                 const studentLimitText =
-                  plan.student_limit === null || plan.student_limit === undefined || Number(plan.student_limit) >= 999999
+                  isUnlimitedLimit(plan.student_limit)
                     ? t("Élèves Illimités")
                     : t(`Jusqu'à ${Number(plan.student_limit).toLocaleString('fr-FR')} élèves`);
 

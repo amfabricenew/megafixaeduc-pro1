@@ -20,6 +20,12 @@ import {
 import toast from 'react-hot-toast';
 import { apiFetch } from '../../utils/api';
 import { useTranslation } from '../../contexts/TranslationContext';
+import {
+  APP_FEATURES,
+  resolvePlanFeatureIds,
+  formatStudentLimit,
+  formatStaffLimit,
+} from '../../constants/productFeatures';
 
 interface SchoolSubData {
   plan: string;
@@ -387,11 +393,11 @@ export default function SubscriptionSettingsTab() {
                 : rawPlanLower === (plan.name || '').toLowerCase().trim();
               const isFree = Number(plan.price) === 0 || plan.type === 'trial';
               const isRec = Boolean(plan.is_recommended);
-              const feats: string[] = Array.isArray(plan.features) ? plan.features : [];
-              const maxStudentsLabel =
-                plan.student_limit === null || plan.student_limit === undefined || Number(plan.student_limit) >= 999999
-                  ? 'Élèves illimités'
-                  : `Jusqu'à ${Number(plan.student_limit).toLocaleString('fr-FR')} élèves`;
+              const activeIds = resolvePlanFeatureIds(plan.features, plan.featureIds, plan.name);
+              const displayFeats: string[] = Array.isArray(plan.features) && plan.features.length > 0
+                ? plan.features
+                : APP_FEATURES.filter((f) => activeIds.includes(f.id)).map((f) => f.name);
+              const maxStudentsLabel = `${formatStudentLimit(plan.student_limit)} • ${formatStaffLimit(plan.staff_limit ?? 0)}`;
 
               return (
                 <div
@@ -438,9 +444,9 @@ export default function SubscriptionSettingsTab() {
 
                     <div className="space-y-2 mb-6">
                       <p className="text-[11px] font-bold text-slate-700 uppercase tracking-wider">
-                        {language === 'en' ? 'Included features:' : 'Fonctionnalités incluses :'}
+                        {language === 'en' ? 'Included features:' : `Fonctionnalités actives (${displayFeats.length}) :`}
                       </p>
-                      {feats.map((f, i) => (
+                      {displayFeats.map((f, i) => (
                         <div key={i} className="flex items-start gap-2 text-xs text-slate-600">
                           <div className="w-4 h-4 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center shrink-0 mt-0.5">
                             <Check size={10} className="stroke-[3]" />
@@ -511,17 +517,24 @@ export default function SubscriptionSettingsTab() {
                   <td className="py-3.5 px-6 font-semibold text-slate-800">Capacité d'élèves maximale</td>
                   {configuredPlans.map((p) => (
                     <td key={p.id} className="py-3.5 px-4 text-center font-bold text-indigo-700">
-                      {p.student_limit === null || p.student_limit === undefined || Number(p.student_limit) >= 999999
-                        ? 'Illimitée'
-                        : `${Number(p.student_limit).toLocaleString('fr-FR')} élèves`}
+                      {formatStudentLimit(p.student_limit)}
                     </td>
                   ))}
                 </tr>
-                {Array.from(new Set(configuredPlans.flatMap((p) => Array.isArray(p.features) ? p.features : []))).map((feat, idx) => (
-                  <tr key={idx} className="hover:bg-slate-50/70 transition-colors">
-                    <td className="py-3.5 px-6 font-semibold text-slate-800">{feat}</td>
+                <tr className="hover:bg-slate-50/70">
+                  <td className="py-3.5 px-6 font-semibold text-slate-800">Capacité personnel & staff</td>
+                  {configuredPlans.map((p) => (
+                    <td key={p.id} className="py-3.5 px-4 text-center font-bold text-emerald-700">
+                      {formatStaffLimit(p.staff_limit ?? 0)}
+                    </td>
+                  ))}
+                </tr>
+                {APP_FEATURES.map((feat) => (
+                  <tr key={feat.id} className="hover:bg-slate-50/70 transition-colors">
+                    <td className="py-3.5 px-6 font-semibold text-slate-800">{feat.name}</td>
                     {configuredPlans.map((p) => {
-                      const included = Array.isArray(p.features) && p.features.includes(feat);
+                      const activeIds = resolvePlanFeatureIds(p.features, p.featureIds, p.name);
+                      const included = activeIds.includes(feat.id);
                       return (
                         <td key={p.id} className="py-3.5 px-4 text-center">
                           {included ? (

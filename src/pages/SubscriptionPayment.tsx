@@ -38,6 +38,7 @@ import toast from 'react-hot-toast';
 import { apiFetch } from '../utils/api';
 import { useTranslation } from '../contexts/TranslationContext';
 import { LanguageSelector } from '../components/LanguageSelector';
+import { formatStudentLimit } from '../constants/productFeatures';
 import logoOfficial from '../LOGO_MEGFIXAEDEUC_PRO.png';
 
 interface PaymentMethod {
@@ -859,9 +860,7 @@ export default function SubscriptionPayment() {
                         const priceDisplay = Number(p.price) === 0
                           ? `Gratuit (${p.period || 'essai'})`
                           : `${Number(p.price).toLocaleString('fr-FR')} FCFA / ${p.period || 'mois'}`;
-                        const cycleInfo = p.student_limit
-                          ? (Number(p.student_limit) >= 999999 ? 'Élèves illimités' : `Jusqu'à ${p.student_limit} élèves`)
-                          : (p.period || 'Formule configurée');
+                        const cycleInfo = formatStudentLimit(p.student_limit);
 
                         return (
                           <button

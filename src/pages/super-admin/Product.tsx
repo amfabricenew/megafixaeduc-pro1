@@ -24,13 +24,20 @@ import {
   Smartphone,
   Landmark,
   ShieldCheck,
-  Link2
+  Link2,
+  CheckCheck
 } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { apiFetch } from '../../utils/api';
 import toast from 'react-hot-toast';
-import { APP_FEATURES } from '../../constants/productFeatures';
+import {
+  APP_FEATURES,
+  ALL_APP_FEATURE_IDS,
+  resolvePlanFeatureIds,
+  isUnlimitedLimit,
+} from '../../constants/productFeatures';
+import { syncCloudVaultWithFirestore } from '../../utils/cloudVaultSync';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -93,17 +100,39 @@ export default function SuperAdminProduct() {
   const handlePublish = async () => {
     try {
       setSaving(true);
+      const syncedPlans = plans.map((plan) => {
+        const key = String(plan.id);
+        const ids = Array.isArray(featureMatrix[key])
+          ? featureMatrix[key]
+          : resolvePlanFeatureIds(plan.features, plan.featureIds, plan.name);
+        const canonicalNames = APP_FEATURES.filter((f) => ids.includes(f.id)).map((f) => f.name);
+        const canonicalSet = new Set(APP_FEATURES.map((f) => f.name.toLowerCase()));
+        const canonicalIdSet = new Set(APP_FEATURES.map((f) => f.id.toLowerCase()));
+        const custom = (Array.isArray(plan.features) ? plan.features : []).filter((f: string) => {
+          const low = String(f || '').toLowerCase().trim();
+          return low && !canonicalSet.has(low) && !canonicalIdSet.has(low);
+        });
+        return {
+          ...plan,
+          featureIds: ids,
+          features: Array.from(new Set([...canonicalNames, ...custom])),
+        };
+      });
+
       const res = await apiFetch('/api/admin/product-config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
-          plans, 
+          plans: syncedPlans, 
           featureMatrix
         }),
       });
 
       if (res.ok) {
         toast.success("Configuration publiée et appliquée avec succès !");
+        await fetchConfig();
+        window.dispatchEvent(new Event('school_subscription_updated'));
+        syncCloudVaultWithFirestore().catch(() => {});
       } else {
         const err = await res.json();
         throw new Error(err.error || "Erreur de publication");
@@ -115,19 +144,38 @@ export default function SuperAdminProduct() {
     }
   };
 
+  const [modalFeatureIds, setModalFeatureIds] = useState<string[]>([]);
+
+  const featureCategories = React.useMemo(() => {
+    const groups: Record<string, typeof APP_FEATURES> = {};
+    APP_FEATURES.forEach((f) => {
+      if (!groups[f.category]) groups[f.category] = [];
+      groups[f.category].push(f);
+    });
+    return Object.entries(groups);
+  }, []);
+
   const openConfigModal = (plan?: any) => {
     if (plan) {
+      const resolvedIds = resolvePlanFeatureIds(
+        plan.features,
+        featureMatrix[String(plan.id)] || plan.featureIds,
+        plan.name
+      );
+      setModalFeatureIds(resolvedIds);
       setEditingPlan({
         ...plan,
         period: plan.period || 'mois',
         description: plan.description || '',
-        student_limit: plan.student_limit ?? 500,
-        staff_limit: plan.staff_limit ?? 50,
+        student_limit: isUnlimitedLimit(plan.student_limit) ? 0 : Number(plan.student_limit),
+        staff_limit: isUnlimitedLimit(plan.staff_limit) ? 0 : Number(plan.staff_limit),
         active: plan.is_active !== 0 && plan.active !== false
       });
     } else {
+      const newId = `plan_${Math.random().toString(36).substr(2, 9)}`;
+      setModalFeatureIds(['cycle_primaire', 'cycle_secondaire', 'dashboard', 'classes', 'students', 'teachers', 'subjects', 'grades']);
       setEditingPlan({
-        id: `plan_${Math.random().toString(36).substr(2, 9)}`,
+        id: newId,
         name: '',
         price: 0,
         period: 'mois',
@@ -146,22 +194,36 @@ export default function SuperAdminProduct() {
       toast.error("Le nom du plan est requis");
       return;
     }
-    
-    setPlans(prev => {
-      const exists = prev.find(p => p.id === editingPlan.id);
-      if (exists) {
-        return prev.map(p => p.id === editingPlan.id ? editingPlan : p);
-      }
-      return [...prev, editingPlan];
+
+    const canonicalNames = APP_FEATURES.filter((f) => modalFeatureIds.includes(f.id)).map((f) => f.name);
+    const canonicalSet = new Set(APP_FEATURES.map((f) => f.name.toLowerCase()));
+    const canonicalIdSet = new Set(APP_FEATURES.map((f) => f.id.toLowerCase()));
+    const customFeatures = (Array.isArray(editingPlan.features) ? editingPlan.features : []).filter((f: string) => {
+      const low = String(f || '').toLowerCase().trim();
+      return low && !canonicalSet.has(low) && !canonicalIdSet.has(low);
     });
 
-    if (!featureMatrix[editingPlan.id]) {
-      setFeatureMatrix(prev => ({ ...prev, [editingPlan.id]: [] }));
-    }
+    const updatedPlan = {
+      ...editingPlan,
+      student_limit: isUnlimitedLimit(editingPlan.student_limit) ? 0 : Math.max(1, Number(editingPlan.student_limit) || 1),
+      staff_limit: isUnlimitedLimit(editingPlan.staff_limit) ? 0 : Math.max(1, Number(editingPlan.staff_limit) || 1),
+      featureIds: modalFeatureIds,
+      features: Array.from(new Set([...canonicalNames, ...customFeatures])),
+    };
+    
+    setPlans(prev => {
+      const exists = prev.find(p => String(p.id) === String(updatedPlan.id));
+      if (exists) {
+        return prev.map(p => String(p.id) === String(updatedPlan.id) ? updatedPlan : p);
+      }
+      return [...prev, updatedPlan];
+    });
+
+    setFeatureMatrix(prev => ({ ...prev, [String(updatedPlan.id)]: modalFeatureIds }));
 
     setIsModalOpen(false);
     setEditingPlan(null);
-    toast.success("Configuration du plan enregistrée");
+    toast.success("Configuration enregistrée. Cliquez sur « Publier les changements » pour appliquer.");
   };
 
   const removePlan = (id: string) => {
@@ -170,22 +232,35 @@ export default function SuperAdminProduct() {
       return;
     }
     if (window.confirm("Supprimer ce plan et ses configurations de fonctionnalités ?")) {
-      setPlans(plans.filter(p => p.id !== id));
+      setPlans(plans.filter(p => String(p.id) !== String(id)));
       setFeatureMatrix(prev => {
         const newMatrix = { ...prev };
-        delete newMatrix[id];
+        delete newMatrix[String(id)];
         return newMatrix;
       });
     }
   };
 
   const toggleFeature = (planId: string, featureId: string) => {
+    const key = String(planId);
     setFeatureMatrix(prev => {
-      const current = prev[planId] || [];
+      const current = prev[key] || [];
       if (current.includes(featureId)) {
-        return { ...prev, [planId]: current.filter(id => id !== featureId) };
+        return { ...prev, [key]: current.filter(id => id !== featureId) };
       }
-      return { ...prev, [planId]: [...current, featureId] };
+      return { ...prev, [key]: [...current, featureId] };
+    });
+  };
+
+  const toggleAllFeaturesForPlan = (planId: string) => {
+    const key = String(planId);
+    setFeatureMatrix(prev => {
+      const current = prev[key] || [];
+      const allChecked = APP_FEATURES.every(f => current.includes(f.id));
+      return {
+        ...prev,
+        [key]: allChecked ? [] : [...ALL_APP_FEATURE_IDS],
+      };
     });
   };
 
@@ -203,28 +278,28 @@ export default function SuperAdminProduct() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">Gestion de l'Offre Produit</h1>
-          <p className="text-slate-500">Configurez les plans, les prix et les fonctionnalités distribuées aux écoles.</p>
+          <h1 className="text-xl sm:text-2xl font-bold text-slate-900">Gestion de l'Offre Produit</h1>
+          <p className="text-xs sm:text-sm text-slate-500">Configurez les plans, les prix et les fonctionnalités distribuées aux écoles.</p>
         </div>
         <button 
           onClick={handlePublish}
           disabled={saving}
-          className="flex items-center gap-2 px-6 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-xl text-sm font-bold shadow-lg shadow-indigo-100 transition-all"
+          className="flex items-center justify-center gap-2 px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-xl text-sm font-bold shadow-lg shadow-indigo-100 transition-all shrink-0"
         >
           {saving ? <Loader2 size={18} className="animate-spin" /> : <Save size={18} />}
           {saving ? "Publication..." : "Publier les changements"}
         </button>
       </div>
 
-      <div className="flex p-1 bg-slate-100 rounded-2xl w-fit">
+      <div className="flex p-1 bg-slate-100 rounded-2xl w-full sm:w-fit overflow-x-auto scrollbar-hide">
         {TABS.map((tab) => (
           <button
             key={tab.id}
             onClick={() => handleTabChange(tab.id)}
             className={cn(
-              "flex items-center gap-2 px-6 py-2 rounded-xl text-sm font-bold transition-all",
+              "flex items-center gap-2 px-4 sm:px-6 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all whitespace-nowrap shrink-0",
               activeTab === tab.id 
                 ? "bg-white text-indigo-600 shadow-sm" 
                 : "text-slate-500 hover:text-slate-700"
@@ -289,11 +364,15 @@ export default function SuperAdminProduct() {
                      <div className="grid grid-cols-2 gap-4">
                        <div className="space-y-1">
                          <p className="text-[10px] font-bold text-slate-400 uppercase">Limite Élèves</p>
-                         <p className="text-xs font-bold text-slate-900">{Number(plan.student_limit || 0).toLocaleString('fr-FR')}</p>
+                         <p className="text-xs font-bold text-slate-900">
+                           {isUnlimitedLimit(plan.student_limit) ? 'Illimité' : Number(plan.student_limit).toLocaleString('fr-FR')}
+                         </p>
                        </div>
                        <div className="space-y-1">
                          <p className="text-[10px] font-bold text-slate-400 uppercase">Limite Staff</p>
-                         <p className="text-xs font-bold text-slate-900">{Number(plan.staff_limit || 0).toLocaleString('fr-FR')}</p>
+                         <p className="text-xs font-bold text-slate-900">
+                           {isUnlimitedLimit(plan.staff_limit) ? 'Illimité' : Number(plan.staff_limit).toLocaleString('fr-FR')}
+                         </p>
                        </div>
                      </div>
                    </div>
@@ -417,41 +496,71 @@ export default function SuperAdminProduct() {
               <table className="w-full border-collapse">
                 <thead>
                   <tr className="bg-slate-50">
-                    <th className="text-left p-6 text-xs font-bold text-slate-500 uppercase border-b border-slate-100 min-w-[250px]">Fonctionnalité</th>
-                    {plans.map(plan => (
-                      <th key={plan.id} className={cn(
-                        "p-6 text-center text-xs font-bold uppercase border-b border-slate-100",
-                        plan.active ? "text-slate-900" : "text-slate-400 italic"
-                      )}>
-                        {plan.name} {!plan.active && <span className="block text-[8px] mt-1 text-rose-400 font-black">(INACTIF)</span>}
-                      </th>
-                    ))}
+                    <th className="text-left p-4 sm:p-6 text-xs font-bold text-slate-500 uppercase border-b border-slate-100 min-w-[220px]">
+                      Fonctionnalités ({APP_FEATURES.length})
+                    </th>
+                    {plans.map(plan => {
+                      const planKey = String(plan.id);
+                      const checkedIds = featureMatrix[planKey] || [];
+                      const allChecked = APP_FEATURES.every(f => checkedIds.includes(f.id));
+                      return (
+                        <th key={plan.id} className={cn(
+                          "p-4 sm:p-6 text-center text-xs font-bold uppercase border-b border-slate-100 min-w-[140px]",
+                          plan.active ? "text-slate-900" : "text-slate-400 italic"
+                        )}>
+                          <div className="space-y-1.5 flex flex-col items-center">
+                            <span>{plan.name}</span>
+                            {!plan.active && <span className="text-[8px] text-rose-400 font-black">(INACTIF)</span>}
+                            <span className="text-[10px] text-indigo-600 font-extrabold">
+                              {checkedIds.length}/{APP_FEATURES.length} actives
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => toggleAllFeaturesForPlan(plan.id)}
+                              className={cn(
+                                "inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-black transition-all border normal-case",
+                                allChecked
+                                  ? "bg-slate-200 hover:bg-slate-300 text-slate-800 border-slate-300"
+                                  : "bg-indigo-600 hover:bg-indigo-700 text-white border-indigo-600 shadow-2xs"
+                              )}
+                            >
+                              <CheckCheck size={12} />
+                              <span>{allChecked ? 'Tout décocher' : 'Cocher tous'}</span>
+                            </button>
+                          </div>
+                        </th>
+                      );
+                    })}
                   </tr>
                 </thead>
                 <tbody>
                   {APP_FEATURES.map((feature) => (
                     <tr key={feature.id} className="hover:bg-slate-50/50 transition-all group">
-                      <td className="p-6 border-b border-slate-100">
+                      <td className="p-4 sm:p-5 border-b border-slate-100">
                         <div>
                           <p className="text-sm font-bold text-slate-900">{feature.name}</p>
                           <p className="text-[10px] font-bold text-indigo-500 uppercase tracking-widest">{feature.category}</p>
                         </div>
                       </td>
-                      {plans.map(plan => (
-                        <td key={plan.id} className="p-6 text-center border-b border-slate-100">
-                          <button 
-                            onClick={() => toggleFeature(plan.id, feature.id)}
-                            className={cn(
-                              "w-8 h-8 rounded-xl flex items-center justify-center transition-all mx-auto",
-                              featureMatrix[plan.id]?.includes(feature.id)
-                                ? "bg-emerald-50 text-emerald-600"
-                                : "bg-slate-100 text-slate-300 hover:bg-rose-50 hover:text-rose-400"
-                            )}
-                          >
-                            {featureMatrix[plan.id]?.includes(feature.id) ? <Check size={18} /> : <X size={18} />}
-                          </button>
-                        </td>
-                      ))}
+                      {plans.map(plan => {
+                        const planKey = String(plan.id);
+                        const active = featureMatrix[planKey]?.includes(feature.id);
+                        return (
+                          <td key={plan.id} className="p-4 sm:p-5 text-center border-b border-slate-100">
+                            <button 
+                              onClick={() => toggleFeature(plan.id, feature.id)}
+                              className={cn(
+                                "w-8 h-8 rounded-xl flex items-center justify-center transition-all mx-auto",
+                                active
+                                  ? "bg-emerald-50 text-emerald-600"
+                                  : "bg-slate-100 text-slate-300 hover:bg-rose-50 hover:text-rose-400"
+                              )}
+                            >
+                              {active ? <Check size={18} /> : <X size={18} />}
+                            </button>
+                          </td>
+                        );
+                      })}
                     </tr>
                   ))}
                 </tbody>
@@ -546,104 +655,207 @@ export default function SuperAdminProduct() {
         )}
       </div>
 
-      {isModalOpen && editingPlan && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden animate-in fade-in zoom-in duration-200">
-            <div className="p-6 border-b border-slate-100 flex items-center justify-between bg-slate-50">
-              <h3 className="font-bold text-slate-900">Configuration du Plan</h3>
-              <button onClick={() => setIsModalOpen(false)} className="p-2 hover:bg-white rounded-xl transition-all">
-                <X size={20} className="text-slate-400" />
-              </button>
-            </div>
-            <div className="p-8 space-y-6">
-              <div className="space-y-2">
-                <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Nom de l'offre</label>
-                <input 
-                  type="text" 
-                  value={editingPlan.name}
-                  onChange={(e) => setEditingPlan({ ...editingPlan, name: e.target.value })}
-                  placeholder="ex: Premium Plus"
-                  className="w-full p-4 bg-slate-50 border-none rounded-2xl text-sm font-medium focus:ring-2 focus:ring-indigo-500/20"
-                />
+      {isModalOpen && editingPlan && (() => {
+        const modalStudentsUnlimited = isUnlimitedLimit(editingPlan.student_limit);
+        const modalStaffUnlimited = isUnlimitedLimit(editingPlan.staff_limit);
+        const allModalChecked = modalFeatureIds.length === APP_FEATURES.length;
+        return (
+          <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4">
+            <div className="bg-white rounded-3xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col overflow-hidden animate-in fade-in zoom-in duration-200">
+              <div className="p-5 sm:p-6 border-b border-slate-100 flex items-center justify-between bg-slate-50 shrink-0">
+                <h3 className="font-bold text-slate-900">Configuration du Plan</h3>
+                <button onClick={() => setIsModalOpen(false)} className="p-2 hover:bg-white rounded-xl transition-all">
+                  <X size={20} className="text-slate-400" />
+                </button>
               </div>
-
-              <div className="grid grid-cols-2 gap-4">
+              <div className="p-5 sm:p-6 space-y-5 overflow-y-auto flex-1 custom-scrollbar">
                 <div className="space-y-2">
-                  <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Tarif (FCFA)</label>
+                  <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Nom de l'offre</label>
                   <input 
-                    type="number" 
-                    value={editingPlan.price}
-                    onChange={(e) => setEditingPlan({ ...editingPlan, price: parseInt(e.target.value) || 0 })}
-                    className="w-full p-4 bg-slate-50 border-none rounded-2xl text-sm font-medium focus:ring-2 focus:ring-indigo-500/20"
+                    type="text" 
+                    value={editingPlan.name}
+                    onChange={(e) => setEditingPlan({ ...editingPlan, name: e.target.value })}
+                    placeholder="ex: Premium Plus"
+                    className="w-full p-3.5 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-medium focus:ring-2 focus:ring-indigo-500/20"
                   />
                 </div>
-                <div className="space-y-2">
-                  <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Période / Durée</label>
-                  <select 
-                    value={editingPlan.period || 'mois'}
-                    onChange={(e) => setEditingPlan({ ...editingPlan, period: e.target.value })}
-                    className="w-full p-4 bg-slate-50 border-none rounded-2xl text-sm font-medium focus:ring-2 focus:ring-indigo-500/20"
-                  >
-                    <option value="mois">Par mois</option>
-                    <option value="an">Par an</option>
-                    <option value="trimestre">Par trimestre</option>
-                    <option value="14 jours">14 jours (Essai)</option>
-                  </select>
-                </div>
-              </div>
 
-              <div className="space-y-2">
-                <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Statut Initial</label>
-                <div className="flex items-center gap-3 p-4 bg-slate-50 rounded-2xl h-[52px]">
-                  <span className="text-xs font-bold text-slate-600">Actif</span>
-                  <button 
-                    type="button"
-                    onClick={() => setEditingPlan({ ...editingPlan, active: !editingPlan.active, is_active: !editingPlan.active ? 1 : 0 })}
-                    className={cn(
-                      "w-10 h-5 rounded-full transition-all relative ml-auto",
-                      editingPlan.active ? "bg-emerald-500" : "bg-slate-300"
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Tarif (FCFA)</label>
+                    <input 
+                      type="number" 
+                      value={editingPlan.price}
+                      onChange={(e) => setEditingPlan({ ...editingPlan, price: parseInt(e.target.value, 10) || 0 })}
+                      className="w-full p-3.5 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-medium focus:ring-2 focus:ring-indigo-500/20"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Période / Durée</label>
+                    <select 
+                      value={editingPlan.period || 'mois'}
+                      onChange={(e) => setEditingPlan({ ...editingPlan, period: e.target.value })}
+                      className="w-full p-3.5 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-medium focus:ring-2 focus:ring-indigo-500/20"
+                    >
+                      <option value="mois">Par mois</option>
+                      <option value="an">Par an</option>
+                      <option value="trimestre">Par trimestre</option>
+                      <option value="14 jours">14 jours (Essai)</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Limite Élèves</label>
+                      <label className="inline-flex items-center gap-1.5 cursor-pointer text-[11px] font-black text-indigo-700 bg-indigo-50 px-2.5 py-0.5 rounded-lg border border-indigo-200">
+                        <input
+                          type="checkbox"
+                          checked={modalStudentsUnlimited}
+                          onChange={(e) => setEditingPlan({ ...editingPlan, student_limit: e.target.checked ? 0 : 500 })}
+                          className="rounded border-indigo-300 text-indigo-600 focus:ring-0"
+                        />
+                        <span>Illimité</span>
+                      </label>
+                    </div>
+                    {modalStudentsUnlimited ? (
+                      <div className="w-full p-3.5 bg-indigo-50/70 border border-indigo-200 rounded-2xl text-sm font-black text-indigo-700">
+                        Élèves illimités (∞)
+                      </div>
+                    ) : (
+                      <input 
+                        type="number" 
+                        min="1"
+                        value={editingPlan.student_limit}
+                        onChange={(e) => setEditingPlan({ ...editingPlan, student_limit: Math.max(1, parseInt(e.target.value, 10) || 1) })}
+                        className="w-full p-3.5 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-medium focus:ring-2 focus:ring-indigo-500/20"
+                      />
                     )}
-                  >
-                    <div className={cn(
-                      "absolute top-0.5 w-4 h-4 bg-white rounded-full shadow-sm transition-all",
-                      editingPlan.active ? "right-0.5" : "left-0.5"
-                    )} />
-                  </button>
+                  </div>
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Limite Staff</label>
+                      <label className="inline-flex items-center gap-1.5 cursor-pointer text-[11px] font-black text-emerald-700 bg-emerald-50 px-2.5 py-0.5 rounded-lg border border-emerald-200">
+                        <input
+                          type="checkbox"
+                          checked={modalStaffUnlimited}
+                          onChange={(e) => setEditingPlan({ ...editingPlan, staff_limit: e.target.checked ? 0 : 50 })}
+                          className="rounded border-emerald-300 text-emerald-600 focus:ring-0"
+                        />
+                        <span>Illimité</span>
+                      </label>
+                    </div>
+                    {modalStaffUnlimited ? (
+                      <div className="w-full p-3.5 bg-emerald-50/70 border border-emerald-200 rounded-2xl text-sm font-black text-emerald-700">
+                        Staff illimité (∞)
+                      </div>
+                    ) : (
+                      <input 
+                        type="number" 
+                        min="1"
+                        value={editingPlan.staff_limit}
+                        onChange={(e) => setEditingPlan({ ...editingPlan, staff_limit: Math.max(1, parseInt(e.target.value, 10) || 1) })}
+                        className="w-full p-3.5 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-medium focus:ring-2 focus:ring-indigo-500/20"
+                      />
+                    )}
+                  </div>
                 </div>
-              </div>
 
-              <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-2">
-                  <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Limite Élèves</label>
-                  <input 
-                    type="number" 
-                    value={editingPlan.student_limit}
-                    onChange={(e) => setEditingPlan({ ...editingPlan, student_limit: parseInt(e.target.value) || 0 })}
-                    className="w-full p-4 bg-slate-50 border-none rounded-2xl text-sm font-medium focus:ring-2 focus:ring-indigo-500/20"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Limite Staff</label>
-                  <input 
-                    type="number" 
-                    value={editingPlan.staff_limit}
-                    onChange={(e) => setEditingPlan({ ...editingPlan, staff_limit: parseInt(e.target.value) || 0 })}
-                    className="w-full p-4 bg-slate-50 border-none rounded-2xl text-sm font-medium focus:ring-2 focus:ring-indigo-500/20"
-                  />
-                </div>
-              </div>
+                {/* All App Features grouped in modal */}
+                <div className="space-y-2.5 pt-2 border-t border-slate-100">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <label className="text-xs font-bold text-slate-700 uppercase tracking-widest block">
+                        Fonctionnalités actives ({modalFeatureIds.length}/{APP_FEATURES.length})
+                      </label>
+                      <p className="text-[11px] text-slate-400">Chaque formule fonctionne strictement avec ses modules cochés.</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setModalFeatureIds(allModalChecked ? [] : [...ALL_APP_FEATURE_IDS])}
+                      className={cn(
+                        "inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-black transition-all border",
+                        allModalChecked
+                          ? "bg-slate-200 hover:bg-slate-300 text-slate-800 border-slate-300"
+                          : "bg-indigo-600 hover:bg-indigo-700 text-white border-indigo-600 shadow-xs"
+                      )}
+                    >
+                      <CheckCheck size={14} />
+                      <span>{allModalChecked ? 'Tout décocher' : 'Cocher tous'}</span>
+                    </button>
+                  </div>
 
-              <button 
-                onClick={savePlanConfig}
-                className="w-full py-4 bg-indigo-600 text-white rounded-2xl text-sm font-bold shadow-xl shadow-indigo-100 hover:bg-indigo-700 transition-all flex items-center justify-center gap-2"
-              >
-                <Save size={18} />
-                Enregistrer la configuration
-              </button>
+                  <div className="max-h-56 overflow-y-auto p-3 bg-slate-50 rounded-2xl border border-slate-200 space-y-3">
+                    {featureCategories.map(([category, feats]) => (
+                      <div key={category} className="space-y-1.5">
+                        <p className="text-[10px] font-black text-indigo-600 uppercase tracking-wider">{category}</p>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                          {feats.map((feat) => {
+                            const checked = modalFeatureIds.includes(feat.id);
+                            return (
+                              <label
+                                key={feat.id}
+                                className={cn(
+                                  "flex items-center gap-2 cursor-pointer text-xs p-1.5 rounded-lg border transition-colors select-none",
+                                  checked
+                                    ? "bg-white border-indigo-200 text-slate-900 font-semibold shadow-2xs"
+                                    : "border-transparent text-slate-600 hover:bg-white/60"
+                                )}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  onChange={() =>
+                                    setModalFeatureIds((prev) =>
+                                      prev.includes(feat.id) ? prev.filter((id) => id !== feat.id) : [...prev, feat.id]
+                                    )
+                                  }
+                                  className="rounded border-slate-300 text-indigo-600 focus:ring-0 w-3.5 h-3.5 shrink-0"
+                                />
+                                <span className="truncate">{feat.name}</span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Statut Initial</label>
+                  <div className="flex items-center gap-3 p-3.5 bg-slate-50 rounded-2xl h-[52px]">
+                    <span className="text-xs font-bold text-slate-600">Actif</span>
+                    <button 
+                      type="button"
+                      onClick={() => setEditingPlan({ ...editingPlan, active: !editingPlan.active, is_active: !editingPlan.active ? 1 : 0 })}
+                      className={cn(
+                        "w-10 h-5 rounded-full transition-all relative ml-auto",
+                        editingPlan.active ? "bg-emerald-500" : "bg-slate-300"
+                      )}
+                    >
+                      <div className={cn(
+                        "absolute top-0.5 w-4 h-4 bg-white rounded-full shadow-sm transition-all",
+                        editingPlan.active ? "right-0.5" : "left-0.5"
+                      )} />
+                    </button>
+                  </div>
+                </div>
+
+                <button 
+                  type="button"
+                  onClick={savePlanConfig}
+                  className="w-full py-3.5 bg-indigo-600 text-white rounded-2xl text-sm font-bold shadow-xl shadow-indigo-100 hover:bg-indigo-700 transition-all flex items-center justify-center gap-2"
+                >
+                  <Save size={18} />
+                  Enregistrer la configuration
+                </button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
     </div>
   );
 }

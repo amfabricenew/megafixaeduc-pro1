@@ -1,12 +1,12 @@
 import React, { useEffect, useState } from 'react';
 import { Crown, Sparkles, ArrowRight, ShieldAlert, ArrowLeft } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
-import { SubscriptionPlan } from '../utils/subscriptions';
+import { SubscriptionPlan, SchoolPlanDetails, formatStudentLimit, formatStaffLimit } from '../utils/subscriptions';
 import { useAuth } from '../contexts/AuthContext';
 
 interface SubscriptionGatedViewProps {
   path: string;
-  currentPlan?: SubscriptionPlan | string;
+  currentPlan?: SchoolPlanDetails | SubscriptionPlan | string;
 }
 
 export default function SubscriptionGatedView({ path, currentPlan = '' }: SubscriptionGatedViewProps) {
@@ -24,17 +24,22 @@ export default function SubscriptionGatedView({ path, currentPlan = '' }: Subscr
       .catch(() => {});
   }, []);
 
-  const target = (currentPlan || '').toString().toLowerCase().trim();
+  const planObj = typeof currentPlan === 'object' && currentPlan !== null ? currentPlan : null;
+  const planName = planObj ? planObj.name : String(currentPlan || '');
+  const target = planName.toLowerCase().trim();
   const matchedPlan = plans.find(p => (p.name || '').toLowerCase().trim() === target || String(p.id).toLowerCase() === target);
   const recommendedPlan = plans.find(p => p.is_recommended) || plans[plans.length - 1];
-  const currentPlanLabel = matchedPlan?.name || currentPlan || 'Formule actuelle';
-  const currentStudentLimit = matchedPlan?.student_limit
-    ? (Number(matchedPlan.student_limit) >= 999999 ? 'Élèves illimités' : `Jusqu'à ${matchedPlan.student_limit} élèves`)
+  const currentPlanLabel = matchedPlan?.name || planName || 'Formule actuelle';
+
+  const rawStudentLimit = planObj ? planObj.student_limit : matchedPlan?.student_limit;
+  const rawStaffLimit = planObj ? planObj.staff_limit : matchedPlan?.staff_limit;
+  const currentStudentLimit = rawStudentLimit !== undefined
+    ? `${formatStudentLimit(rawStudentLimit)} • ${formatStaffLimit(rawStaffLimit ?? 0)}`
     : 'Selon configuration super-admin';
 
   return (
-    <div className="min-h-[70vh] flex items-center justify-center p-4">
-      <div className="max-w-2xl w-full bg-white border border-slate-200 rounded-3xl shadow-xl p-8 sm:p-10 text-center relative overflow-hidden">
+    <div className="min-h-[60vh] flex items-center justify-center p-2 sm:p-4">
+      <div className="max-w-2xl w-full bg-white border border-slate-200 rounded-3xl shadow-xl p-6 sm:p-10 text-center relative overflow-hidden">
         
         {/* Glow ambient background */}
         <div className="absolute -top-24 -right-24 w-64 h-64 bg-amber-500/10 rounded-full blur-3xl pointer-events-none" />
@@ -46,16 +51,16 @@ export default function SubscriptionGatedView({ path, currentPlan = '' }: Subscr
 
         <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-500/10 text-amber-700 text-xs font-black uppercase tracking-wider mb-3">
           <Sparkles className="w-3.5 h-3.5" />
-          Fonctionnalité Supérieure
+          Module Non Inclus
         </div>
 
-        <h2 className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight">
-          Module non inclus dans votre formule actuelle
+        <h2 className="text-xl sm:text-3xl font-black text-slate-900 tracking-tight">
+          Module non actif dans votre formule actuelle
         </h2>
 
         <p className="text-slate-600 text-sm mt-3 leading-relaxed max-w-lg mx-auto">
           Votre établissement est actuellement sous la formule <strong className="text-slate-900 font-bold">{currentPlanLabel}</strong>. 
-          Pour débloquer l'accès à ce module et à toutes ses fonctionnalités associées, veuillez mettre à niveau l'abonnement de votre établissement.
+          Cette fonctionnalité n'est pas activée dans cette offre. Veuillez mettre à niveau votre abonnement pour y accéder.
         </p>
 
         {/* Feature comparison highlights */}

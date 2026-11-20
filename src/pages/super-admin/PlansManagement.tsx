@@ -30,7 +30,13 @@ import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { motion, AnimatePresence } from 'framer-motion';
 import toast from 'react-hot-toast';
-import { APP_FEATURES } from '../../constants/productFeatures';
+import {
+  APP_FEATURES,
+  ALL_APP_FEATURE_IDS,
+  resolvePlanFeatureIds,
+  isUnlimitedLimit,
+} from '../../constants/productFeatures';
+import { syncCloudVaultWithFirestore } from '../../utils/cloudVaultSync';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -42,6 +48,7 @@ export interface Plan {
   price: number;
   period: string;
   features: string[];
+  featureIds?: string[];
   is_active: boolean;
   type: 'trial' | 'paid';
   color: 'slate' | 'emerald' | 'indigo' | 'amber' | 'purple';
@@ -106,10 +113,56 @@ export default function PlansManagement() {
       if (response.ok) {
         toast.success(nextStatus ? `Offre « ${plan.name} » activée` : `Offre « ${plan.name} » désactivée`);
         setPlans(prev => prev.map(p => p.id === plan.id ? { ...p, is_active: nextStatus } : p));
+        window.dispatchEvent(new Event('school_subscription_updated'));
+        syncCloudVaultWithFirestore().catch(() => {});
       } else {
         toast.error("Erreur lors de la mise à jour du statut");
       }
     } catch (error) {
+      toast.error("Erreur de communication avec le serveur");
+    }
+  };
+
+  const handleToggleAllFeaturesForPlan = async (plan: Plan) => {
+    const resolvedIds = resolvePlanFeatureIds(plan.features, plan.featureIds, plan.name);
+    const allChecked = APP_FEATURES.every(f => resolvedIds.includes(f.id));
+    const canonicalNames = new Set(APP_FEATURES.map(f => f.name.toLowerCase()));
+    const customFeatures = (Array.isArray(plan.features) ? plan.features : []).filter(
+      f => !canonicalNames.has(String(f).toLowerCase().trim()) && !APP_FEATURES.some(af => af.id === String(f).toLowerCase().trim())
+    );
+    const nextFeatureIds = allChecked ? [] : [...ALL_APP_FEATURE_IDS];
+    const nextFeatures = allChecked
+      ? customFeatures
+      : [...APP_FEATURES.map(f => f.name), ...customFeatures];
+
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch(`/api/super-admin/plans/${plan.id}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          ...plan,
+          features: nextFeatures,
+          featureIds: nextFeatureIds,
+        })
+      });
+
+      if (response.ok) {
+        toast.success(
+          allChecked
+            ? `Toutes les fonctionnalités décochées pour « ${plan.name} »`
+            : `Toutes les ${APP_FEATURES.length} fonctionnalités activées pour « ${plan.name} »`
+        );
+        fetchPlans();
+        window.dispatchEvent(new Event('school_subscription_updated'));
+        syncCloudVaultWithFirestore().catch(() => {});
+      } else {
+        toast.error("Erreur lors de la mise à jour des fonctionnalités");
+      }
+    } catch {
       toast.error("Erreur de communication avec le serveur");
     }
   };
@@ -135,6 +188,8 @@ export default function PlansManagement() {
         setIsEditing(null);
         setIsAdding(false);
         fetchPlans();
+        window.dispatchEvent(new Event('school_subscription_updated'));
+        syncCloudVaultWithFirestore().catch(() => {});
       } else {
         toast.error("Erreur lors de l'enregistrement de la formule");
       }
@@ -157,6 +212,8 @@ export default function PlansManagement() {
         toast.success(`Offre « ${planToDelete.name} » supprimée`);
         setPlans(prev => prev.filter(p => p.id !== planToDelete.id));
         setPlanToDelete(null);
+        window.dispatchEvent(new Event('school_subscription_updated'));
+        syncCloudVaultWithFirestore().catch(() => {});
       } else {
         toast.error("Impossible de supprimer cette formule");
       }
@@ -395,7 +452,7 @@ export default function PlansManagement() {
                       <div>
                         <p className="text-[10px] text-slate-400 font-bold uppercase leading-none">Élèves max</p>
                         <p className="text-xs font-black text-slate-800 mt-1">
-                          {plan.student_limit ? plan.student_limit.toLocaleString() : 'Illimité'}
+                          {isUnlimitedLimit(plan.student_limit) ? 'Illimité' : Number(plan.student_limit).toLocaleString('fr-FR')}
                         </p>
                       </div>
                     </div>
@@ -404,7 +461,7 @@ export default function PlansManagement() {
                       <div>
                         <p className="text-[10px] text-slate-400 font-bold uppercase leading-none">Personnel/Staff</p>
                         <p className="text-xs font-black text-slate-800 mt-1">
-                          {plan.staff_limit ? plan.staff_limit.toLocaleString() : 'Illimité'}
+                          {isUnlimitedLimit(plan.staff_limit) ? 'Illimité' : Number(plan.staff_limit).toLocaleString('fr-FR')}
                         </p>
                       </div>
                     </div>
@@ -412,63 +469,82 @@ export default function PlansManagement() {
                 </div>
 
                 {/* Features Section */}
-                <div className="p-6 md:p-7 flex-1 bg-slate-50/40 space-y-4">
-                  <div className="flex items-center justify-between">
-                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-wider">
-                      {showAllFeatures ? 'Toutes les fonctionnalités' : 'Fonctionnalités incluses'}
-                    </p>
-                    <span className="text-[10px] font-bold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-full">
-                      {planFeatures.length} configurées
-                    </span>
-                  </div>
+                {(() => {
+                  const activeIds = resolvePlanFeatureIds(planFeatures, plan.featureIds, plan.name);
+                  const allModulesChecked = APP_FEATURES.every(f => activeIds.includes(f.id));
+                  return (
+                    <div className="p-6 md:p-7 flex-1 bg-slate-50/40 space-y-4">
+                      <div className="flex items-center justify-between gap-2 flex-wrap">
+                        <p className="text-[10px] font-black text-slate-400 uppercase tracking-wider">
+                          {showAllFeatures ? 'Toutes les fonctionnalités' : 'Fonctionnalités incluses'}
+                        </p>
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[10px] font-bold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-full">
+                            {activeIds.length}/{APP_FEATURES.length} actives
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => handleToggleAllFeaturesForPlan(plan)}
+                            className={cn(
+                              "inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-black transition-all border",
+                              allModulesChecked
+                                ? "bg-slate-200 hover:bg-slate-300 text-slate-700 border-slate-300"
+                                : "bg-amber-500 hover:bg-amber-400 text-slate-950 border-amber-500 shadow-2xs"
+                            )}
+                            title={allModulesChecked ? 'Décocher toutes les fonctionnalités' : 'Cocher toutes les fonctionnalités'}
+                          >
+                            <CheckCheck size={11} />
+                            <span>{allModulesChecked ? 'Tout décocher' : 'Cocher tous'}</span>
+                          </button>
+                        </div>
+                      </div>
 
-                  <div className="space-y-2 max-h-72 overflow-y-auto pr-1 text-xs">
-                    {/* Custom Plan features */}
-                    {planFeatures.length > 0 && (
-                      <div className="space-y-1.5 pb-2">
-                        {planFeatures.map((feat, idx) => (
-                          <div key={idx} className="flex items-start gap-2.5 text-slate-700 font-medium">
-                            <CheckCircle2 size={15} className="text-emerald-500 shrink-0 mt-0.5" />
-                            <span className="leading-tight">{feat}</span>
+                      <div className="space-y-2 max-h-72 overflow-y-auto pr-1 text-xs">
+                        {/* Custom Plan features */}
+                        {planFeatures.length > 0 && (
+                          <div className="space-y-1.5 pb-2">
+                            {planFeatures.map((feat, idx) => (
+                              <div key={idx} className="flex items-start gap-2.5 text-slate-700 font-medium">
+                                <CheckCircle2 size={15} className="text-emerald-500 shrink-0 mt-0.5" />
+                                <span className="leading-tight">{feat}</span>
+                              </div>
+                            ))}
                           </div>
-                        ))}
-                      </div>
-                    )}
+                        )}
 
-                    {/* Extended Platform Features Check if enabled */}
-                    {showAllFeatures && (
-                      <div className="pt-2 border-t border-slate-200/60 space-y-1.5">
-                        <p className="text-[9px] font-bold text-slate-400 uppercase">Modules Système</p>
-                        {APP_FEATURES.map((feature) => {
-                          const isIncluded = planFeatures.some(f => 
-                            f.toLowerCase().includes(feature.name.toLowerCase()) || 
-                            f.toLowerCase() === feature.id
-                          );
+                        {/* Extended Platform Features Check if enabled */}
+                        {showAllFeatures && (
+                          <div className="pt-2 border-t border-slate-200/60 space-y-1.5">
+                            <p className="text-[9px] font-bold text-slate-400 uppercase">Modules Système ({APP_FEATURES.length})</p>
+                            {APP_FEATURES.map((feature) => {
+                              const isIncluded = activeIds.includes(feature.id);
 
-                          return (
-                            <div key={feature.id} className="flex items-center justify-between py-0.5">
-                              <span className={cn(
-                                "text-[11px] truncate pr-2",
-                                isIncluded ? "text-slate-800 font-semibold" : "text-slate-400"
-                              )}>
-                                {feature.name}
-                              </span>
-                              {isIncluded ? (
-                                <span className="w-4 h-4 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center shrink-0">
-                                  <Check size={10} strokeWidth={3} />
-                                </span>
-                              ) : (
-                                <span className="w-4 h-4 rounded-full bg-slate-100 text-slate-300 flex items-center justify-center shrink-0">
-                                  <X size={10} strokeWidth={3} />
-                                </span>
-                              )}
-                            </div>
-                          );
-                        })}
+                              return (
+                                <div key={feature.id} className="flex items-center justify-between py-0.5">
+                                  <span className={cn(
+                                    "text-[11px] truncate pr-2",
+                                    isIncluded ? "text-slate-800 font-semibold" : "text-slate-400"
+                                  )}>
+                                    {feature.name}
+                                  </span>
+                                  {isIncluded ? (
+                                    <span className="w-4 h-4 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center shrink-0">
+                                      <Check size={10} strokeWidth={3} />
+                                    </span>
+                                  ) : (
+                                    <span className="w-4 h-4 rounded-full bg-slate-100 text-slate-300 flex items-center justify-center shrink-0">
+                                      <X size={10} strokeWidth={3} />
+                                    </span>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
                       </div>
-                    )}
-                  </div>
-                </div>
+                    </div>
+                  );
+                })()}
 
                 {/* Direct Action Buttons on Each Plan Board */}
                 <div className="p-4 md:p-5 bg-white border-t border-slate-100 space-y-2">
@@ -595,21 +671,48 @@ function PlanForm({
   onSave: (p: Partial<Plan>) => void, 
   onCancel: () => void 
 }) {
-  const [formData, setFormData] = useState<Partial<Plan>>(initialData || {
-    name: '',
-    price: 25000,
-    period: 'mois',
-    features: ['Cycle Primaire & Secondaire', 'Gestion des Élèves & Classes', 'Bulletins de Notes Officiels'],
-    type: 'paid',
-    color: 'indigo',
-    is_active: true,
-    is_recommended: false,
-    student_limit: 500,
-    staff_limit: 50,
-    description: ''
+  const initialFeatureIds = React.useMemo(() => {
+    if (initialData) {
+      return resolvePlanFeatureIds(initialData.features, initialData.featureIds, initialData.name);
+    }
+    return ['cycle_primaire', 'cycle_secondaire', 'dashboard', 'classes', 'students', 'teachers', 'subjects', 'grades'];
+  }, [initialData]);
+
+  const [selectedFeatureIds, setSelectedFeatureIds] = useState<string[]>(initialFeatureIds);
+  const [formData, setFormData] = useState<Partial<Plan>>(() => {
+    if (initialData) {
+      return {
+        ...initialData,
+        student_limit: isUnlimitedLimit(initialData.student_limit) ? 0 : Number(initialData.student_limit),
+        staff_limit: isUnlimitedLimit(initialData.staff_limit) ? 0 : Number(initialData.staff_limit),
+      };
+    }
+    return {
+      name: '',
+      price: 25000,
+      period: 'mois',
+      features: [],
+      featureIds: initialFeatureIds,
+      type: 'paid',
+      color: 'indigo',
+      is_active: true,
+      is_recommended: false,
+      student_limit: 500,
+      staff_limit: 50,
+      description: ''
+    };
   });
 
   const [newFeatureText, setNewFeatureText] = useState('');
+
+  const customFeatures = React.useMemo(() => {
+    const canonicalNames = new Set(APP_FEATURES.map(f => f.name.toLowerCase()));
+    const canonicalIds = new Set(APP_FEATURES.map(f => f.id.toLowerCase()));
+    return (formData.features || []).filter(f => {
+      const low = String(f || '').toLowerCase().trim();
+      return low && !canonicalNames.has(low) && !canonicalIds.has(low);
+    });
+  }, [formData.features]);
 
   const handleAddFeature = () => {
     if (!newFeatureText.trim()) return;
@@ -621,27 +724,41 @@ function PlanForm({
   };
 
   const handleRemoveFeature = (index: number) => {
+    const feat = (formData.features || [])[index];
     setFormData(prev => ({
       ...prev,
       features: (prev.features || []).filter((_, i) => i !== index)
     }));
-  };
-
-  const handleToggleStandardFeature = (featureName: string) => {
-    const current = formData.features || [];
-    const exists = current.some(f => f.toLowerCase() === featureName.toLowerCase());
-    if (exists) {
-      setFormData(prev => ({
-        ...prev,
-        features: current.filter(f => f.toLowerCase() !== featureName.toLowerCase())
-      }));
-    } else {
-      setFormData(prev => ({
-        ...prev,
-        features: [...current, featureName]
-      }));
+    if (feat) {
+      const matched = APP_FEATURES.find(f => f.name.toLowerCase() === String(feat).toLowerCase() || f.id === feat);
+      if (matched) {
+        setSelectedFeatureIds(prev => prev.filter(id => id !== matched.id));
+      }
     }
   };
+
+  const handleToggleFeatureId = (featureId: string) => {
+    setSelectedFeatureIds(prev =>
+      prev.includes(featureId) ? prev.filter(id => id !== featureId) : [...prev, featureId]
+    );
+  };
+
+  const allFeaturesChecked = selectedFeatureIds.length === APP_FEATURES.length;
+  const handleToggleAllFeatures = () => {
+    setSelectedFeatureIds(allFeaturesChecked ? [] : [...ALL_APP_FEATURE_IDS]);
+  };
+
+  const featureCategories = React.useMemo(() => {
+    const groups: Record<string, typeof APP_FEATURES> = {};
+    APP_FEATURES.forEach((f) => {
+      if (!groups[f.category]) groups[f.category] = [];
+      groups[f.category].push(f);
+    });
+    return Object.entries(groups);
+  }, []);
+
+  const studentsUnlimited = isUnlimitedLimit(formData.student_limit);
+  const staffUnlimited = isUnlimitedLimit(formData.staff_limit);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -649,27 +766,38 @@ function PlanForm({
       toast.error("Veuillez saisir un nom pour cette offre");
       return;
     }
-    onSave(formData);
+    const activeFeatureNames = APP_FEATURES
+      .filter(f => selectedFeatureIds.includes(f.id))
+      .map(f => f.name);
+    const mergedFeatures = Array.from(new Set([...activeFeatureNames, ...customFeatures]));
+
+    onSave({
+      ...formData,
+      features: mergedFeatures,
+      featureIds: selectedFeatureIds,
+      student_limit: studentsUnlimited ? 0 : Math.max(1, Number(formData.student_limit) || 1),
+      staff_limit: staffUnlimited ? 0 : Math.max(1, Number(formData.staff_limit) || 1),
+    });
   };
 
   return (
-    <form onSubmit={handleSubmit} className="p-6 md:p-8 flex flex-col max-h-[90vh]">
+    <form onSubmit={handleSubmit} className="p-5 sm:p-6 md:p-8 flex flex-col max-h-[90vh]">
       <div className="flex items-center justify-between pb-4 border-b border-slate-100">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-amber-500/10 text-amber-600 flex items-center justify-center font-bold">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="w-10 h-10 rounded-xl bg-amber-500/10 text-amber-600 flex items-center justify-center font-bold shrink-0">
             <Package size={20} />
           </div>
-          <div>
-            <h3 className="text-base font-black text-slate-900">
+          <div className="min-w-0">
+            <h3 className="text-base font-black text-slate-900 truncate">
               {initialData ? `Modifier l'offre « ${initialData.name} »` : 'Créer une Nouvelle Formule'}
             </h3>
-            <p className="text-xs text-slate-400">Configurez la planche tarifaire et toutes ses caractéristiques.</p>
+            <p className="text-xs text-slate-400 truncate">Configurez la planche tarifaire et toutes ses caractéristiques.</p>
           </div>
         </div>
         <button 
           type="button" 
           onClick={onCancel} 
-          className="p-1.5 text-slate-400 hover:text-slate-600 rounded-xl hover:bg-slate-100 transition-all"
+          className="p-1.5 text-slate-400 hover:text-slate-600 rounded-xl hover:bg-slate-100 transition-all shrink-0"
         >
           <X size={18} />
         </button>
@@ -733,30 +861,64 @@ function PlanForm({
           </div>
         </div>
 
-        {/* Quotas */}
+        {/* Quotas avec option explicite Illimité */}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div className="space-y-1.5">
-            <label className="font-bold text-slate-700">Nombre max d'élèves</label>
-            <input 
-              type="number" 
-              min="0"
-              value={formData.student_limit ?? 500}
-              onChange={e => setFormData({ ...formData, student_limit: parseInt(e.target.value, 10) || 0 })}
-              className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500"
-              placeholder="Ex: 500 (0 pour illimité)"
-            />
+            <div className="flex items-center justify-between gap-2">
+              <label className="font-bold text-slate-700">Nombre max d'élèves</label>
+              <label className="inline-flex items-center gap-1.5 cursor-pointer select-none text-[11px] font-extrabold text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-lg border border-indigo-200">
+                <input
+                  type="checkbox"
+                  checked={studentsUnlimited}
+                  onChange={e => setFormData({ ...formData, student_limit: e.target.checked ? 0 : 500 })}
+                  className="rounded border-indigo-300 text-indigo-600 focus:ring-0 w-3.5 h-3.5"
+                />
+                <span>Illimité</span>
+              </label>
+            </div>
+            {studentsUnlimited ? (
+              <div className="w-full px-3.5 py-2.5 bg-indigo-50/70 border border-indigo-200 rounded-xl text-xs font-black text-indigo-700">
+                Élèves illimités (∞)
+              </div>
+            ) : (
+              <input 
+                type="number" 
+                min="1"
+                value={formData.student_limit ?? 500}
+                onChange={e => setFormData({ ...formData, student_limit: Math.max(1, parseInt(e.target.value, 10) || 1) })}
+                className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500"
+                placeholder="Ex: 500"
+              />
+            )}
           </div>
 
           <div className="space-y-1.5">
-            <label className="font-bold text-slate-700">Nombre max d'enseignants & staff</label>
-            <input 
-              type="number" 
-              min="0"
-              value={formData.staff_limit ?? 50}
-              onChange={e => setFormData({ ...formData, staff_limit: parseInt(e.target.value, 10) || 0 })}
-              className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500"
-              placeholder="Ex: 50 (0 pour illimité)"
-            />
+            <div className="flex items-center justify-between gap-2">
+              <label className="font-bold text-slate-700">Nombre max de staff</label>
+              <label className="inline-flex items-center gap-1.5 cursor-pointer select-none text-[11px] font-extrabold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-lg border border-emerald-200">
+                <input
+                  type="checkbox"
+                  checked={staffUnlimited}
+                  onChange={e => setFormData({ ...formData, staff_limit: e.target.checked ? 0 : 50 })}
+                  className="rounded border-emerald-300 text-emerald-600 focus:ring-0 w-3.5 h-3.5"
+                />
+                <span>Illimité</span>
+              </label>
+            </div>
+            {staffUnlimited ? (
+              <div className="w-full px-3.5 py-2.5 bg-emerald-50/70 border border-emerald-200 rounded-xl text-xs font-black text-emerald-700">
+                Staff illimité (∞)
+              </div>
+            ) : (
+              <input 
+                type="number" 
+                min="1"
+                value={formData.staff_limit ?? 50}
+                onChange={e => setFormData({ ...formData, staff_limit: Math.max(1, parseInt(e.target.value, 10) || 1) })}
+                className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500"
+                placeholder="Ex: 50"
+              />
+            )}
           </div>
         </div>
 
@@ -794,41 +956,75 @@ function PlanForm({
           </div>
         </div>
 
-        {/* Rapid Feature Checklist from APP_FEATURES */}
-        <div className="space-y-2 pt-2 border-t border-slate-100">
-          <label className="font-bold text-slate-700 block">
-            Sélection rapide parmi les fonctionnalités officielles
-          </label>
-          <div className="grid grid-cols-2 gap-2 max-h-36 overflow-y-auto pr-1 bg-slate-50 p-2.5 rounded-xl border border-slate-200">
-            {APP_FEATURES.map((feat) => {
-              const checked = (formData.features || []).some(f => 
-                f.toLowerCase() === feat.name.toLowerCase() || f.toLowerCase() === feat.id
-              );
-              return (
-                <label key={feat.id} className="flex items-center gap-2 cursor-pointer text-[11px] text-slate-700 hover:text-slate-900 select-none">
-                  <input
-                    type="checkbox"
-                    checked={checked}
-                    onChange={() => handleToggleStandardFeature(feat.name)}
-                    className="rounded border-slate-300 text-amber-500 focus:ring-0 w-3.5 h-3.5"
-                  />
-                  <span className="truncate">{feat.name}</span>
-                </label>
-              );
-            })}
+        {/* All App Features Checklist grouped by Category with Cocher tous */}
+        <div className="space-y-2.5 pt-3 border-t border-slate-100">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <label className="font-bold text-slate-800 block">
+                Toutes les fonctionnalités de l'application ({selectedFeatureIds.length}/{APP_FEATURES.length} sélectionnées)
+              </label>
+              <p className="text-[10px] text-slate-400">
+                Seules les fonctionnalités cochées seront actives dans les écoles utilisant cette formule.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={handleToggleAllFeatures}
+              className={cn(
+                "inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[11px] font-black transition-all border",
+                allFeaturesChecked
+                  ? "bg-slate-200 hover:bg-slate-300 text-slate-800 border-slate-300"
+                  : "bg-amber-500 hover:bg-amber-400 text-slate-950 border-amber-500 shadow-xs"
+              )}
+            >
+              <CheckCheck size={14} />
+              <span>{allFeaturesChecked ? 'Tout décocher' : 'Cocher tous'}</span>
+            </button>
+          </div>
+
+          <div className="max-h-60 overflow-y-auto pr-1 bg-slate-50 p-3 rounded-2xl border border-slate-200 space-y-3">
+            {featureCategories.map(([category, feats]) => (
+              <div key={category} className="space-y-1.5">
+                <p className="text-[10px] font-black text-indigo-600 uppercase tracking-wider">{category}</p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                  {feats.map((feat) => {
+                    const checked = selectedFeatureIds.includes(feat.id);
+                    return (
+                      <label
+                        key={feat.id}
+                        className={cn(
+                          "flex items-center gap-2 cursor-pointer text-[11px] p-1.5 rounded-lg border transition-colors select-none",
+                          checked
+                            ? "bg-white border-amber-300 text-slate-900 font-semibold shadow-2xs"
+                            : "border-transparent text-slate-600 hover:bg-white/60"
+                        )}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => handleToggleFeatureId(feat.id)}
+                          className="rounded border-slate-300 text-amber-500 focus:ring-0 w-3.5 h-3.5 shrink-0"
+                        />
+                        <span className="truncate">{feat.name}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
           </div>
         </div>
 
         {/* Custom Features List */}
         <div className="space-y-2 pt-2">
-          <label className="font-bold text-slate-700 block">Fonctionnalités personnalisées</label>
+          <label className="font-bold text-slate-700 block">Mentions commerciales additionnelles (optionnel)</label>
           <div className="flex gap-2">
             <input 
               type="text" 
               value={newFeatureText}
               onChange={e => setNewFeatureText(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); handleAddFeature(); } }}
-              placeholder="Ex: Support téléphonique 24h/24"
+              placeholder="Ex: Support téléphonique prioritaire 24h/24"
               className="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold focus:outline-none focus:border-amber-500"
             />
             <button
@@ -840,23 +1036,25 @@ function PlanForm({
             </button>
           </div>
 
-          <div className="flex flex-wrap gap-1.5 mt-2">
-            {(formData.features || []).map((feat, idx) => (
-              <span 
-                key={idx} 
-                className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-slate-100 text-slate-700 rounded-lg text-[11px] font-semibold"
-              >
-                {feat}
-                <button 
-                  type="button" 
-                  onClick={() => handleRemoveFeature(idx)}
-                  className="text-slate-400 hover:text-rose-500"
+          {customFeatures.length > 0 && (
+            <div className="flex flex-wrap gap-1.5 mt-2">
+              {customFeatures.map((feat, idx) => (
+                <span 
+                  key={idx} 
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-slate-100 text-slate-700 rounded-lg text-[11px] font-semibold"
                 >
-                  <X size={12} />
-                </button>
-              </span>
-            ))}
-          </div>
+                  {feat}
+                  <button 
+                    type="button" 
+                    onClick={() => handleRemoveFeature((formData.features || []).indexOf(feat))}
+                    className="text-slate-400 hover:text-rose-500"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* Options Toggles */}

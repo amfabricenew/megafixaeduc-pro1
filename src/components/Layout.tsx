@@ -68,6 +68,8 @@ import { useNotifications } from '../contexts/NotificationContext';
 import NotificationBell from './NotificationBell';
 import { toggleAIAssistant } from './AIAssistantWidget';
 import { hasPageAccess, getPageAccessMode } from '../utils/permissions';
+import { isFeatureAllowedByPlan, isPathAllowedByPlan } from '../utils/subscriptions';
+import SubscriptionGatedView from './SubscriptionGatedView';
 import { PWAInstallButton } from './PWAInstallButton';
 import { useOnlineStatus } from '../hooks/useOnlineStatus';
 import { LanguageSelector } from './LanguageSelector';
@@ -80,7 +82,7 @@ function cn(...inputs: ClassValue[]) {
 export default function Layout() {
   const { t } = useTranslation();
   const isOnline = useOnlineStatus();
-  const { user, logout, years, selectedYearId, setSelectedYearId } = useAuth();
+  const { user, logout, schoolPlan, schoolPlanDetails, years, selectedYearId, setSelectedYearId } = useAuth();
   const { getUnreadCountForPath, markPathNotificationsAsRead } = useNotifications();
   const [isSidebarOpen, setIsSidebarOpen] = React.useState(false);
   const activeYear = years.find((y: any) => y.id === selectedYearId) || years.find((y: any) => y.est_active === 1) || years[0];
@@ -352,11 +354,29 @@ export default function Layout() {
     { group: 'Communication', icon: FileStack, label: 'Documents & Demandes', path: '/documents-demandes' },
   ];
 
+  const itemsStudent = [
+    { group: 'Tableau de Bord', icon: HomeIcon, label: 'Accueil Élève', path: '/accueil' },
+    { group: 'Pédagogie', icon: Calendar, label: 'Emploi du temps', path: '/emploi-du-temps' },
+    { group: 'Pédagogie', icon: ClipboardList, label: 'Mes Notes & Bulletins', path: '/notes' },
+    { group: 'Communication', icon: BookOpen, label: 'Bibliothèque Numérique', path: '/bibliotheque' },
+    { group: 'Communication', icon: BookOpenCheck, label: "Banque d'Épreuves", path: '/epreuves' },
+    { group: 'Communication', icon: MessageSquare, label: 'Messagerie & SMS', path: '/messagerie' },
+    { group: 'Communication', icon: BellRing, label: 'Alertes', path: '/alertes' },
+    { group: 'Communication', icon: FileStack, label: 'Documents & Demandes', path: '/documents-demandes' },
+    { group: 'Système', icon: UserCheck, label: 'Mon Compte', path: '/mon-compte' },
+  ];
+
+  const activePlanScope = schoolPlanDetails || schoolPlan;
+  const isTestOrSuperAdmin = isSuperAdmin || Boolean(localUser?.is_test_account);
+  const isAiAssistantAllowed = isTestOrSuperAdmin || isFeatureAllowedByPlan(activePlanScope, 'ai_lab');
+
   let currentSpaceItems = itemsAll;
   if (localUser?.role === 'enseignant') {
     currentSpaceItems = itemsTeacher;
   } else if (localUser?.role === 'parent') {
     currentSpaceItems = itemsParent;
+  } else if (localUser?.role === 'eleve') {
+    currentSpaceItems = itemsStudent;
   } else if (activeSpace === 'primaire') {
     currentSpaceItems = [...itemsPrimaire, ...itemsShared];
   } else if (activeSpace === 'secondaire') {
@@ -373,7 +393,10 @@ export default function Layout() {
 
   const filteredSidebarItems = uniqueSpaceItems.filter(item => {
     const currentUser = localUser || { role: 'user' };
-    return hasPageAccess(currentUser.permissions, item.path, currentUser.role);
+    const allowedByRole = hasPageAccess(currentUser.permissions, item.path, currentUser.role);
+    if (!allowedByRole) return false;
+    if (isTestOrSuperAdmin) return true;
+    return isPathAllowedByPlan(activePlanScope, item.path);
   }).map(item => {
     const accessMode = getPageAccessMode(localUser?.permissions, item.path, localUser?.role);
     // Dynamic label for teachers/personnel
@@ -427,41 +450,46 @@ export default function Layout() {
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col md:flex-row font-school">
       {/* Mobile Header */}
-      <header className="md:hidden bg-white border-b px-4 py-3 flex items-center justify-between sticky top-0 z-50 shadow-sm">
-        <div className="flex items-center gap-2">
+      <header className="md:hidden bg-white border-b border-slate-200 px-2.5 sm:px-4 py-2.5 flex items-center justify-between gap-2 sticky top-0 z-40 shadow-sm safe-top">
+        <div className="flex items-center gap-2 flex-1 min-w-0">
+          <button
+            type="button"
+            onClick={() => setIsSidebarOpen(prev => !prev)}
+            className="w-11 h-11 min-w-[44px] min-h-[44px] -ml-1 flex items-center justify-center rounded-xl text-slate-700 hover:bg-slate-100 active:bg-slate-200 transition-colors shrink-0"
+            aria-label={isSidebarOpen ? 'Fermer le menu' : 'Ouvrir le menu'}
+            aria-expanded={isSidebarOpen}
+          >
+            {isSidebarOpen ? <X size={24} /> : <Menu size={24} />}
+          </button>
           {schoolInfo?.logo ? (
-            <img src={schoolInfo.logo} alt="Logo" className="w-9 h-9 object-contain" referrerPolicy="no-referrer" />
+            <img src={schoolInfo.logo} alt="Logo" className="w-8 h-8 sm:w-9 sm:h-9 object-contain shrink-0" referrerPolicy="no-referrer" />
           ) : (
-            <img src={logo} alt="Logo" className="w-9 h-9 object-contain" referrerPolicy="no-referrer" />
+            <img src={logo} alt="Logo" className="w-8 h-8 sm:w-9 sm:h-9 object-contain shrink-0" referrerPolicy="no-referrer" />
           )}
-          <div className="flex flex-col">
-            <span className="font-bold text-slate-800 truncate max-w-[150px] text-sm leading-tight">{schoolInfo?.nom || import.meta.env.VITE_SCHOOL_NAME || 'MégafixaEduc'}</span>
-            {activeYear && <span className="text-[10px] text-primary font-bold uppercase tracking-wider">{activeYear.libelle}</span>}
+          <div className="flex flex-col min-w-0 flex-1">
+            <span className="font-bold text-slate-800 truncate text-xs sm:text-sm leading-tight">{schoolInfo?.nom || import.meta.env.VITE_SCHOOL_NAME || 'MégafixaEduc'}</span>
+            {activeYear && <span className="text-[10px] text-primary font-bold uppercase tracking-wider truncate">{activeYear.libelle}</span>}
           </div>
         </div>
-          <div className="flex items-center gap-1.5 sm:gap-2">
-
-            <LanguageSelector variant="dropdown" className="scale-95" />
-            <PWAInstallButton />
-            <NotificationBell />
-            <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="p-2 text-slate-600 hover:bg-slate-50 rounded-full transition-colors">
-              {isSidebarOpen ? <X size={24} /> : <Menu size={24} />}
-            </button>
-          </div>
+        <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
+          <LanguageSelector variant="dropdown" className="scale-90 sm:scale-95" />
+          <PWAInstallButton />
+          <NotificationBell />
+        </div>
       </header>
 
       {/* Mobile Drawer Backdrop */}
       {isSidebarOpen && (
         <div
           onClick={() => setIsSidebarOpen(false)}
-          className="fixed inset-0 bg-slate-900/50 backdrop-blur-[1px] z-40 md:hidden"
+          className="fixed inset-0 bg-slate-900/50 backdrop-blur-[1px] z-[45] md:hidden"
           aria-hidden="true"
         />
       )}
 
       {/* Sidebar */}
       <aside className={cn(
-        "fixed inset-y-0 left-0 z-50 md:z-auto w-72 md:w-64 bg-white border-r shadow-2xl md:shadow-none transform transition-transform duration-200 ease-in-out md:relative md:translate-x-0",
+        "fixed inset-y-0 left-0 z-50 md:z-auto w-72 max-w-[85vw] md:w-64 bg-white border-r shadow-2xl md:shadow-none transform transition-transform duration-200 ease-in-out md:relative md:translate-x-0",
         isSidebarOpen ? "translate-x-0" : "-translate-x-full"
       )}>
         <div className="h-full flex flex-col">
@@ -476,7 +504,7 @@ export default function Layout() {
               <div className="min-w-0">
                 <p className="font-bold text-slate-900 text-sm truncate">{schoolInfo?.nom || import.meta.env.VITE_SCHOOL_NAME || 'MégafixaEduc'}</p>
                 <p className="text-[10px] text-slate-500 truncate">
-                  {localUser?.role === 'enseignant' ? t('Espace Enseignant') : localUser?.role === 'parent' ? t('Espace Parents') : t('Administration')}
+                  {localUser?.role === 'enseignant' ? t('Espace Enseignant') : localUser?.role === 'parent' ? t('Espace Parents') : localUser?.role === 'eleve' ? t('Espace Élève') : t('Administration')}
                 </p>
               </div>
             </div>
@@ -539,8 +567,8 @@ export default function Layout() {
             </div>
           )}
 
-          {/* Space Selector Tabs (Hidden for teachers & parents) */}
-          {localUser?.role !== 'enseignant' && localUser?.role !== 'parent' && (
+          {/* Space Selector Tabs (Hidden for teachers, parents, students) */}
+          {localUser?.role !== 'enseignant' && localUser?.role !== 'parent' && localUser?.role !== 'eleve' && (
             <div className="px-4 pt-2 pb-2">
               <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5 px-1">{t("Choix de l'espace")}</p>
               <div className="grid grid-cols-3 gap-1 bg-slate-100 p-1 rounded-xl text-[11px] font-medium">
@@ -560,60 +588,64 @@ export default function Layout() {
                 >
                   {t('Général')}
                 </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (isPrimaireLocked) {
-                      setLockedModalInfo({
-                        spaceName: "Maternelle & Primaire",
-                        motif: primaireLockMotif
-                      });
-                      return;
-                    }
-                    updateActiveSpace('primaire');
-                    setIsSidebarOpen(false);
-                    navigate('/accueil-primaire');
-                  }}
-                  className={cn(
-                    "py-1.5 px-1 rounded-lg transition-all text-center truncate relative z-10 flex items-center justify-center gap-1",
-                    activeSpace === 'primaire'
-                      ? "bg-primary text-white font-bold shadow-sm"
-                      : isPrimaireLocked
-                        ? "text-rose-600 bg-rose-50/50 hover:bg-rose-100/60"
-                        : "text-slate-600 hover:text-slate-900"
-                  )}
-                  title={isPrimaireLocked ? `Espace Verrouillé : ${primaireLockMotif}` : undefined}
-                >
-                  {isPrimaireLocked && <Lock size={11} className="shrink-0 text-rose-500" />}
-                  <span>{t('Primaire')}</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (isSecondaireLocked) {
-                      setLockedModalInfo({
-                        spaceName: "Secondaire",
-                        motif: secondaireLockMotif
-                      });
-                      return;
-                    }
-                    updateActiveSpace('secondaire');
-                    setIsSidebarOpen(false);
-                    navigate('/accueil-secondaire');
-                  }}
-                  className={cn(
-                    "py-1.5 px-1 rounded-lg transition-all text-center truncate relative z-10 flex items-center justify-center gap-1",
-                    activeSpace === 'secondaire'
-                      ? "bg-primary text-white font-bold shadow-sm"
-                      : isSecondaireLocked
-                        ? "text-rose-600 bg-rose-50/50 hover:bg-rose-100/60"
-                        : "text-slate-600 hover:text-slate-900"
-                  )}
-                  title={isSecondaireLocked ? `Espace Verrouillé : ${secondaireLockMotif}` : undefined}
-                >
-                  {isSecondaireLocked && <Lock size={11} className="shrink-0 text-rose-500" />}
-                  <span>{t('Secondaire')}</span>
-                </button>
+                {(isTestOrSuperAdmin || isFeatureAllowedByPlan(activePlanScope, 'cycle_primaire')) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (isPrimaireLocked) {
+                        setLockedModalInfo({
+                          spaceName: "Maternelle & Primaire",
+                          motif: primaireLockMotif
+                        });
+                        return;
+                      }
+                      updateActiveSpace('primaire');
+                      setIsSidebarOpen(false);
+                      navigate('/accueil-primaire');
+                    }}
+                    className={cn(
+                      "py-1.5 px-1 rounded-lg transition-all text-center truncate relative z-10 flex items-center justify-center gap-1",
+                      activeSpace === 'primaire'
+                        ? "bg-primary text-white font-bold shadow-sm"
+                        : isPrimaireLocked
+                          ? "text-rose-600 bg-rose-50/50 hover:bg-rose-100/60"
+                          : "text-slate-600 hover:text-slate-900"
+                    )}
+                    title={isPrimaireLocked ? `Espace Verrouillé : ${primaireLockMotif}` : undefined}
+                  >
+                    {isPrimaireLocked && <Lock size={11} className="shrink-0 text-rose-500" />}
+                    <span>{t('Primaire')}</span>
+                  </button>
+                )}
+                {(isTestOrSuperAdmin || isFeatureAllowedByPlan(activePlanScope, 'cycle_secondaire')) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (isSecondaireLocked) {
+                        setLockedModalInfo({
+                          spaceName: "Secondaire",
+                          motif: secondaireLockMotif
+                        });
+                        return;
+                      }
+                      updateActiveSpace('secondaire');
+                      setIsSidebarOpen(false);
+                      navigate('/accueil-secondaire');
+                    }}
+                    className={cn(
+                      "py-1.5 px-1 rounded-lg transition-all text-center truncate relative z-10 flex items-center justify-center gap-1",
+                      activeSpace === 'secondaire'
+                        ? "bg-primary text-white font-bold shadow-sm"
+                        : isSecondaireLocked
+                          ? "text-rose-600 bg-rose-50/50 hover:bg-rose-100/60"
+                          : "text-slate-600 hover:text-slate-900"
+                    )}
+                    title={isSecondaireLocked ? `Espace Verrouillé : ${secondaireLockMotif}` : undefined}
+                  >
+                    {isSecondaireLocked && <Lock size={11} className="shrink-0 text-rose-500" />}
+                    <span>{t('Secondaire')}</span>
+                  </button>
+                )}
               </div>
             </div>
           )}
@@ -688,33 +720,35 @@ export default function Layout() {
           </nav>
 
           {/* Bouton de l'Assistant IA en dessous des options du menu latéral */}
-          <div className="px-3.5 py-2.5 border-t border-slate-100 bg-gradient-to-b from-slate-50/50 to-slate-100/60">
-            <button
-              type="button"
-              onClick={() => {
-                setIsSidebarOpen(false);
-                toggleAIAssistant();
-              }}
-              className="w-full flex items-center justify-between px-3 py-2.5 rounded-xl bg-gradient-to-r from-[#013efb] via-[#049ffb] to-[#fb5c03] hover:brightness-110 text-white shadow-sm hover:shadow transition-all group cursor-pointer"
-              title="Ouvrir l'Assistant IA MégafixaBot"
-            >
-              <div className="flex items-center gap-2.5 min-w-0">
-                <div className="w-7 h-7 rounded-lg bg-white/20 backdrop-blur-xs flex items-center justify-center shrink-0 border border-white/25 group-hover:scale-110 transition-transform shadow-2xs">
-                  <Sparkles size={15} className="text-white" />
+          {isAiAssistantAllowed && (
+            <div className="px-3.5 py-2.5 border-t border-slate-100 bg-gradient-to-b from-slate-50/50 to-slate-100/60">
+              <button
+                type="button"
+                onClick={() => {
+                  setIsSidebarOpen(false);
+                  toggleAIAssistant();
+                }}
+                className="w-full flex items-center justify-between px-3 py-2.5 rounded-xl bg-gradient-to-r from-[#013efb] via-[#049ffb] to-[#fb5c03] hover:brightness-110 text-white shadow-sm hover:shadow transition-all group cursor-pointer"
+                title="Ouvrir l'Assistant IA MégafixaBot"
+              >
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <div className="w-7 h-7 rounded-lg bg-white/20 backdrop-blur-xs flex items-center justify-center shrink-0 border border-white/25 group-hover:scale-110 transition-transform shadow-2xs">
+                    <Sparkles size={15} className="text-white" />
+                  </div>
+                  <div className="text-left min-w-0">
+                    <p className="text-xs font-bold leading-tight truncate flex items-center gap-1.5">
+                      Assistant IA
+                      <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse"></span>
+                    </p>
+                    <p className="text-[10px] text-white/80 leading-tight truncate">MégafixaBot 7j/7</p>
+                  </div>
                 </div>
-                <div className="text-left min-w-0">
-                  <p className="text-xs font-bold leading-tight truncate flex items-center gap-1.5">
-                    Assistant IA
-                    <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse"></span>
-                  </p>
-                  <p className="text-[10px] text-white/80 leading-tight truncate">MégafixaBot 7j/7</p>
-                </div>
-              </div>
-              <span className="text-[9px] font-extrabold px-1.5 py-0.5 rounded-md bg-white/20 text-white uppercase tracking-wider shrink-0 border border-white/20 group-hover:bg-white/30 transition-colors">
-                Ouvrir
-              </span>
-            </button>
-          </div>
+                <span className="text-[9px] font-extrabold px-1.5 py-0.5 rounded-md bg-white/20 text-white uppercase tracking-wider shrink-0 border border-white/20 group-hover:bg-white/30 transition-colors">
+                  Ouvrir
+                </span>
+              </button>
+            </div>
+          )}
 
           <div className="p-4 border-t">
             <div className="mb-3 px-1 flex items-center justify-between">
@@ -783,7 +817,7 @@ export default function Layout() {
           <NotificationBell />
         </div>
         
-        <div className="p-4 md:px-8 md:pb-8 flex-1 w-full max-w-7xl mx-auto">
+        <div className="p-3 sm:p-4 md:px-8 md:pb-8 flex-1 w-full max-w-7xl mx-auto">
           {/* First Login Password Change Reminder Banner */}
           {(localUser?.role === 'enseignant' || localUser?.role === 'admin') && (localUser?.is_first_login === 1 || localUser?.is_first_login === true || localUser?.is_first_login === '1') && location.pathname !== '/mon-compte' && (
             <div className="mb-6 p-4 sm:p-5 bg-gradient-to-r from-amber-500 via-amber-600 to-orange-600 rounded-2xl text-white shadow-lg flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border border-amber-400/40 animate-in fade-in slide-in-from-top-2">
@@ -833,7 +867,11 @@ export default function Layout() {
           )}
 
           <ErrorBoundary inline key={location.pathname + location.search}>
-            <Outlet />
+            {!isTestOrSuperAdmin && activePlanScope && !isPathAllowedByPlan(activePlanScope, location.pathname) ? (
+              <SubscriptionGatedView path={location.pathname} currentPlan={activePlanScope} />
+            ) : (
+              <Outlet />
+            )}
           </ErrorBoundary>
         </div>
         

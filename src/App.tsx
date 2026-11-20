@@ -201,16 +201,17 @@ const LoadingFallback = () => (
 );
 
 const ProtectedRoute = ({ children, user, path, allowedRoles }: { children: React.ReactNode, allowedRoles?: string[], user?: any, path?: string }) => {
-  const { schoolPlan } = useAuth();
+  const { schoolPlan, schoolPlanDetails } = useAuth();
+  const location = useLocation();
   const [isChecking, setIsChecking] = React.useState(true);
 
   React.useEffect(() => {
-    if (schoolPlan !== null) {
+    if (schoolPlan !== null || schoolPlanDetails !== null) {
       setIsChecking(false);
     }
     const timer = setTimeout(() => setIsChecking(false), 3000);
     return () => clearTimeout(timer);
-  }, [schoolPlan]);
+  }, [schoolPlan, schoolPlanDetails]);
 
   if (!user) {
     return <Navigate to="/login" replace />;
@@ -226,11 +227,14 @@ const ProtectedRoute = ({ children, user, path, allowedRoles }: { children: Reac
     return <Navigate to="/super-admin" replace />;
   }
 
-  if (path && !hasPageAccess(user.permissions, path, user.role)) {
+  const currentPath = path || location.pathname;
+  const isExemptCorePath = currentPath === '/' || currentPath === '/accueil' || currentPath === '/mon-compte';
+
+  if (!allowedRoles && !isExemptCorePath && !hasPageAccess(user.permissions, currentPath, user.role)) {
     return <Navigate to="/accueil" replace />;
   }
 
-  const effectivePlan = schoolPlan || 'standard';
+  const effectivePlan = schoolPlanDetails || schoolPlan || 'standard';
 
   if (path && !isChecking && effectivePlan && !user?.is_test_account && !isPathAllowedByPlan(effectivePlan, path)) {
     return <SubscriptionGatedView path={path} currentPlan={effectivePlan} />;

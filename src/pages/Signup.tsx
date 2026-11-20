@@ -29,6 +29,7 @@ import { twMerge } from 'tailwind-merge';
 import toast from 'react-hot-toast';
 import PasswordStrengthMeter, { evaluatePassword } from '../components/PasswordStrengthMeter';
 import SchoolCreationRequestModal from '../components/SchoolCreationRequestModal';
+import { formatStudentLimit } from '../constants/productFeatures';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -373,10 +374,7 @@ export default function Signup() {
                   const isRecommended = Boolean(plan.is_recommended);
                   const isFree = Number(plan.price) === 0 || plan.type === 'trial';
                   const feats: string[] = Array.isArray(plan.features) ? plan.features : [];
-                  const maxStudentsLabel =
-                    plan.student_limit === null || plan.student_limit === undefined || Number(plan.student_limit) >= 999999
-                      ? 'Élèves illimités'
-                      : `Jusqu'à ${Number(plan.student_limit).toLocaleString('fr-FR')} élèves`;
+                  const maxStudentsLabel = formatStudentLimit(plan.student_limit);
 
                   return (
                     <div

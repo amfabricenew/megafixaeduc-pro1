@@ -1,5 +1,6 @@
 import { apiFetch } from '../utils/api';
 import React, { createContext, useContext, useEffect, useState } from 'react';
+import type { SchoolPlanDetails } from '../utils/subscriptions';
 
 declare global {
   interface Window {
@@ -17,12 +18,14 @@ interface User {
   eleve_id?: number | null;
   cycle?: string | null;
   google_id?: string | null;
+  is_test_account?: boolean | number;
 }
 
 interface AuthContextType {
   user: User | null;
   loading: boolean;
   schoolPlan: string | null;
+  schoolPlanDetails: SchoolPlanDetails | null;
   years: any[];
   selectedYearId: number | null;
   selectedYear: any | null;
@@ -92,6 +95,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState<boolean>(() => !isPublicUnblockedRoute());
   const [schoolPlan, setSchoolPlan] = useState<string | null>(null);
+  const [schoolPlanDetails, setSchoolPlanDetails] = useState<SchoolPlanDetails | null>(null);
   const [years, setYears] = useState<any[]>([]);
   const [selectedYearId, setSelectedYearIdState] = useState<number | null>(null);
 
@@ -159,6 +163,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const data = await res.json();
         const nextPlan = data.plan || 'standard';
         setSchoolPlan(prev => (prev === nextPlan ? prev : nextPlan));
+        if (Array.isArray(data.featureIds) || Array.isArray(data.features)) {
+          setSchoolPlanDetails({
+            name: nextPlan,
+            plan_id: data.plan_id ?? null,
+            statut: data.statut,
+            date_fin: data.date_fin,
+            school_nom: data.school_nom,
+            featureIds: Array.isArray(data.featureIds) ? data.featureIds : [],
+            features: Array.isArray(data.features) ? data.features : [],
+            student_limit: Number(data.student_limit ?? 0),
+            staff_limit: Number(data.staff_limit ?? 0),
+            current_students: data.current_students !== undefined ? Number(data.current_students) : undefined,
+            current_staff: data.current_staff !== undefined ? Number(data.current_staff) : undefined,
+            strictFormulaConfigured: Boolean(data.strictFormulaConfigured),
+          });
+        }
       }
     } catch (e) {
       console.warn('Unable to refresh school plan:', e);
@@ -233,6 +253,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     safeRemove('activeSpace');
     setUser(null);
     setSchoolPlan(null);
+    setSchoolPlanDetails(null);
     setYears([]);
     setSelectedYearIdState(null);
   };
@@ -341,12 +362,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     window.addEventListener('focus', handlePermissionSync);
     window.addEventListener('school_permissions_updated', handlePermissionSync);
+    window.addEventListener('school_subscription_updated', handlePermissionSync);
     window.addEventListener('storage', handleStorage);
 
     return () => {
       clearInterval(interval);
       window.removeEventListener('focus', handlePermissionSync);
       window.removeEventListener('school_permissions_updated', handlePermissionSync);
+      window.removeEventListener('school_subscription_updated', handlePermissionSync);
       window.removeEventListener('storage', handleStorage);
     };
   }, [userId]);
@@ -358,6 +381,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       user, 
       loading, 
       schoolPlan, 
+      schoolPlanDetails,
       years, 
       selectedYearId, 
       selectedYear,

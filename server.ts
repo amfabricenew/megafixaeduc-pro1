@@ -51,6 +51,11 @@ import {
   generateReceiptPdfBuffer, 
   generateFicheAbonnementPdfBuffer 
 } from "./src/utils/subscriptionPdf.ts";
+import {
+  APP_FEATURES,
+  resolvePlanFeatureIds,
+  isUnlimitedLimit
+} from "./src/constants/productFeatures.ts";
 const { FedaPay, Transaction } = fedapay;
 
 // Gemini AI Client Helper
@@ -965,6 +970,7 @@ function reconcileMissingSchoolAccountsFromVault(vault: SchoolAccountsVault | nu
   try {
     const tx = db.transaction(() => {
       const requestIdRemap = new Map<number, number>();
+      const schoolIdRemap = new Map<number, number>();
 
       for (const tbl of SCHOOL_VAULT_TABLES) {
         const rows = vault.tables[tbl];
@@ -977,6 +983,41 @@ function reconcileMissingSchoolAccountsFromVault(vault: SchoolAccountsVault | nu
           if (!rawRow || typeof rawRow !== 'object') continue;
           const row = { ...rawRow };
           let omitId = false;
+
+          // Remap school_id for all child tenant tables if parent school_info row was assigned a new ID
+          if (tbl !== 'school_info' && row.school_id != null && schoolIdRemap.has(Number(row.school_id))) {
+            row.school_id = schoolIdRemap.get(Number(row.school_id));
+          }
+
+          // Handle school_info safely by natural keys first (code_ecole, subscription_key, non-default nom), never drop on PK collision
+          if (tbl === 'school_info') {
+            const codeVal = row.code_ecole ? String(row.code_ecole).trim() : '';
+            const subKeyVal = row.subscription_key ? String(row.subscription_key).trim() : '';
+            const nomVal = row.nom ? String(row.nom).trim() : '';
+            const isDefaultSeed = (Number(row.id) === 1 && nomVal === 'École par Défaut' && !row.email && !subKeyVal);
+
+            let matchedSchool: any = null;
+            if (codeVal) {
+              matchedSchool = db.prepare("SELECT id FROM school_info WHERE UPPER(TRIM(code_ecole)) = UPPER(?)").get(codeVal);
+            }
+            if (!matchedSchool && subKeyVal) {
+              matchedSchool = db.prepare("SELECT id FROM school_info WHERE subscription_key = ?").get(subKeyVal);
+            }
+            if (!matchedSchool && nomVal && !isDefaultSeed) {
+              matchedSchool = db.prepare("SELECT id FROM school_info WHERE LOWER(TRIM(nom)) = LOWER(?)").get(nomVal);
+            }
+            if (matchedSchool) {
+              if (row.id != null) schoolIdRemap.set(Number(row.id), Number(matchedSchool.id));
+              continue;
+            }
+            if (isDefaultSeed && db.prepare("SELECT id FROM school_info WHERE id = 1").get()) {
+              continue;
+            }
+            if (row.id != null) {
+              const existsById = db.prepare("SELECT id FROM school_info WHERE id = ?").get(row.id);
+              if (existsById) omitId = true;
+            }
+          }
 
           // Handle school_creation_requests with non-destructive status progression & PK collision avoidance
           if (tbl === 'school_creation_requests') {
@@ -1071,18 +1112,61 @@ function reconcileMissingSchoolAccountsFromVault(vault: SchoolAccountsVault | nu
             }
           }
 
-          // Extra deduplication guards by natural key so we never overwrite or conflict with existing records
-          if (tbl === 'utilisateurs' && row.email) {
-            const existsByEmail = db.prepare("SELECT id FROM utilisateurs WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))").get(String(row.email));
-            if (existsByEmail) continue;
+          // Extra deduplication guards by natural key + PK collision avoidance
+          if (tbl === 'utilisateurs') {
+            if (row.email) {
+              const existsByEmail = db.prepare("SELECT id FROM utilisateurs WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))").get(String(row.email));
+              if (existsByEmail) continue;
+            }
+            if (row.id != null) {
+              const idTaken = db.prepare("SELECT id FROM utilisateurs WHERE id = ?").get(row.id);
+              if (idTaken) omitId = true;
+            }
           }
-          if (tbl === 'school_info' && row.id != null) {
-            const existsById = db.prepare("SELECT id FROM school_info WHERE id = ?").get(row.id);
-            if (existsById) continue;
+          if (tbl === 'subscription_licenses') {
+            if (row.license_key) {
+              const existsByKey = db.prepare("SELECT id FROM subscription_licenses WHERE license_key = ?").get(String(row.license_key));
+              if (existsByKey) continue;
+            }
+            if (row.id != null) {
+              const idTaken = db.prepare("SELECT id FROM subscription_licenses WHERE id = ?").get(row.id);
+              if (idTaken) omitId = true;
+            }
           }
-          if (tbl === 'subscription_licenses' && row.license_key) {
-            const existsByKey = db.prepare("SELECT id FROM subscription_licenses WHERE license_key = ?").get(String(row.license_key));
-            if (existsByKey) continue;
+          if (tbl === 'subscription_transactions') {
+            if (row.reference) {
+              const existsByRef = db.prepare("SELECT id FROM subscription_transactions WHERE reference = ?").get(String(row.reference));
+              if (existsByRef) continue;
+            }
+            if (row.id != null) {
+              const idTaken = db.prepare("SELECT id FROM subscription_transactions WHERE id = ?").get(row.id);
+              if (idTaken) omitId = true;
+            }
+          }
+          if (tbl === 'plans') {
+            if (row.name) {
+              const existsByName = db.prepare("SELECT id FROM plans WHERE LOWER(TRIM(name)) = LOWER(TRIM(?))").get(String(row.name));
+              if (existsByName) continue;
+            }
+            if (row.id != null) {
+              const idTaken = db.prepare("SELECT id FROM plans WHERE id = ?").get(row.id);
+              if (idTaken) omitId = true;
+            }
+          }
+          if (tbl === 'role_permissions' && row.role && row.school_id != null) {
+            const existsRole = db.prepare("SELECT id FROM role_permissions WHERE role = ? AND school_id = ?").get(row.role, row.school_id);
+            if (existsRole) continue;
+            if (row.id != null && db.prepare("SELECT id FROM role_permissions WHERE id = ?").get(row.id)) omitId = true;
+          }
+          if (tbl === 'annees_scolaires' && row.libelle && row.school_id != null) {
+            const existsYear = db.prepare("SELECT id FROM annees_scolaires WHERE libelle = ? AND school_id = ?").get(row.libelle, row.school_id);
+            if (existsYear) continue;
+            if (row.id != null && db.prepare("SELECT id FROM annees_scolaires WHERE id = ?").get(row.id)) omitId = true;
+          }
+          if ((tbl === 'school_smtp_configs' || tbl === 'sms_configs' || tbl === 'whatsapp_configs') && row.school_id != null) {
+            const existsCfg = db.prepare(`SELECT id FROM "${tbl}" WHERE school_id = ?`).get(row.school_id);
+            if (existsCfg) continue;
+            if (row.id != null && db.prepare(`SELECT id FROM "${tbl}" WHERE id = ?`).get(row.id)) omitId = true;
           }
 
           const cols = Object.keys(row).filter(c => liveCols.has(c) && !(omitId && c === 'id'));
@@ -1097,6 +1181,9 @@ function reconcileMissingSchoolAccountsFromVault(vault: SchoolAccountsVault | nu
               insertedCount += info.changes;
               if (tbl === 'school_creation_requests' && rawRow.id != null) {
                 requestIdRemap.set(Number(rawRow.id), Number(info.lastInsertRowid));
+              }
+              if (tbl === 'school_info' && rawRow.id != null) {
+                schoolIdRemap.set(Number(rawRow.id), Number(info.lastInsertRowid));
               }
             }
           } catch {}
@@ -1126,6 +1213,84 @@ function reconcileMissingSchoolAccountsFromVault(vault: SchoolAccountsVault | nu
   }
 
   return insertedCount;
+}
+
+// Auto-repair safety net: guarantees any approved school creation request ALWAYS has its school_info & primary admin user intact
+function ensureApprovedRequestsHaveSchools(): number {
+  if (!tableExists('school_creation_requests') || !tableExists('school_info') || !tableExists('utilisateurs')) return 0;
+  let repaired = 0;
+  try {
+    const approvedRequests = db.prepare("SELECT * FROM school_creation_requests WHERE statut = 'approved'").all() as any[];
+    for (const reqRow of approvedRequests) {
+      const email = String(reqRow.demandeur_email || '').trim().toLowerCase();
+      if (!email) continue;
+
+      let schoolRow: any = reqRow.school_id
+        ? db.prepare("SELECT * FROM school_info WHERE id = ?").get(reqRow.school_id)
+        : null;
+      if (!schoolRow && reqRow.nom_ecole) {
+        schoolRow = db.prepare("SELECT * FROM school_info WHERE LOWER(TRIM(nom)) = LOWER(TRIM(?))").get(reqRow.nom_ecole);
+      }
+
+      const planName = String(reqRow.plan_souhaite || 'Standard').trim() || 'Standard';
+      if (!schoolRow) {
+        const genCode = `MF-${String(reqRow.reference || reqRow.id).replace(/[^A-Z0-9]/gi, '').slice(-5).toUpperCase() || Math.random().toString(36).substring(2, 7).toUpperCase()}`;
+        const existingLicense = db.prepare("SELECT license_key, expires_at FROM subscription_licenses WHERE LOWER(TRIM(client_email)) = ? ORDER BY id DESC LIMIT 1").get(email) as any;
+        const subKey = existingLicense?.license_key || `MF-${Math.random().toString(36).substring(2, 8).toUpperCase()}-${Date.now().toString(36).toUpperCase()}`;
+        const expiryDate = existingLicense?.expires_at || new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+
+        const insSchool = db.prepare(`
+          INSERT INTO school_info (
+            nom, code_ecole, email, telephone, adresse, pays, devise,
+            plan_abonnement, statut_abonnement, date_fin_abonnement, subscription_key
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'actif', ?, ?)
+        `).run(
+          String(reqRow.nom_ecole || 'Établissement').trim(),
+          genCode,
+          reqRow.email_ecole || email,
+          reqRow.telephone_ecole || reqRow.demandeur_telephone || null,
+          reqRow.adresse || reqRow.ville || 'Cotonou',
+          reqRow.pays || 'Bénin',
+          'FCFA',
+          planName,
+          expiryDate,
+          subKey
+        );
+        const recoveredSchoolId = Number(insSchool.lastInsertRowid);
+        schoolRow = db.prepare("SELECT * FROM school_info WHERE id = ?").get(recoveredSchoolId);
+        repaired++;
+        console.warn(`[Persistence] Auto-repaired missing school_info (id=${recoveredSchoolId}) for approved request ${reqRow.reference}.`);
+      }
+
+      if (schoolRow && Number(reqRow.school_id) !== Number(schoolRow.id)) {
+        db.prepare("UPDATE school_creation_requests SET school_id = ? WHERE id = ?").run(schoolRow.id, reqRow.id);
+      }
+
+      if (schoolRow) {
+        const existingAdmin = db.prepare("SELECT id, school_id FROM utilisateurs WHERE LOWER(TRIM(email)) = ?").get(email) as any;
+        if (!existingAdmin) {
+          const tempPass = `Edu2026!${String(reqRow.id).padStart(3, '0')}`;
+          const hash = bcrypt.hashSync(tempPass, 8);
+          db.prepare(`
+            INSERT INTO utilisateurs (
+              nom, email, mot_de_passe, mot_de_passe_initial, role, approuve, is_first_login, must_change_password, can_write, school_id
+            ) VALUES (?, ?, ?, ?, 'admin', 1, 1, 1, 1, ?)
+          `).run(
+            String(reqRow.demandeur_nom || schoolRow.nom).trim(),
+            email,
+            hash,
+            tempPass,
+            schoolRow.id
+          );
+          repaired++;
+          console.warn(`[Persistence] Auto-repaired missing admin account (${email}) for approved request ${reqRow.reference}.`);
+        }
+      }
+    }
+  } catch (err) {
+    console.warn("[Persistence] Approved request repair notice:", err);
+  }
+  return repaired;
 }
 
 async function fetchCloudSchoolVault(): Promise<SchoolAccountsVault | null> {
@@ -1223,6 +1388,21 @@ async function restoreFromCheckpoint() {
     if (cloudCandidate) candidates.push({ source: 'cloud', ...cloudCandidate });
     if (localCandidate) candidates.push({ source: 'local', ...localCandidate });
 
+    // Also inspect local safety backups (pre_*.sql) in case an earlier snapshot holds missing schools/requests
+    try {
+      const backupFiles = fs.readdirSync(BACKUPS_DIR)
+        .filter(f => f.startsWith('pre_') && f.endsWith('.sql'))
+        .sort()
+        .slice(-5);
+      for (const bf of backupFiles) {
+        try {
+          const bfSql = fs.readFileSync(path.join(BACKUPS_DIR, bf), 'utf8');
+          const bfStats = inspectSqlDumpStats(bfSql);
+          candidates.push({ source: `safety:${bf}`, ...bfStats, sql: bfSql });
+        } catch {}
+      }
+    } catch {}
+
     // Sort: real data first, then more non-default schools, then highest score; on tie prefer cloud
     candidates.sort((a, b) => {
       if (a.hasRealData !== b.hasRealData) return a.hasRealData ? -1 : 1;
@@ -1245,8 +1425,6 @@ async function restoreFromCheckpoint() {
         }
       }
     } else if (candidates.length > 0) {
-      // Non-destructive protection: if local DB has fewer schools, users, students, or pending requests than backup,
-      // merge missing records safely without overwriting or deleting any existing local data!
       const best = candidates[0];
       const backupHasMissingSchoolsOrRequests =
         best.nonDefaultSchoolCount > stats.nonDefaultSchoolCount ||
@@ -1268,6 +1446,7 @@ async function restoreFromCheckpoint() {
     let reconciled = 0;
     if (cloudVault) reconciled += reconcileMissingSchoolAccountsFromVault(cloudVault);
     if (localVault) reconciled += reconcileMissingSchoolAccountsFromVault(localVault);
+    reconciled += ensureApprovedRequestsHaveSchools();
     if (reconciled > 0) {
       console.log(`[Persistence] School Accounts Vault restored ${reconciled} missing account/request/tenant record(s) without modifying existing data.`);
     }
@@ -4780,6 +4959,46 @@ try {
   scheduleCheckpoint('startup', 3000);
 }
 
+function parsePlanLimitValue(val: any, fallback: number): number {
+  if (val === null || val === undefined || val === '') return fallback;
+  const num = Number(val);
+  if (Number.isNaN(num)) return fallback;
+  return Math.max(0, Math.floor(num));
+}
+
+function getProductFeatureMatrixMap(): Record<string, string[]> {
+  try {
+    const row = db.prepare("SELECT value FROM super_admin_settings WHERE key = 'product_feature_matrix'").get() as any;
+    if (!row?.value) return {};
+    const parsed = JSON.parse(row.value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveProductFeatureMatrixMap(matrix: Record<string, string[]>) {
+  try {
+    db.prepare("INSERT OR REPLACE INTO super_admin_settings (key, value) VALUES ('product_feature_matrix', ?)").run(
+      JSON.stringify(matrix || {})
+    );
+  } catch (err) {
+    console.warn("Unable to save product_feature_matrix:", err);
+  }
+}
+
+function syncPlanFeatureMatrixEntry(planId: number | string, featuresList: string[], planName?: string, explicitMatrixIds?: string[]) {
+  const matrix = getProductFeatureMatrixMap();
+  const key = String(planId);
+  if (Array.isArray(explicitMatrixIds)) {
+    matrix[key] = explicitMatrixIds;
+  } else {
+    matrix[key] = resolvePlanFeatureIds(featuresList, null, planName);
+  }
+  saveProductFeatureMatrixMap(matrix);
+  return matrix;
+}
+
 // Single Source of Truth for Configured Subscription Plans
 function getConfiguredPlansFromDb(onlyActive: boolean = true) {
   try {
@@ -4787,6 +5006,7 @@ function getConfiguredPlansFromDb(onlyActive: boolean = true) {
       ? "SELECT * FROM plans WHERE COALESCE(is_active, 1) = 1 ORDER BY price ASC, id ASC"
       : "SELECT * FROM plans ORDER BY price ASC, id ASC";
     const rows = db.prepare(query).all() as any[];
+    const featureMatrix = getProductFeatureMatrixMap();
     return rows.map((p: any) => {
       let parsedFeatures: string[] = [];
       try {
@@ -4797,6 +5017,9 @@ function getConfiguredPlansFromDb(onlyActive: boolean = true) {
         parsedFeatures = [];
       }
       const numericPrice = Number(p.price ?? 0);
+      const rawMatrixEntry = featureMatrix[String(p.id)] ?? featureMatrix[p.id];
+      const hasExplicitMatrix = Array.isArray(rawMatrixEntry);
+      const featureIds = resolvePlanFeatureIds(parsedFeatures, hasExplicitMatrix ? rawMatrixEntry : null, p.name);
       return {
         ...p,
         id: p.id,
@@ -4804,11 +5027,13 @@ function getConfiguredPlansFromDb(onlyActive: boolean = true) {
         price: numericPrice,
         period: p.period || 'mois',
         features: parsedFeatures,
+        featureIds,
+        strictFormulaConfigured: hasExplicitMatrix,
         color: p.color || 'indigo',
         is_recommended: Boolean(p.is_recommended),
         type: p.type || (numericPrice === 0 ? 'trial' : 'paid'),
-        student_limit: (p.student_limit !== null && p.student_limit !== undefined) ? p.student_limit : (numericPrice === 0 ? 50 : 500),
-        staff_limit: (p.staff_limit !== null && p.staff_limit !== undefined) ? p.staff_limit : (numericPrice === 0 ? 5 : 50),
+        student_limit: parsePlanLimitValue(p.student_limit, 500),
+        staff_limit: parsePlanLimitValue(p.staff_limit, 50),
         description: p.description || '',
         is_active: Boolean(p.is_active ?? 1),
         active: Boolean(p.is_active ?? 1)
@@ -4842,6 +5067,64 @@ function resolveConfiguredPlan(planInput?: any, onlyActive: boolean = true) {
   }
 
   return pool.find((p: any) => p.is_recommended) || pool[0];
+}
+
+function getSchoolActiveSubscriptionPlan(schoolId: number) {
+  if (!schoolId) return { school: null, plan: resolveConfiguredPlan(undefined, false), featureIds: [] as string[] };
+  const school = db.prepare("SELECT id, nom, plan_abonnement, statut_abonnement, date_fin_abonnement FROM school_info WHERE id = ?").get(schoolId) as any;
+  const matchedPlan = resolveConfiguredPlan(school?.plan_abonnement, false);
+  const featureIds = matchedPlan?.featureIds || resolvePlanFeatureIds([], null, school?.plan_abonnement);
+  return { school, plan: matchedPlan, featureIds };
+}
+
+function checkStudentQuotaForSchool(schoolId: number, incomingCount: number = 1): { allowed: boolean; limit: number; current: number; planName: string; message?: string } {
+  const { plan } = getSchoolActiveSubscriptionPlan(schoolId);
+  if (!plan) return { allowed: true, limit: 0, current: 0, planName: '' };
+  const limit = Number(plan.student_limit ?? 0);
+  if (isUnlimitedLimit(limit)) {
+    return { allowed: true, limit: 0, current: 0, planName: plan.name };
+  }
+  const current = safeCount("SELECT COUNT(*) as count FROM eleves WHERE school_id = ?", schoolId);
+  if (current + incomingCount > limit) {
+    return {
+      allowed: false,
+      limit,
+      current,
+      planName: plan.name,
+      message: `Limite d'élèves atteinte pour votre formule « ${plan.name} » (${current}/${limit} élèves max). Passez à une formule supérieure ou illimitée dans Paramètres > Abonnement.`
+    };
+  }
+  return { allowed: true, limit, current, planName: plan.name };
+}
+
+function checkStaffQuotaForSchool(schoolId: number, incomingCount: number = 1): { allowed: boolean; limit: number; current: number; planName: string; message?: string } {
+  const { plan } = getSchoolActiveSubscriptionPlan(schoolId);
+  if (!plan) return { allowed: true, limit: 0, current: 0, planName: '' };
+  const limit = Number(plan.staff_limit ?? 0);
+  if (isUnlimitedLimit(limit)) {
+    return { allowed: true, limit: 0, current: 0, planName: plan.name };
+  }
+  const teachersCount = safeCount("SELECT COUNT(*) as count FROM enseignants WHERE school_id = ?", schoolId);
+  const adminStaffCount = safeCount("SELECT COUNT(*) as count FROM personnel_administratif WHERE school_id = ?", schoolId);
+  const current = teachersCount + adminStaffCount;
+  if (current + incomingCount > limit) {
+    return {
+      allowed: false,
+      limit,
+      current,
+      planName: plan.name,
+      message: `Limite de personnel/staff atteinte pour votre formule « ${plan.name} » (${current}/${limit} max). Passez à une formule supérieure ou illimitée.`
+    };
+  }
+  return { allowed: true, limit, current, planName: plan.name };
+}
+
+function isFeatureEnabledForSchool(schoolId: number | undefined, featureId: string, reqUser?: any): boolean {
+  if (reqUser?.role === 'super_admin' || reqUser?.is_test_account === 1) return true;
+  if (!schoolId) return true;
+  const { featureIds } = getSchoolActiveSubscriptionPlan(schoolId);
+  if (!featureIds || featureIds.length === 0) return false;
+  return featureIds.includes(featureId);
 }
 
 function getDurationFromPeriod(period?: string): { days: number; months: number } {
@@ -6143,7 +6426,12 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
     }
   });
 
-  app.post("/api/ai/live-chat", authenticateToken, async (req, res) => {
+  app.post("/api/ai/live-chat", authenticateToken, async (req: any, res) => {
+    if (!isFeatureEnabledForSchool(req.schoolId, 'ai_lab', req.user)) {
+      return res.status(403).json({
+        error: "Le module Assistant IA & Laboratoires n'est pas actif dans la formule d'abonnement de votre établissement."
+      });
+    }
     const { message, history, provider = 'gemini', model } = req.body;
     if (!message) return res.status(400).json({ error: "Message requis" });
 
@@ -7868,14 +8156,27 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
       const schoolId = req.schoolId;
       if (!schoolId) return res.status(400).json({ error: "ID de l'école manquant" });
 
-      const school = db.prepare("SELECT id, nom, plan_abonnement, statut_abonnement, date_fin_abonnement FROM school_info WHERE id = ?").get(schoolId) as any;
+      const { school, plan: matchedPlan, featureIds } = getSchoolActiveSubscriptionPlan(schoolId);
       if (!school) return res.status(404).json({ error: "École non trouvée" });
 
+      const currentStudents = safeCount("SELECT COUNT(*) as count FROM eleves WHERE school_id = ?", schoolId);
+      const currentStaff =
+        safeCount("SELECT COUNT(*) as count FROM enseignants WHERE school_id = ?", schoolId) +
+        safeCount("SELECT COUNT(*) as count FROM personnel_administratif WHERE school_id = ?", schoolId);
+
       res.json({
-        plan: school.plan_abonnement || 'standard',
+        plan: matchedPlan?.name || school.plan_abonnement || 'standard',
+        plan_id: matchedPlan?.id ?? null,
         statut: school.statut_abonnement || 'actif',
         date_fin: school.date_fin_abonnement || null,
-        school_nom: school.nom
+        school_nom: school.nom,
+        featureIds,
+        features: matchedPlan?.features || [],
+        student_limit: matchedPlan ? matchedPlan.student_limit : 0,
+        staff_limit: matchedPlan ? matchedPlan.staff_limit : 0,
+        current_students: currentStudents,
+        current_staff: currentStaff,
+        strictFormulaConfigured: Boolean(matchedPlan?.strictFormulaConfigured)
       });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -13125,6 +13426,10 @@ app.get("/api/parent/child-data", authenticateToken, (req: any, res) => {
       }
 
       const schoolId = req.schoolId || 1;
+      const studentQuota = checkStudentQuotaForSchool(schoolId, 1);
+      if (!studentQuota.allowed) {
+        return res.status(403).json({ error: studentQuota.message, quotaExceeded: true, limit: studentQuota.limit, current: studentQuota.current });
+      }
       const safeClasse = resolveSafeClasseId(db, classe_id, schoolId);
       let safeMatricule = (matricule ? String(matricule) : '').trim();
       if (!safeMatricule) {
@@ -13170,6 +13475,8 @@ app.get("/api/parent/child-data", authenticateToken, (req: any, res) => {
       }
 
       logActivity(req.userId, 'CREATE', 'ELEVE', eleveId as number, { nom, prenom, matricule: safeMatricule, regime: safeRegime }, schoolId);
+      saveLocalCheckpointSync();
+      scheduleCheckpoint('eleve_create');
       res.json({ id: eleveId, regime_inscription: safeRegime });
     } catch (error: any) {
       console.error("Student create error:", error);
@@ -13344,6 +13651,11 @@ app.get("/api/parent/child-data", authenticateToken, (req: any, res) => {
         ? validItems
         : [...validItems, ...suspectsList.map(s => s.item)];
 
+      const studentQuota = checkStudentQuotaForSchool(schoolId, itemsToImport.length);
+      if (!studentQuota.allowed) {
+        return res.status(403).json({ error: studentQuota.message, quotaExceeded: true, limit: studentQuota.limit, current: studentQuota.current });
+      }
+
       const activeYearId = getActiveYearId(schoolId);
       const todayDate = new Date().toISOString().split('T')[0];
 
@@ -13399,6 +13711,8 @@ app.get("/api/parent/child-data", authenticateToken, (req: any, res) => {
 
       importTransaction(itemsToImport);
       logActivity(req.userId, "IMPORT", "eleves", null, { created: createdCount, skipped: skippedCount }, schoolId);
+      saveLocalCheckpointSync();
+      scheduleCheckpoint('eleves_import');
       res.json({ success: true, count: createdCount, skipped: skippedCount, warnings });
     } catch (error: any) {
       console.error("Eleves import error:", error);
@@ -15806,6 +16120,11 @@ function executeYearTransition(
         ? validItems.filter(item => !item._isSuspect) 
         : validItems;
 
+      const staffQuota = checkStaffQuotaForSchool(schoolId, itemsToImport.length);
+      if (!staffQuota.allowed) {
+        return res.status(403).json({ error: staffQuota.message, quotaExceeded: true, limit: staffQuota.limit, current: staffQuota.current });
+      }
+
       const matieresList = db.prepare("SELECT id, nom FROM matieres WHERE school_id = ? OR school_id IS NULL").all(schoolId) as any[];
       const matiereMap = new Map();
       matieresList.forEach(m => matiereMap.set(m.nom.toLowerCase().trim(), m.id));
@@ -15897,6 +16216,8 @@ function executeYearTransition(
 
       importTransaction(itemsToImport);
       logActivity(req.userId, "IMPORT", "enseignants", null, { count: createdCount, skipped: skippedCount }, schoolId);
+      saveLocalCheckpointSync();
+      scheduleCheckpoint('enseignants_import');
       res.json({ success: true, count: createdCount, skipped: skippedCount, warnings });
     } catch (error: any) {
       console.error("Import teachers error:", error);
@@ -15914,6 +16235,11 @@ function executeYearTransition(
 
     if (!nom || !prenom) {
       return res.status(400).json({ error: "Nom et prénom sont requis." });
+    }
+
+    const staffQuota = checkStaffQuotaForSchool(req.schoolId, 1);
+    if (!staffQuota.allowed) {
+      return res.status(403).json({ error: staffQuota.message, quotaExceeded: true, limit: staffQuota.limit, current: staffQuota.current });
     }
 
     const dupCheck = checkTeacherDuplicateFull(db, req.schoolId, { nom, prenom, telephone, email, date_naissance, lieu_naissance, matricule });
@@ -16969,6 +17295,11 @@ function executeYearTransition(
         ? validItems.filter(item => !item._isSuspect) 
         : validItems;
 
+      const staffQuota = checkStaffQuotaForSchool(schoolId, itemsToImport.length);
+      if (!staffQuota.allowed) {
+        return res.status(403).json({ error: staffQuota.message, quotaExceeded: true, limit: staffQuota.limit, current: staffQuota.current });
+      }
+
       const insertStaff = db.prepare(`
         INSERT INTO personnel_administratif (
           nom, prenom, poste, telephone, email, adresse, sexe, date_naissance, lieu_naissance,
@@ -17017,6 +17348,11 @@ function executeYearTransition(
 
     if (!nom || !prenom || !poste) {
       return res.status(400).json({ error: "Nom, prénom et poste sont requis" });
+    }
+
+    const staffQuota = checkStaffQuotaForSchool(req.schoolId, 1);
+    if (!staffQuota.allowed) {
+      return res.status(403).json({ error: staffQuota.message, quotaExceeded: true, limit: staffQuota.limit, current: staffQuota.current });
     }
 
     const normPoste = (poste || '').toLowerCase();
@@ -17098,6 +17434,8 @@ function executeYearTransition(
     const schoolCode = schoolInfo?.code_ecole || `SCH-${String(req.schoolId).padStart(4, '0')}`;
 
     logActivity(req.userId, 'CREATE', 'PERSONNEL_ADMIN', staffId as number, { nom, prenom, poste, matricule: finalMatricule }, req.schoolId);
+    saveLocalCheckpointSync();
+    scheduleCheckpoint('personnel_create');
     res.json({ 
       success: true,
       id: staffId, 
@@ -20905,6 +21243,14 @@ function executeYearTransition(
     }
     const assignedRole = rawRole || 'enseignant';
 
+    // Check staff quota if creating a staff/teaching account without already linked personnel/teacher record
+    if (!['parent', 'eleve'].includes(assignedRole) && !enseignant_id && !personnel_id && req.user?.role !== 'super_admin') {
+      const staffQuota = checkStaffQuotaForSchool(req.schoolId, 1);
+      if (!staffQuota.allowed) {
+        return res.status(403).json({ error: staffQuota.message, quotaExceeded: true, limit: staffQuota.limit, current: staffQuota.current });
+      }
+    }
+
     // Generate cryptographically random password and OTP
     const password = crypto.randomBytes(6).toString('base64url');
     const otp = String(crypto.randomInt(100000, 999999));
@@ -20957,6 +21303,8 @@ function executeYearTransition(
       const schoolCode = schoolInfo?.code_ecole || `SCH-${String(req.schoolId).padStart(4, '0')}`;
 
       logActivity(parent_admin_id, 'CREATE', 'USER', info.lastInsertRowid as number, { email, role: assignedRole }, req.schoolId);
+      saveLocalCheckpointSync();
+      scheduleCheckpoint('user_create');
       res.json({ 
         success: true,
         id: info.lastInsertRowid, 
@@ -21011,6 +21359,8 @@ function executeYearTransition(
       `).run(nom, email, role, approuve, permissionsStr, can_write !== undefined ? can_write : 1, enseignant_id || null, personnel_id || null, eleve_id || null, id, req.schoolId);
     }
     logActivity(req.userId, 'UPDATE', 'USER', parseInt(id), { email, role }, req.schoolId);
+    saveLocalCheckpointSync();
+    scheduleCheckpoint('user_update');
     res.json({ success: true });
   });
 
@@ -21093,6 +21443,8 @@ function executeYearTransition(
 
       logActivity(req.userId, 'DELETE', 'USER', parseInt(id), { email: user ? user.email : 'Inconnu' }, req.schoolId);
       markExplicitDeletion();
+      saveLocalCheckpointSync();
+      scheduleCheckpoint('user_delete');
       res.json({ success: true });
     } catch (error: any) {
       console.error("Delete user error:", error);
@@ -23969,6 +24321,9 @@ Cette clé servira lors du premier accès de votre établissement au système po
       const { plans, featureMatrix, paymentMethods, planPaymentLinks } = req.body;
       const upsert = db.prepare("INSERT OR REPLACE INTO super_admin_settings (key, value) VALUES (?, ?)");
 
+      const matrixInput = featureMatrix && typeof featureMatrix === 'object' ? { ...featureMatrix } : getProductFeatureMatrixMap();
+      const normalizedMatrix: Record<string, string[]> = {};
+
       db.transaction(() => {
         if (Array.isArray(plans)) {
           const existingDbPlans = db.prepare("SELECT id, name, features FROM plans").all() as any[];
@@ -23984,9 +24339,37 @@ Cette clé servira lors du premier accès de votre établissement au système po
             const priceVal = Number(p.price ?? 0);
             const typeVal = p.type || (priceVal === 0 ? 'trial' : 'paid');
             const periodVal = p.period || (typeVal === 'trial' ? '14 jours' : 'mois');
-            const featuresVal = Array.isArray(p.features)
-              ? JSON.stringify(p.features)
-              : (existingRow?.features || '[]');
+            const studentLimitVal = parsePlanLimitValue(p.student_limit, 500);
+            const staffLimitVal = parsePlanLimitValue(p.staff_limit, 50);
+
+            const incomingMatrixIds = Array.isArray(matrixInput[String(p.id)])
+              ? matrixInput[String(p.id)]
+              : (existingRow && Array.isArray(matrixInput[String(existingRow.id)]) ? matrixInput[String(existingRow.id)] : null);
+
+            let resolvedFeaturesArr: string[] = [];
+            try {
+              resolvedFeaturesArr = Array.isArray(p.features)
+                ? p.features
+                : JSON.parse(existingRow?.features || '[]');
+            } catch {
+              resolvedFeaturesArr = [];
+            }
+
+            if (Array.isArray(incomingMatrixIds)) {
+              // Rebuild canonical feature list from matrix + preserve any purely custom text labels
+              const customOnly = resolvedFeaturesArr.filter((label: string) =>
+                !APP_FEATURES.some(af =>
+                  af.id.toLowerCase() === String(label).toLowerCase() ||
+                  af.name.toLowerCase() === String(label).toLowerCase()
+                )
+              );
+              const canonicalNames = APP_FEATURES
+                .filter(af => incomingMatrixIds.includes(af.id))
+                .map(af => af.name);
+              resolvedFeaturesArr = Array.from(new Set([...canonicalNames, ...customOnly]));
+            }
+
+            const featuresVal = JSON.stringify(resolvedFeaturesArr);
 
             if (existingRow) {
               keptIds.add(existingRow.id);
@@ -24013,11 +24396,14 @@ Cette clé servira lors du premier accès de votre établissement au système po
                 p.is_recommended ? 1 : 0,
                 typeVal,
                 isAct,
-                p.student_limit ?? 500,
-                p.staff_limit ?? 50,
+                studentLimitVal,
+                staffLimitVal,
                 p.description ?? null,
                 existingRow.id
               );
+              normalizedMatrix[String(existingRow.id)] = Array.isArray(incomingMatrixIds)
+                ? incomingMatrixIds
+                : resolvePlanFeatureIds(resolvedFeaturesArr, null, p.name);
             } else {
               const ins = db.prepare(`
                 INSERT INTO plans (name, price, period, features, color, is_recommended, type, is_active, student_limit, staff_limit, description)
@@ -24031,11 +24417,15 @@ Cette clé servira lors du premier accès de votre établissement au système po
                 p.is_recommended ? 1 : 0,
                 typeVal,
                 isAct,
-                p.student_limit ?? 500,
-                p.staff_limit ?? 50,
+                studentLimitVal,
+                staffLimitVal,
                 p.description ?? null
               );
-              keptIds.add(Number(ins.lastInsertRowid));
+              const newPlanId = Number(ins.lastInsertRowid);
+              keptIds.add(newPlanId);
+              normalizedMatrix[String(newPlanId)] = Array.isArray(incomingMatrixIds)
+                ? incomingMatrixIds
+                : resolvePlanFeatureIds(resolvedFeaturesArr, null, p.name);
             }
           }
 
@@ -24047,12 +24437,15 @@ Cette clé servira lors du premier accès de votre établissement au système po
           }
         }
 
-        upsert.run('product_plans', JSON.stringify(plans || []));
-        upsert.run('product_feature_matrix', JSON.stringify(featureMatrix || {}));
+        const syncedPlans = getConfiguredPlansFromDb(false);
+        upsert.run('product_plans', JSON.stringify(syncedPlans));
+        upsert.run('product_feature_matrix', JSON.stringify(Object.keys(normalizedMatrix).length > 0 ? normalizedMatrix : matrixInput));
         if (paymentMethods) upsert.run('payment_methods', JSON.stringify(paymentMethods));
         if (planPaymentLinks) upsert.run('plan_payment_links', JSON.stringify(planPaymentLinks));
       })();
 
+      saveLocalCheckpointSync();
+      scheduleCheckpoint('product_config_update');
       res.json({ success: true, message: "Configuration produit publiée avec succès" });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -24301,6 +24694,11 @@ Cette clé servira lors du premier accès de votre établissement au système po
   // AI Assistant Endpoint (Powered by Gemini)
   app.post("/api/ai/assistant", authenticateToken, async (req: any, res) => {
     try {
+      if (!isFeatureEnabledForSchool(req.schoolId, 'ai_lab', req.user)) {
+        return res.status(403).json({
+          error: "L'assistant IA n'est pas actif dans la formule d'abonnement actuelle de votre établissement."
+        });
+      }
       const { message, history, context } = req.body;
       if (!message || typeof message !== 'string') {
         return res.status(400).json({ error: "Le message est requis." });
@@ -30375,21 +30773,27 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
 
   app.post("/api/super-admin/plans", authenticateToken, requireSuperAdmin, (req, res) => {
     try {
-      const { name, price, period, features, color, is_recommended, type, is_active, student_limit, staff_limit, description } = req.body;
+      const { name, price, period, features, featureIds, color, is_recommended, type, is_active, student_limit, staff_limit, description } = req.body;
+      const featuresArr = Array.isArray(features) ? features : [];
+      const studentLimitVal = parsePlanLimitValue(student_limit, 500);
+      const staffLimitVal = parsePlanLimitValue(staff_limit, 50);
       const info = db.prepare("INSERT INTO plans (name, price, period, features, color, is_recommended, type, student_limit, staff_limit, description, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
         .run(
           name,
           price ?? 0,
           period || 'mois',
-          JSON.stringify(features || []),
+          JSON.stringify(featuresArr),
           color || 'indigo',
           is_recommended ? 1 : 0,
           type || (Number(price ?? 0) === 0 ? 'trial' : 'paid'),
-          student_limit ?? 500,
-          staff_limit ?? 50,
+          studentLimitVal,
+          staffLimitVal,
           description || null,
           is_active !== undefined ? (is_active ? 1 : 0) : 1
         );
+      syncPlanFeatureMatrixEntry(info.lastInsertRowid as number, featuresArr, name, Array.isArray(featureIds) ? featureIds : undefined);
+      saveLocalCheckpointSync();
+      scheduleCheckpoint('plan_create');
       res.json({ success: true, id: info.lastInsertRowid });
     } catch (err) {
       res.status(500).json({ error: "Erreur lors de la création du plan." });
@@ -30398,22 +30802,28 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
 
   app.put("/api/super-admin/plans/:id", authenticateToken, requireSuperAdmin, (req, res) => {
     try {
-      const { name, price, period, features, color, is_recommended, type, is_active, student_limit, staff_limit, description } = req.body;
+      const { name, price, period, features, featureIds, color, is_recommended, type, is_active, student_limit, staff_limit, description } = req.body;
+      const featuresArr = Array.isArray(features) ? features : [];
+      const studentLimitVal = parsePlanLimitValue(student_limit, 500);
+      const staffLimitVal = parsePlanLimitValue(staff_limit, 50);
       db.prepare("UPDATE plans SET name = ?, price = ?, period = ?, features = ?, color = ?, is_recommended = ?, type = ?, is_active = ?, student_limit = ?, staff_limit = ?, description = ? WHERE id = ?")
         .run(
           name, 
           price ?? 0, 
           period || 'mois', 
-          JSON.stringify(features || []), 
+          JSON.stringify(featuresArr), 
           color || 'indigo', 
           is_recommended ? 1 : 0, 
           type || (Number(price ?? 0) === 0 ? 'trial' : 'paid'), 
           is_active !== undefined ? (is_active ? 1 : 0) : 1, 
-          student_limit ?? 500, 
-          staff_limit ?? 50, 
+          studentLimitVal, 
+          staffLimitVal, 
           description || null,
           req.params.id
         );
+      syncPlanFeatureMatrixEntry(req.params.id, featuresArr, name, Array.isArray(featureIds) ? featureIds : undefined);
+      saveLocalCheckpointSync();
+      scheduleCheckpoint('plan_update');
       res.json({ success: true });
     } catch (err) {
       res.status(500).json({ error: "Erreur lors de la mise à jour du plan." });
@@ -30423,6 +30833,12 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
   app.delete("/api/super-admin/plans/:id", authenticateToken, requireSuperAdmin, (req, res) => {
     try {
       db.prepare("DELETE FROM plans WHERE id = ?").run(req.params.id);
+      const matrix = getProductFeatureMatrixMap();
+      delete matrix[String(req.params.id)];
+      saveProductFeatureMatrixMap(matrix);
+      markExplicitDeletion();
+      saveLocalCheckpointSync();
+      scheduleCheckpoint('plan_delete');
       res.json({ success: true });
     } catch (err) {
       res.status(500).json({ error: "Erreur lors de la suppression du plan." });
@@ -30788,6 +31204,8 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         recordSaasLog((req as any).user?.id || null, 'UPDATE_SCHOOL', { school_id: schoolId, nom }, req);
       } catch (e) {}
 
+      saveLocalCheckpointSync();
+      scheduleCheckpoint('update_school');
       res.json({ success: true, message: "Établissement mis à jour avec succès." });
     } catch (err: any) {
       res.status(500).json({ error: "Erreur lors de la mise à jour : " + (err.message || err) });
@@ -30863,6 +31281,8 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         }, req);
       } catch (e) {}
 
+      saveLocalCheckpointSync();
+      scheduleCheckpoint('spaces_lock_school');
       res.json({
         success: true,
         message: "État des espaces scolaires mis à jour avec succès.",
@@ -30908,6 +31328,8 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         }, req);
       } catch (e) {}
 
+      saveLocalCheckpointSync();
+      scheduleCheckpoint('reset_school_admin_password');
       res.json({
         success: true,
         newDefaultPassword,
@@ -30982,6 +31404,8 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       } catch (e) {}
 
       markExplicitDeletion();
+      saveLocalCheckpointSync();
+      saveCheckpoint('delete_school').catch(() => {});
       res.json({ success: true, message: `L'établissement ${school.nom} a été supprimé avec succès.` });
     } catch (err: any) {
       // Ensure foreign keys are restored in case of error
@@ -31739,7 +32163,8 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       if (!vault || !vault.tables || typeof vault.tables !== 'object') {
         return res.status(400).json({ error: "Vault invalide." });
       }
-      const reconciled = reconcileMissingSchoolAccountsFromVault(vault);
+      let reconciled = reconcileMissingSchoolAccountsFromVault(vault);
+      reconciled += ensureApprovedRequestsHaveSchools();
       if (reconciled > 0) {
         bumpServerDataVersion();
         saveLocalCheckpointSync();
@@ -31752,6 +32177,27 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       });
     } catch (err: any) {
       res.status(500).json({ error: err?.message || "Erreur synchronisation cloud vault" });
+    }
+  });
+
+  app.get("/api/super-admin/persistence-status", authenticateToken, requireSuperAdmin, (_req, res) => {
+    try {
+      const stats = getDatabaseStats();
+      const localBackupExists = fs.existsSync(AUTO_BACKUP_PATH);
+      const vaultExists = fs.existsSync(SCHOOL_VAULT_PATH);
+      const lastLocalBackupAt = localBackupExists
+        ? fs.statSync(AUTO_BACKUP_PATH).mtime.toISOString()
+        : null;
+      res.json({
+        success: true,
+        cloudSyncAvailable: isCloudSyncAvailable(),
+        localBackupExists,
+        vaultExists,
+        lastLocalBackupAt,
+        stats
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Erreur statut persistance" });
     }
   });
 

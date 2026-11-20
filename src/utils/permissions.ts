@@ -378,7 +378,34 @@ export function hasPageAccess(permissions: any[] | undefined, targetPath: string
   // Parent special portal: only has access to accueil, alertes and mon-enfant (STRICTLY NO ACCESS TO EPREUVES)
   if (userRole === 'parent') {
     if (targetPath.startsWith('/epreuves')) return false;
-    return ['/accueil', '/accueil-primaire', '/accueil-secondaire', '/alertes', '/mon-enfant', '/mon-compte', '/bibliotheque', '/bibliotheque-primaire', '/bibliotheque-secondaire'].includes(targetPath);
+    return ['/accueil', '/accueil-primaire', '/accueil-secondaire', '/alertes', '/mon-enfant', '/mon-compte', '/bibliotheque', '/bibliotheque-primaire', '/bibliotheque-secondaire', '/emploi-du-temps', '/messagerie', '/documents-demandes'].includes(targetPath);
+  }
+
+  // Student (eleve) portal access
+  if (userRole === 'eleve') {
+    if (targetPath.startsWith('/epreuves-composition')) return false;
+    return [
+      '/accueil',
+      '/accueil-primaire',
+      '/accueil-secondaire',
+      '/emploi-du-temps',
+      '/emploi-du-temps-primaire',
+      '/emploi-du-temps-secondaire',
+      '/notes',
+      '/notes-primaire',
+      '/notes-secondaire',
+      '/bibliotheque',
+      '/bibliotheque-primaire',
+      '/bibliotheque-secondaire',
+      '/bibliotheque-physique',
+      '/epreuves',
+      '/epreuves-primaire',
+      '/epreuves-secondaire',
+      '/alertes',
+      '/messagerie',
+      '/documents-demandes',
+      '/mon-compte',
+    ].includes(targetPath);
   }
 
   // Teacher special portal: timetable, grades, requests, alerts, messagerie, documents, mon-compte, bibliotheque & epreuves
@@ -406,7 +433,12 @@ export function hasPageAccess(permissions: any[] | undefined, targetPath: string
       '/bibliotheque-secondaire',
       '/epreuves',
       '/epreuves-primaire',
-      '/epreuves-secondaire'
+      '/epreuves-secondaire',
+      '/documents-demandes',
+      '/documents-administratifs',
+      '/workspace',
+      '/gmail',
+      '/lab-ia'
     ];
     if (teacherBasePaths.includes(targetPath)) return true;
   }
@@ -471,7 +503,20 @@ export function getPageAccessMode(permissions: any[] | undefined, targetPath: st
     if (targetPath.startsWith('/epreuves')) {
       return 'none';
     }
-    if (['/mon-enfant', '/alertes', '/accueil', '/accueil-primaire', '/accueil-secondaire', '/bibliotheque', '/bibliotheque-primaire', '/bibliotheque-secondaire', '/bibliotheque-physique'].includes(targetPath)) {
+    if (['/messagerie', '/documents-demandes'].includes(targetPath)) {
+      return 'read_write';
+    }
+    if (['/mon-enfant', '/alertes', '/accueil', '/accueil-primaire', '/accueil-secondaire', '/bibliotheque', '/bibliotheque-primaire', '/bibliotheque-secondaire', '/bibliotheque-physique', '/emploi-du-temps'].includes(targetPath)) {
+      return 'read_only';
+    }
+    return 'none';
+  }
+
+  if (userRole === 'eleve') {
+    if (['/messagerie', '/documents-demandes'].includes(targetPath)) {
+      return 'read_write';
+    }
+    if (['/accueil', '/accueil-primaire', '/accueil-secondaire', '/emploi-du-temps', '/emploi-du-temps-primaire', '/emploi-du-temps-secondaire', '/notes', '/notes-primaire', '/notes-secondaire', '/bibliotheque', '/bibliotheque-primaire', '/bibliotheque-secondaire', '/bibliotheque-physique', '/epreuves', '/epreuves-primaire', '/epreuves-secondaire', '/alertes'].includes(targetPath)) {
       return 'read_only';
     }
     return 'none';

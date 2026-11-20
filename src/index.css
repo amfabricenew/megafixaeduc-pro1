@@ -180,3 +180,17 @@ body {
     -webkit-overflow-scrolling: touch;
   }
 }
+
+.safe-top {
+  padding-top: max(0.625rem, env(safe-area-inset-top));
+}
+
+.safe-bottom {
+  padding-bottom: max(0.625rem, env(safe-area-inset-bottom));
+}
+
+@media (max-width: 380px) {
+  body {
+    font-size: 14px;
+  }
+}

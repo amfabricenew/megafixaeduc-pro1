@@ -1,9 +1,33 @@
-export type SubscriptionPlan = 'starter' | 'standard' | 'excellence';
+import {
+  resolvePlanFeatureIds,
+  isPathAllowedByFeatures,
+  isFeatureAllowedInList,
+  isUnlimitedLimit,
+  formatStudentLimit,
+  formatStaffLimit,
+} from '../constants/productFeatures';
+
+export type SubscriptionPlan = 'starter' | 'standard' | 'excellence' | string;
 
 export interface PlanFeature {
   id: string;
   name: string;
   included: boolean;
+}
+
+export interface SchoolPlanDetails {
+  name: string;
+  plan_id?: number | string | null;
+  statut?: string;
+  date_fin?: string | null;
+  school_nom?: string;
+  featureIds: string[];
+  features: string[];
+  student_limit: number;
+  staff_limit: number;
+  current_students?: number;
+  current_staff?: number;
+  strictFormulaConfigured?: boolean;
 }
 
 export interface SubscriptionPlanDetails {
@@ -44,6 +68,8 @@ export const ALL_SYSTEM_PATHS = [
   '/enseignants',
   '/enseignants-primaire',
   '/enseignants-secondaire',
+  '/collecte-enseignants',
+  '/collecte-enseignants-secondaire',
   '/personnel-administratif',
   '/matieres',
   '/matieres-primaire',
@@ -51,7 +77,14 @@ export const ALL_SYSTEM_PATHS = [
   '/notes',
   '/notes-primaire',
   '/notes-secondaire',
+  '/examens-primaire',
+  '/examens-secondaire',
   '/paiements',
+  '/paiements-primaire',
+  '/paiements-secondaire',
+  '/finances',
+  '/finances-primaire',
+  '/finances-secondaire',
   '/salaires-enseignants',
   '/salaires',
   '/cartes-et-badges',
@@ -68,101 +101,96 @@ export const ALL_SYSTEM_PATHS = [
   '/epreuves',
   '/epreuves-primaire',
   '/epreuves-secondaire',
+  '/epreuves-composition',
+  '/recrutement-inscriptions',
+  '/admin/sessions-actives',
   '/documents-demandes',
+  '/documents-administratifs',
   '/ecole',
   '/alertes',
   '/messagerie',
+  '/workspace',
+  '/gmail',
+  '/lab-ia',
   '/audit-logs',
   '/parametres',
   '/mon-enfant',
-  '/mon-compte'
+  '/mon-compte',
 ];
 
-export const SUBSCRIPTION_PLANS: Record<SubscriptionPlan, SubscriptionPlanDetails> = {
-  starter: {
-    id: 'starter',
-    name: 'Formule Starter (Base)',
-    badge: 'Découverte',
-    tagline: 'Essentiel pour démarrer la gestion académique de base',
-    price: '25 000 FCFA',
-    period: '/ trimestre',
-    color: 'text-blue-500',
-    border: 'border-blue-500/30',
-    bgGradient: 'from-blue-500/10 to-indigo-500/5',
-    maxStudents: 'Jusqu\'à 300 élèves',
-    supportLevel: 'Support standard par email',
-    allowedPaths: ALL_SYSTEM_PATHS,
-    features: [
-      'Gestion des classes, matières et coefficients',
-      'Fiches et inscriptions des élèves',
-      'Saisie des notes et calcul des moyennes',
-      'Emplois du temps hebdomadaires',
-      'Espace individuel Parent sécurisé (Mon Enfant)'
-    ]
-  },
-  standard: {
-    id: 'standard',
-    name: 'Formule Académique (Standard)',
-    badge: 'Populaire',
-    tagline: 'Organisation scolaire avancée & badges officiels',
-    price: '75 000 FCFA',
-    period: '/ an',
-    color: 'text-emerald-500',
-    border: 'border-emerald-500/40',
-    bgGradient: 'from-emerald-500/15 to-teal-500/5',
-    maxStudents: 'Jusqu\'à 1 000 élèves',
-    supportLevel: 'Support prioritaire WhatsApp & Email',
-    allowedPaths: ALL_SYSTEM_PATHS,
-    features: [
-      'Toutes les fonctionnalités Starter incluses',
-      'Génération & Impression des Cartes Scolaires & Badges QR Code',
-      'Gestion des Passages & Redoublements de fin d\'année',
-      'Gestion du Personnel Administratif et des Postes',
-      'Demandes d\'ajustement d\'horaires et documents administratifs',
-      'Paramétrage complet des années scolaires & rôles'
-    ]
-  },
-  excellence: {
-    id: 'excellence',
-    name: 'Formule Excellence (Intégrale Pro)',
-    badge: 'Tout-en-un',
-    tagline: 'Gestion intégrale : Académique, Finances, Salaires & IA',
-    price: '150 000 FCFA',
-    period: '/ an',
-    color: 'text-amber-500',
-    border: 'border-amber-500/50',
-    bgGradient: 'from-amber-500/20 to-orange-500/10',
-    maxStudents: 'Élèves illimités',
-    supportLevel: 'Support dédié 24/7 + Formations',
-    allowedPaths: ALL_SYSTEM_PATHS,
-    features: [
-      'Toutes les fonctionnalités de la formule Standard',
-      'Module Finances & Paiements de scolarité (tranches, reçus officiels)',
-      'Gestion des Salaires & Paie (enseignants permanents/vacataires, bilans)',
-      'Journal d\'audit & Traçabilité complète des opérations',
-      'Assistant IA Gemini pour analyses pédagogiques et bilans scolaires',
-      'Sauvegardes automatiques et gestion multi-utilisateurs illimitée'
-    ]
-  }
+export {
+  resolvePlanFeatureIds,
+  isUnlimitedLimit,
+  formatStudentLimit,
+  formatStaffLimit,
 };
 
-/**
- * Checks if a specific route path is permitted under a school subscription plan.
- * Restores functional tiering between Starter, Standard, and Excellence formulas.
- */
-export function isPathAllowedByPlan(plan: SubscriptionPlan | string | undefined, path: string): boolean {
-  if (!plan) return true;
-  const p = plan.toString().toLowerCase().trim();
+export function isFeatureAllowedByPlan(
+  planOrDetails: SchoolPlanDetails | SubscriptionPlan | null | undefined,
+  featureId: string
+): boolean {
+  if (!planOrDetails) return true;
 
-  // Excellence formula has 100% full access to all features
-  if (p === 'excellence') {
+  if (typeof planOrDetails === 'object') {
+    if (Array.isArray(planOrDetails.featureIds)) {
+      return isFeatureAllowedInList(planOrDetails.featureIds, featureId);
+    }
+    if (Array.isArray(planOrDetails.features)) {
+      const ids = resolvePlanFeatureIds(planOrDetails.features, null, planOrDetails.name);
+      return isFeatureAllowedInList(ids, featureId);
+    }
     return true;
   }
 
-  // Normalize path without query parameters or trailing slashes
-  const cleanPath = path.split('?')[0].replace(/\/+$/, '') || '/';
+  const p = String(planOrDetails).toLowerCase().trim();
+  if (p === 'excellence' || p === 'premium plus') return true;
+  if (p === 'standard') {
+    return !['accounting', 'payroll', 'ai_lab'].includes(featureId);
+  }
+  if (p === 'starter') {
+    return ![
+      'badges',
+      'promotions',
+      'admin_staff',
+      'buildings',
+      'resources',
+      'exam_bank',
+      'exams',
+      'fees',
+      'accounting',
+      'payroll',
+      'ai_lab',
+      'audit_logs',
+    ].includes(featureId);
+  }
+  return true;
+}
 
-  // Standard formula excludes financial cashflow, teacher salaries, and AI Lab
+/**
+ * Checks if a specific route path is permitted under a school subscription plan.
+ * Strictly honors Super Admin configured featureIds when present.
+ */
+export function isPathAllowedByPlan(
+  planOrDetails: SchoolPlanDetails | SubscriptionPlan | null | undefined,
+  path: string
+): boolean {
+  if (!planOrDetails) return true;
+  const cleanPath = (path || '/').split('?')[0].replace(/\/+$/, '') || '/';
+
+  // 1) Dynamic formula configuration from backend / Super Admin
+  if (typeof planOrDetails === 'object') {
+    const activeIds = Array.isArray(planOrDetails.featureIds)
+      ? planOrDetails.featureIds
+      : resolvePlanFeatureIds(planOrDetails.features, null, planOrDetails.name);
+    return isPathAllowedByFeatures(activeIds, cleanPath);
+  }
+
+  // 2) Fallback for plain legacy string plan names when planDetails isn't loaded yet
+  const p = planOrDetails.toString().toLowerCase().trim();
+  if (p === 'excellence' || p === 'premium plus') {
+    return true;
+  }
+
   if (p === 'standard') {
     const gatedForStandard = [
       '/finances',
@@ -170,12 +198,11 @@ export function isPathAllowedByPlan(plan: SubscriptionPlan | string | undefined,
       '/finances-secondaire',
       '/salaires',
       '/salaires-enseignants',
-      '/lab-ia'
+      '/lab-ia',
     ];
-    return !gatedForStandard.some(fp => cleanPath === fp || cleanPath.startsWith(fp + '/'));
+    return !gatedForStandard.some((fp) => cleanPath === fp || cleanPath.startsWith(fp + '/'));
   }
 
-  // Starter formula only includes core teaching, classes, students, grades & schedule
   if (p === 'starter') {
     const gatedForStarter = [
       '/cartes-et-badges',
@@ -198,9 +225,9 @@ export function isPathAllowedByPlan(plan: SubscriptionPlan | string | undefined,
       '/salaires',
       '/salaires-enseignants',
       '/lab-ia',
-      '/audit-logs'
+      '/audit-logs',
     ];
-    return !gatedForStarter.some(fp => cleanPath === fp || cleanPath.startsWith(fp + '/'));
+    return !gatedForStarter.some((fp) => cleanPath === fp || cleanPath.startsWith(fp + '/'));
   }
 
   return true;

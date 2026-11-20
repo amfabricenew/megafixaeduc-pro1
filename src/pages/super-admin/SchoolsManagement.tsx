@@ -36,6 +36,7 @@ import { twMerge } from 'tailwind-merge';
 import toast from 'react-hot-toast';
 import SchoolRequestsManagement from '../../components/super-admin/SchoolRequestsManagement';
 import SchoolMessagingModal from '../../components/super-admin/SchoolMessagingModal';
+import { syncCloudVaultWithFirestore } from '../../utils/cloudVaultSync';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -227,6 +228,7 @@ export default function SchoolsManagement() {
         duree_mois: '12'
       });
       fetchData();
+      syncCloudVaultWithFirestore().catch(() => {});
     } catch (err: any) {
       toast.error(err.message || "Erreur de création");
     } finally {
@@ -314,6 +316,7 @@ export default function SchoolsManagement() {
       toast.success(data.message || "Espaces scolaires mis à jour avec succès !");
       setSpacesLockSchool(null);
       fetchData();
+      syncCloudVaultWithFirestore().catch(() => {});
 
       if (selectedSchoolDetails && selectedSchoolDetails.school?.id === targetId) {
         setSelectedSchoolDetails((prev: any) => ({
@@ -360,6 +363,7 @@ export default function SchoolsManagement() {
       toast.success(data.message || "Établissement mis à jour avec succès");
       setEditingSchool(null);
       fetchData();
+      syncCloudVaultWithFirestore().catch(() => {});
       if (selectedSchoolDetails && selectedSchoolDetails.school?.id === editingSchool.id) {
         handleOpenDetails({ id: editingSchool.id });
       }
@@ -394,6 +398,7 @@ export default function SchoolsManagement() {
       }
       setNewGeneratedPasswordResult(data);
       toast.success("Nouveau mot de passe par défaut généré avec succès !");
+      syncCloudVaultWithFirestore().catch(() => {});
     } catch (err: any) {
       toast.error(err.message || "Erreur lors de la réinitialisation");
     } finally {
@@ -431,6 +436,7 @@ export default function SchoolsManagement() {
         setSelectedSchoolDetails(null);
       }
       fetchData();
+      syncCloudVaultWithFirestore({ allowShrink: true }).catch(() => {});
     } catch (err: any) {
       toast.error(err.message || "Erreur lors de la suppression");
     } finally {

@@ -11,7 +11,11 @@ import {
   Loader2
 } from 'lucide-react';
 import { apiFetch } from '../../utils/api';
-import { APP_FEATURES } from '../../constants/productFeatures';
+import {
+  APP_FEATURES,
+  resolvePlanFeatureIds,
+  isUnlimitedLimit,
+} from '../../constants/productFeatures';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
@@ -72,9 +76,9 @@ export default function PlansCatalog() {
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         {plans.map((plan, index) => {
-          const enabledFeatures = featureMatrix[plan.id] || featureMatrix[String(plan.id)] || [];
+          const rawMatrixIds = featureMatrix[plan.id] || featureMatrix[String(plan.id)];
+          const enabledFeatures = resolvePlanFeatureIds(plan.features, rawMatrixIds || plan.featureIds, plan.name);
           const isPlanActive = plan.is_active !== 0 && plan.active !== false;
-          const customFeatures: string[] = Array.isArray(plan.features) ? plan.features : [];
           
           return (
             <div 
@@ -90,7 +94,7 @@ export default function PlansCatalog() {
                 </div>
               )}
               
-              <div className="p-8 space-y-6 flex-1">
+              <div className="p-6 sm:p-8 space-y-6 flex-1">
                 <div className="flex items-center gap-4">
                   <div className="w-14 h-14 bg-slate-50 rounded-2xl flex items-center justify-center shadow-inner">
                     {getPlanIcon(index)}
@@ -106,52 +110,45 @@ export default function PlansCatalog() {
                 <div className="grid grid-cols-2 gap-3">
                   <div className="p-3 bg-slate-50 rounded-2xl text-center">
                     <Users className="mx-auto mb-1 text-slate-400" size={16} />
-                    <p className="text-xs font-black text-slate-900">{plan.student_limit ?? 'Illimité'}</p>
+                    <p className="text-xs font-black text-slate-900">
+                      {isUnlimitedLimit(plan.student_limit) ? 'Illimité' : Number(plan.student_limit).toLocaleString('fr-FR')}
+                    </p>
                     <p className="text-[10px] text-slate-500 font-bold uppercase tracking-tighter leading-none mt-1">Élèves</p>
                   </div>
                   <div className="p-3 bg-slate-50 rounded-2xl text-center">
                     <Shield className="mx-auto mb-1 text-slate-400" size={16} />
-                    <p className="text-xs font-black text-slate-900">{plan.staff_limit ?? 'Illimité'}</p>
+                    <p className="text-xs font-black text-slate-900">
+                      {isUnlimitedLimit(plan.staff_limit) ? 'Illimité' : Number(plan.staff_limit).toLocaleString('fr-FR')}
+                    </p>
                     <p className="text-[10px] text-slate-500 font-bold uppercase tracking-tighter leading-none mt-1">Staff</p>
                   </div>
                 </div>
 
                 <div className="space-y-4">
-                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">Fonctionnalités Incluses</p>
-                  {customFeatures.length > 0 && enabledFeatures.length === 0 ? (
-                    <div className="space-y-2.5">
-                      {customFeatures.map((feat, fIdx) => (
-                        <div key={fIdx} className="flex items-start gap-3">
-                          <div className="mt-0.5 w-4 h-4 rounded-full flex items-center justify-center shrink-0 bg-emerald-100 text-emerald-600">
-                            <Check size={10} strokeWidth={4} />
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">
+                    Fonctionnalités ({enabledFeatures.length}/{APP_FEATURES.length})
+                  </p>
+                  <div className="space-y-2.5 max-h-96 overflow-y-auto pr-1">
+                    {APP_FEATURES.map((feature) => {
+                      const isEnabled = enabledFeatures.includes(feature.id);
+                      return (
+                        <div key={feature.id} className="flex items-start gap-3 group">
+                          <div className={cn(
+                            "mt-0.5 w-4 h-4 rounded-full flex items-center justify-center shrink-0 transition-colors",
+                            isEnabled ? "bg-emerald-100 text-emerald-600" : "bg-slate-100 text-slate-300"
+                          )}>
+                            {isEnabled ? <Check size={10} strokeWidth={4} /> : <X size={10} strokeWidth={4} />}
                           </div>
-                          <span className="text-xs leading-tight text-slate-700 font-medium">{feat}</span>
+                          <span className={cn(
+                            "text-xs leading-tight transition-colors",
+                            isEnabled ? "text-slate-700 font-medium" : "text-slate-400"
+                          )}>
+                            {feature.name}
+                          </span>
                         </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="space-y-2.5">
-                      {APP_FEATURES.map((feature) => {
-                        const isEnabled = enabledFeatures.includes(feature.id);
-                        return (
-                          <div key={feature.id} className="flex items-start gap-3 group">
-                            <div className={cn(
-                              "mt-0.5 w-4 h-4 rounded-full flex items-center justify-center shrink-0 transition-colors",
-                              isEnabled ? "bg-emerald-100 text-emerald-600" : "bg-slate-100 text-slate-300"
-                            )}>
-                              {isEnabled ? <Check size={10} strokeWidth={4} /> : <X size={10} strokeWidth={4} />}
-                            </div>
-                            <span className={cn(
-                              "text-xs leading-tight transition-colors",
-                              isEnabled ? "text-slate-700 font-medium" : "text-slate-400"
-                            )}>
-                              {feature.name}
-                            </span>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
+                      );
+                    })}
+                  </div>
                 </div>
               </div>
 

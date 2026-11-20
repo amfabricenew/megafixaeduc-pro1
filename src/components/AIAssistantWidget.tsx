@@ -4,6 +4,7 @@ import { Bot, Sparkles, Send, X, Minimize2, RefreshCw, MessageSquare, Lightbulb,
 import { apiFetch } from '../utils/api';
 import { useAuth } from '../contexts/AuthContext';
 import { useOnlineStatus } from '../hooks/useOnlineStatus';
+import { isFeatureAllowedByPlan } from '../utils/subscriptions';
 
 interface Message {
   id: string;
@@ -21,7 +22,8 @@ export function toggleAIAssistant() {
 }
 
 export default function AIAssistantWidget() {
-  const { user } = useAuth();
+  const { user, schoolPlan, schoolPlanDetails } = useAuth();
+  const isAiAllowed = !user || user.role === 'super_admin' || Boolean(user.is_test_account) || isFeatureAllowedByPlan(schoolPlanDetails || schoolPlan, 'ai_lab');
   const isOnline = useOnlineStatus();
   const [isOpen, setIsOpen] = useState(false);
   const [isMinimized, setIsMinimized] = useState(false);
@@ -43,6 +45,10 @@ export default function AIAssistantWidget() {
   };
 
   useEffect(() => {
+    if (!isAiAllowed) {
+      setIsOpen(false);
+      return;
+    }
     const handleOpen = () => setIsOpen(true);
     const handleToggle = () => setIsOpen(prev => !prev);
     window.addEventListener('megafixa:open-ai-assistant', handleOpen);
@@ -51,13 +57,17 @@ export default function AIAssistantWidget() {
       window.removeEventListener('megafixa:open-ai-assistant', handleOpen);
       window.removeEventListener('megafixa:toggle-ai-assistant', handleToggle);
     };
-  }, []);
+  }, [isAiAllowed]);
 
   useEffect(() => {
     if (isOpen) {
       scrollToBottom();
     }
   }, [messages, isOpen]);
+
+  if (!isAiAllowed) {
+    return null;
+  }
 
   const handleSend = async (textToSend?: string) => {
     const query = (textToSend || input).trim();
