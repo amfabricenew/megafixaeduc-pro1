@@ -441,6 +441,80 @@ function safeCount(sql: string, ...params: any[]): number {
   }
 }
 
+interface SuperAdminConfigMeta {
+  customized: boolean;
+  updatedAtMs: number;
+  updatedAtIso: string | null;
+}
+
+function parseIsoMs(raw: any): number {
+  if (!raw) return 0;
+  const ms = Date.parse(String(raw));
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function getLocalSuperAdminConfigMeta(): SuperAdminConfigMeta {
+  let customized = false;
+  let updatedAtMs = 0;
+  let updatedAtIso: string | null = null;
+  for (const tbl of ['super_admin_settings', 'saas_settings']) {
+    if (!tableExists(tbl)) continue;
+    try {
+      const custRow = db.prepare(`SELECT value FROM "${tbl}" WHERE key = 'super_admin_config_customized'`).get() as any;
+      if (String(custRow?.value || '').trim().toLowerCase() === 'true') {
+        customized = true;
+      }
+      const tsRow = db.prepare(`SELECT value FROM "${tbl}" WHERE key = 'super_admin_config_updated_at'`).get() as any;
+      if (tsRow?.value) {
+        const ms = parseIsoMs(tsRow.value);
+        if (ms > updatedAtMs) {
+          updatedAtMs = ms;
+          updatedAtIso = String(tsRow.value);
+        }
+      }
+    } catch {}
+  }
+  return { customized, updatedAtMs, updatedAtIso };
+}
+
+function markSuperAdminConfigCustomized(isoTimestamp?: string): string {
+  const ts = isoTimestamp && parseIsoMs(isoTimestamp) > 0 ? isoTimestamp : new Date().toISOString();
+  for (const tbl of ['super_admin_settings', 'saas_settings']) {
+    if (!tableExists(tbl)) continue;
+    try {
+      db.prepare(`INSERT OR REPLACE INTO "${tbl}" (key, value) VALUES ('super_admin_config_customized', 'true')`).run();
+      db.prepare(`INSERT OR REPLACE INTO "${tbl}" (key, value) VALUES ('super_admin_config_updated_at', ?)`).run(ts);
+    } catch {}
+  }
+  return ts;
+}
+
+function extractVaultSuperAdminConfigMeta(vault: SchoolAccountsVault | null | undefined): SuperAdminConfigMeta {
+  let customized = false;
+  let updatedAtMs = 0;
+  let updatedAtIso: string | null = null;
+  if (!vault?.tables) return { customized, updatedAtMs, updatedAtIso };
+
+  for (const tbl of ['super_admin_settings', 'saas_settings']) {
+    const rows = vault.tables[tbl];
+    if (!Array.isArray(rows)) continue;
+    for (const r of rows) {
+      if (!r || typeof r !== 'object') continue;
+      if (r.key === 'super_admin_config_customized' && String(r.value || '').trim().toLowerCase() === 'true') {
+        customized = true;
+      }
+      if (r.key === 'super_admin_config_updated_at' && r.value) {
+        const ms = parseIsoMs(r.value);
+        if (ms > updatedAtMs) {
+          updatedAtMs = ms;
+          updatedAtIso = String(r.value);
+        }
+      }
+    }
+  }
+  return { customized, updatedAtMs, updatedAtIso };
+}
+
 interface DatabaseStats {
   schoolCount: number;
   nonDefaultSchoolCount: number;
@@ -454,6 +528,7 @@ interface DatabaseStats {
   requestCount: number;
   licenseCount: number;
   smtpConfigCount: number;
+  superAdminCustomized: boolean;
   hasRealData: boolean;
   totalScore: number;
 }
@@ -473,6 +548,7 @@ function getDatabaseStats(): DatabaseStats {
   const requestCount = tableExists('school_creation_requests') ? safeCount("SELECT COUNT(*) as count FROM school_creation_requests") : 0;
   const licenseCount = tableExists('subscription_licenses') ? safeCount("SELECT COUNT(*) as count FROM subscription_licenses") : 0;
   const smtpConfigCount = tableExists('school_smtp_configs') ? safeCount("SELECT COUNT(*) as count FROM school_smtp_configs") : 0;
+  const superAdminCustomized = getLocalSuperAdminConfigMeta().customized;
 
   const hasRealData = (
     schoolCount > 1 ||
@@ -485,7 +561,8 @@ function getDatabaseStats(): DatabaseStats {
     gradeCount > 0 ||
     requestCount > 0 ||
     licenseCount > 0 ||
-    smtpConfigCount > 0
+    smtpConfigCount > 0 ||
+    superAdminCustomized
   );
 
   const totalScore =
@@ -499,6 +576,7 @@ function getDatabaseStats(): DatabaseStats {
     requestCount * 15 +
     licenseCount * 15 +
     smtpConfigCount * 10 +
+    (superAdminCustomized ? 50 : 0) +
     schoolCount;
 
   return {
@@ -514,6 +592,7 @@ function getDatabaseStats(): DatabaseStats {
     requestCount,
     licenseCount,
     smtpConfigCount,
+    superAdminCustomized,
     hasRealData,
     totalScore
   };
@@ -527,6 +606,8 @@ interface SqlDumpStats {
   studentCount: number;
   requestCount: number;
   licenseCount: number;
+  superAdminCustomized: boolean;
+  superAdminConfigUpdatedAtMs: number;
   hasRealData: boolean;
   score: number;
 }
@@ -541,6 +622,8 @@ function inspectSqlDumpStats(sql: string): SqlDumpStats {
       studentCount: 0,
       requestCount: 0,
       licenseCount: 0,
+      superAdminCustomized: false,
+      superAdminConfigUpdatedAtMs: 0,
       hasRealData: false,
       score: 0
     };
@@ -556,6 +639,8 @@ function inspectSqlDumpStats(sql: string): SqlDumpStats {
   let gradeInserts = 0;
   let requestInserts = 0;
   let licenseInserts = 0;
+  let superAdminCustomized = false;
+  let superAdminConfigUpdatedAtMs = 0;
 
   const BUILTIN_DEMO_EMAILS = [
     'amfabricenew@gmail.com',
@@ -599,6 +684,20 @@ function inspectSqlDumpStats(sql: string): SqlDumpStats {
       requestInserts++;
     } else if (line.includes('INTO "subscription_licenses" ') || line.includes('INTO subscription_licenses ')) {
       licenseInserts++;
+    } else if (
+      line.includes('INTO "super_admin_settings" ') || line.includes('INTO super_admin_settings ') ||
+      line.includes('INTO "saas_settings" ') || line.includes('INTO saas_settings ')
+    ) {
+      if (line.includes("'super_admin_config_customized'") && line.includes("'true'")) {
+        superAdminCustomized = true;
+      }
+      const tsMatch = line.match(/'super_admin_config_updated_at'\s*,\s*'([^']+)'/);
+      if (tsMatch && tsMatch[1]) {
+        const ms = parseIsoMs(tsMatch[1]);
+        if (ms > superAdminConfigUpdatedAtMs) {
+          superAdminConfigUpdatedAtMs = ms;
+        }
+      }
     }
   }
 
@@ -613,7 +712,8 @@ function inspectSqlDumpStats(sql: string): SqlDumpStats {
     paymentInserts > 0 ||
     gradeInserts > 0 ||
     requestInserts > 0 ||
-    licenseInserts > 0
+    licenseInserts > 0 ||
+    superAdminCustomized
   );
 
   const score =
@@ -626,7 +726,8 @@ function inspectSqlDumpStats(sql: string): SqlDumpStats {
     paymentInserts * 5 +
     gradeInserts * 2 +
     requestInserts * 15 +
-    licenseInserts * 15;
+    licenseInserts * 15 +
+    (superAdminCustomized ? 50 : 0);
 
   return {
     schoolCount: schoolInserts,
@@ -636,6 +737,8 @@ function inspectSqlDumpStats(sql: string): SqlDumpStats {
     studentCount: studentInserts,
     requestCount: requestInserts,
     licenseCount: licenseInserts,
+    superAdminCustomized,
+    superAdminConfigUpdatedAtMs,
     hasRealData,
     score
   };
@@ -782,9 +885,10 @@ function splitSqlTuple(tupleStr: string): string[] {
 
 function executeResilientSqlRestore(
   sqlDump: string,
-  options: { mergeOnly?: boolean } = {}
+  options: { mergeOnly?: boolean; replaceConfigTables?: boolean } = {}
 ): { applied: number; adapted: number; skipped: number } {
-  const { mergeOnly = false } = options;
+  const { mergeOnly = false, replaceConfigTables = false } = options;
+  const CONFIG_TABLES = new Set(['super_admin_settings', 'saas_settings', 'plans']);
   const statements = splitSqlStatements(sqlDump);
   let applied = 0;
   let adapted = 0;
@@ -815,6 +919,11 @@ function executeResilientSqlRestore(
           if (tbl === 'backup_snapshots') continue;
           try { db.prepare(`DELETE FROM "${tbl}"`).run(); } catch {}
         }
+      } else if (mergeOnly && replaceConfigTables) {
+        // Clear existing plans before restoring newer customized plans from checkpoint
+        if (tableExists('plans')) {
+          try { db.prepare('DELETE FROM "plans"').run(); } catch {}
+        }
       }
 
       for (const rawStmt of statements) {
@@ -831,8 +940,16 @@ function executeResilientSqlRestore(
           continue;
         }
 
+        const tblMatch = stmt.match(/^INSERT(?:\s+OR\s+(?:REPLACE|IGNORE))?\s+INTO\s+["`]?([a-zA-Z0-9_]+)["`]?/i);
+        const targetTable = tblMatch ? tblMatch[1].toLowerCase() : '';
+        const shouldReplaceThisTable = replaceConfigTables && CONFIG_TABLES.has(targetTable);
+
         if (mergeOnly) {
-          stmt = stmt.replace(/^INSERT(?:\s+OR\s+REPLACE)?\s+INTO\s+/i, 'INSERT OR IGNORE INTO ');
+          if (shouldReplaceThisTable) {
+            stmt = stmt.replace(/^INSERT(?:\s+OR\s+(?:REPLACE|IGNORE))?\s+INTO\s+/i, 'INSERT OR REPLACE INTO ');
+          } else {
+            stmt = stmt.replace(/^INSERT(?:\s+OR\s+REPLACE)?\s+INTO\s+/i, 'INSERT OR IGNORE INTO ');
+          }
         }
 
         try {
@@ -863,7 +980,7 @@ function executeResilientSqlRestore(
                 }
                 if (keptCols.length > 0) {
                   try {
-                    const verb = mergeOnly || /^INSERT\s+OR\s+IGNORE/i.test(stmt) ? 'INSERT OR IGNORE' : 'INSERT OR REPLACE';
+                    const verb = (mergeOnly && !shouldReplaceThisTable) || /^INSERT\s+OR\s+IGNORE/i.test(stmt) ? 'INSERT OR IGNORE' : 'INSERT OR REPLACE';
                     db.exec('SAVEPOINT sp_restore_retry');
                     db.exec(`${verb} INTO "${tblName}" (${keptCols.join(', ')}) VALUES (${keptVals.join(', ')})`);
                     db.exec('RELEASE SAVEPOINT sp_restore_retry');
@@ -960,15 +1077,39 @@ function reconcileMissingSchoolAccountsFromVault(vault: SchoolAccountsVault | nu
     return Number.isFinite(ms) ? ms : 0;
   };
 
+  const localConfigMeta = getLocalSuperAdminConfigMeta();
+  const incomingConfigMeta = extractVaultSuperAdminConfigMeta(vault);
+  const shouldAdoptIncomingConfig =
+    incomingConfigMeta.customized &&
+    (!localConfigMeta.customized || incomingConfigMeta.updatedAtMs > localConfigMeta.updatedAtMs);
+
   db.pragma('foreign_keys = OFF');
   try {
     const tx = db.transaction(() => {
       const requestIdRemap = new Map<number, number>();
       const schoolIdRemap = new Map<number, number>();
 
+      if (shouldAdoptIncomingConfig && Array.isArray(vault.tables.plans) && tableExists('plans')) {
+        // When adopting a strictly newer customized Super Admin configuration, clear stale local default plans
+        // so deleted defaults are not left behind alongside restored plans.
+        try { db.prepare("DELETE FROM plans").run(); } catch {}
+      }
+
       for (const tbl of SCHOOL_VAULT_TABLES) {
         const rows = vault.tables[tbl];
         if (!Array.isArray(rows) || rows.length === 0 || !tableExists(tbl)) continue;
+
+        // Protect Super Admin configurations & plans against being overwritten or re-seeded by older/default vaults
+        if (tbl === 'super_admin_settings' || tbl === 'saas_settings') {
+          if (!shouldAdoptIncomingConfig && localConfigMeta.customized) {
+            continue;
+          }
+        }
+        if (tbl === 'plans') {
+          if (!shouldAdoptIncomingConfig && localConfigMeta.customized) {
+            continue;
+          }
+        }
 
         const liveCols = new Set((db.prepare(`PRAGMA table_info("${tbl}")`).all() as any[]).map(c => c.name));
         if (liveCols.size === 0) continue;
@@ -1112,6 +1253,10 @@ function reconcileMissingSchoolAccountsFromVault(vault: SchoolAccountsVault | nu
               const existsByEmail = db.prepare("SELECT id FROM utilisateurs WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))").get(String(row.email));
               if (existsByEmail) continue;
             }
+            if (row.identifiant) {
+              const existsByIdent = db.prepare("SELECT id FROM utilisateurs WHERE LOWER(TRIM(identifiant)) = LOWER(TRIM(?))").get(String(row.identifiant));
+              if (existsByIdent) continue;
+            }
             if (row.id != null) {
               const idTaken = db.prepare("SELECT id FROM utilisateurs WHERE id = ?").get(row.id);
               if (idTaken) omitId = true;
@@ -1138,7 +1283,7 @@ function reconcileMissingSchoolAccountsFromVault(vault: SchoolAccountsVault | nu
             }
           }
           if (tbl === 'plans') {
-            if (row.name) {
+            if (!shouldAdoptIncomingConfig && row.name) {
               const existsByName = db.prepare("SELECT id FROM plans WHERE LOWER(TRIM(name)) = LOWER(TRIM(?))").get(String(row.name));
               if (existsByName) continue;
             }
@@ -1169,8 +1314,15 @@ function reconcileMissingSchoolAccountsFromVault(vault: SchoolAccountsVault | nu
           const placeholders = cols.map(() => '?').join(', ');
           const values = cols.map(c => row[c] === undefined ? null : row[c]);
 
+          const useReplace = shouldAdoptIncomingConfig && (
+            tbl === 'super_admin_settings' ||
+            tbl === 'saas_settings' ||
+            tbl === 'plans'
+          );
+          const sqlVerb = useReplace ? 'INSERT OR REPLACE' : 'INSERT OR IGNORE';
+
           try {
-            const info = db.prepare(`INSERT OR IGNORE INTO "${tbl}" (${quotedCols}) VALUES (${placeholders})`).run(...values);
+            const info = db.prepare(`${sqlVerb} INTO "${tbl}" (${quotedCols}) VALUES (${placeholders})`).run(...values);
             if (info.changes > 0) {
               insertedCount += info.changes;
               if (tbl === 'school_creation_requests' && rawRow.id != null) {
@@ -1435,6 +1587,10 @@ async function restoreFromCheckpoint() {
       }
     } else if (candidates.length > 0) {
       const best = candidates[0];
+      const localConfigMeta = getLocalSuperAdminConfigMeta();
+      const backupHasNewerSuperAdminConfig =
+        best.superAdminCustomized &&
+        (!localConfigMeta.customized || best.superAdminConfigUpdatedAtMs > localConfigMeta.updatedAtMs);
       const backupHasMissingSchoolsOrRequests =
         best.nonDefaultSchoolCount > stats.nonDefaultSchoolCount ||
         best.schoolCount > stats.schoolCount ||
@@ -1443,10 +1599,13 @@ async function restoreFromCheckpoint() {
         best.requestCount > stats.requestCount ||
         best.licenseCount > stats.licenseCount;
 
-      if (backupHasMissingSchoolsOrRequests) {
+      if (backupHasMissingSchoolsOrRequests || backupHasNewerSuperAdminConfig) {
         createSafetyBackup('pre_auto_merge');
-        console.log(`[Persistence] Richer ${best.source} backup detected (backup schools=${best.schoolCount}/users=${best.nonTestUserCount}/requests=${best.requestCount} vs local schools=${stats.schoolCount}/users=${stats.nonTestUserCount}/requests=${stats.requestCount}). Merging missing accounts, requests & records losslessly...`);
-        const mergeResult = executeResilientSqlRestore(best.sql, { mergeOnly: true });
+        console.log(`[Persistence] Richer ${best.source} backup detected (backup schools=${best.schoolCount}/users=${best.nonTestUserCount}/requests=${best.requestCount}/cfg=${best.superAdminCustomized} vs local schools=${stats.schoolCount}/users=${stats.nonTestUserCount}/requests=${stats.requestCount}/cfg=${localConfigMeta.customized}). Merging losslessly...`);
+        const mergeResult = executeResilientSqlRestore(best.sql, {
+          mergeOnly: true,
+          replaceConfigTables: backupHasNewerSuperAdminConfig
+        });
         console.log(`[Persistence] Lossless auto-merge (${best.source}) completed: ${mergeResult.applied} merged, ${mergeResult.adapted} adapted.`);
       }
     }
@@ -2491,44 +2650,8 @@ async function initializeDatabase() {
     `);
   } catch (e) {}
 
-  // Seed default super admin settings if not present (without hardcoded credentials)
-  const seedSettings = [
-    { key: 'app_name', value: 'MégafixaEduc Pro' },
-    { key: 'default_currency', value: 'FCFA' },
-    { key: 'stripe_enabled', value: 'false' },
-    { key: 'paypal_enabled', value: 'false' },
-    { key: 'fedapay_enabled', value: 'false' },
-    { key: 'mobile_money_enabled', value: 'false' },
-    { key: 'mm_phone', value: '+228 90 00 00 00' },
-    { key: 'mm_name', value: 'MEGAPFIXA SARL' },
-    { key: 'mm_instructions', value: 'Veuillez effectuer le transfert sur le numéro ci-dessous et envoyer la preuve par WhatsApp.' },
-    { key: 'default_country', value: 'Bénin' },
-    { key: 'support_email', value: 'contact@megafixa.com' },
-    { key: 'support_phone', value: '(+229) 0161107918' },
-    { key: 'support_whatsapp', value: '+2290161107918' },
-    { key: 'support_delai_validation', value: '24H' },
-    { key: 'smtp_host', value: 'smtp-relay.brevo.com' },
-    { key: 'smtp_port', value: '587' },
-    { key: 'smtp_secure', value: 'false' },
-    { key: 'smtp_user', value: process.env.SMTP_USER || '' },
-    { key: 'smtp_pass', value: process.env.SMTP_PASS || '' },
-    { key: 'email_from', value: process.env.EMAIL_FROM || '' },
-    { key: 'email_provider', value: process.env.BREVO_API_KEY ? 'brevo_api' : 'smtp' }
-  ];
-
-  const checkSetting = db.prepare("SELECT count(*) as count FROM super_admin_settings WHERE key = ?");
-  const insertSetting = db.prepare("INSERT INTO super_admin_settings (key, value) VALUES (?, ?)");
-
-  seedSettings.forEach(s => {
-    try {
-      const res = checkSetting.get(s.key) as any;
-      if (res && res.count === 0) {
-        insertSetting.run(s.key, s.value);
-      }
-    } catch (e) {
-      console.warn(`Could not seed setting ${s.key}:`, e);
-    }
-  });
+  // Note: Default super_admin_settings seeding intentionally runs AFTER restoreFromCheckpoint()
+  // so restored/customized Super Admin settings are never shadowed by container-startup defaults.
 
   db.exec(`
   CREATE TABLE IF NOT EXISTS annees_scolaires (
@@ -4473,7 +4596,10 @@ try {
   const firstTeacher = db.prepare("SELECT id FROM enseignants ORDER BY id ASC LIMIT 1").get() as any;
 
   for (const u of demoUsers) {
-    const existing = db.prepare("SELECT id, role, identifiant, approuve, enseignant_id, eleve_id FROM utilisateurs WHERE LOWER(TRIM(email)) = ?").get(u.email) as any;
+    const uIdent = (u as any).identifiant ? String((u as any).identifiant).trim().toLowerCase() : null;
+    const existing = (uIdent
+      ? db.prepare("SELECT id, role, identifiant, approuve, enseignant_id, eleve_id FROM utilisateurs WHERE LOWER(TRIM(email)) = LOWER(TRIM(?)) OR (identifiant IS NOT NULL AND LOWER(TRIM(identifiant)) = ?)").get(u.email, uIdent)
+      : db.prepare("SELECT id, role, identifiant, approuve, enseignant_id, eleve_id FROM utilisateurs WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))").get(u.email)) as any;
     const ensId = u.role === 'enseignant' ? (firstTeacher?.id || null) : null;
     const elId = (u.role === 'parent' || u.role === 'eleve') ? (firstStudent?.id || null) : null;
 
@@ -4481,7 +4607,7 @@ try {
       db.prepare("INSERT INTO utilisateurs (nom, email, identifiant, mot_de_passe, mot_de_passe_initial, role, approuve, is_first_login, permissions, can_write, school_id, is_test_account, enseignant_id, eleve_id) VALUES (?, ?, ?, ?, ?, ?, 1, 0, ?, 1, ?, 1, ?, ?)")
         .run(u.nom, u.email, (u as any).identifiant || null, u.pass, (u as any).initialPass || null, u.role, u.perms, u.role === 'super_admin' ? null : schoolId, ensId, elId);
     } else {
-      // Preserve existing user password, name, role, school_id, and permissions across app updates;
+      // Preserve existing user password, name, customized email, role, school_id, and permissions across app updates;
       // only backfill missing identifiant or link if null, and keep super_admin approved.
       db.prepare(`
         UPDATE utilisateurs SET
@@ -4497,10 +4623,45 @@ try {
   console.error("Seed test accounts error:", e);
 }
 
-// Seed Plans if empty
+// Seed default super_admin_settings ONLY after restoreFromCheckpoint() using INSERT OR IGNORE
 try {
+  const seedSettings = [
+    { key: 'app_name', value: 'MégafixaEduc Pro' },
+    { key: 'default_currency', value: 'FCFA' },
+    { key: 'stripe_enabled', value: 'false' },
+    { key: 'paypal_enabled', value: 'false' },
+    { key: 'fedapay_enabled', value: 'false' },
+    { key: 'mobile_money_enabled', value: 'false' },
+    { key: 'mm_phone', value: '+228 90 00 00 00' },
+    { key: 'mm_name', value: 'MEGAPFIXA SARL' },
+    { key: 'mm_instructions', value: 'Veuillez effectuer le transfert sur le numéro ci-dessous et envoyer la preuve par WhatsApp.' },
+    { key: 'default_country', value: 'Bénin' },
+    { key: 'support_email', value: 'contact@megafixa.com' },
+    { key: 'support_phone', value: '(+229) 0161107918' },
+    { key: 'support_whatsapp', value: '+2290161107918' },
+    { key: 'support_delai_validation', value: '24H' },
+    { key: 'smtp_host', value: 'smtp-relay.brevo.com' },
+    { key: 'smtp_port', value: '587' },
+    { key: 'smtp_secure', value: 'false' },
+    { key: 'smtp_user', value: process.env.SMTP_USER || '' },
+    { key: 'smtp_pass', value: process.env.SMTP_PASS || '' },
+    { key: 'email_from', value: process.env.EMAIL_FROM || '' },
+    { key: 'email_provider', value: process.env.BREVO_API_KEY ? 'brevo_api' : 'smtp' }
+  ];
+  const insertIgnoreSetting = db.prepare("INSERT OR IGNORE INTO super_admin_settings (key, value) VALUES (?, ?)");
+  for (const s of seedSettings) {
+    try { insertIgnoreSetting.run(s.key, s.value); } catch {}
+  }
+} catch (e) {
+  console.warn("Post-restore seedSettings notice:", e);
+}
+
+// Seed Plans ONCE if table has never been seeded before (if Super Admin deletes plans, never re-seed defaults)
+try {
+  const plansSeededFlag = (db.prepare("SELECT value FROM super_admin_settings WHERE key = 'plans_initial_seeded'").get() as any)?.value
+    || (db.prepare("SELECT value FROM saas_settings WHERE key = 'plans_initial_seeded'").get() as any)?.value;
   const plansCount = db.prepare("SELECT COUNT(*) as count FROM plans").get() as any;
-  if (plansCount && plansCount.count === 0) {
+  if (plansCount && plansCount.count === 0 && plansSeededFlag !== 'true') {
     const initialPlans = [
       { name: 'Essai Gratuit', price: 0, period: '14 jours', features: JSON.stringify(['Accès complet', 'Support limité', 'Max 50 élèves']), color: 'slate', is_recommended: 0, type: 'trial' },
       { name: 'Standard', price: 25000, period: 'mois', features: JSON.stringify(['Toutes les fonctions de base', 'Support email', 'Max 500 élèves', 'Génération bulletins']), color: 'emerald', is_recommended: 0, type: 'paid' },
@@ -4511,26 +4672,41 @@ try {
     for (const p of initialPlans) {
       stmt.run(p.name, p.price, p.period, p.features, p.color, p.is_recommended, p.type);
     }
+    db.prepare("INSERT OR REPLACE INTO super_admin_settings (key, value) VALUES ('plans_initial_seeded', 'true')").run();
+    db.prepare("INSERT OR REPLACE INTO saas_settings (key, value) VALUES ('plans_initial_seeded', 'true')").run();
     console.log("Plans seeded.");
+  } else if (plansCount && plansCount.count > 0 && plansSeededFlag !== 'true') {
+    db.prepare("INSERT OR REPLACE INTO super_admin_settings (key, value) VALUES ('plans_initial_seeded', 'true')").run();
+    db.prepare("INSERT OR REPLACE INTO saas_settings (key, value) VALUES ('plans_initial_seeded', 'true')").run();
   }
 } catch (e) {}
 
-// Seed SaaS Settings if empty
+// Seed SaaS Settings ONCE without ever shadowing super_admin_settings values
 try {
+  const saasSeededFlag = (db.prepare("SELECT value FROM super_admin_settings WHERE key = 'saas_settings_initial_seeded'").get() as any)?.value
+    || (db.prepare("SELECT value FROM saas_settings WHERE key = 'saas_settings_initial_seeded'").get() as any)?.value;
   const settingsCount = db.prepare("SELECT COUNT(*) as count FROM saas_settings").get() as any;
-  if (settingsCount && settingsCount.count === 0) {
-    const initialSettings = {
-      app_name: 'MégafixaEduc Pro',
-      public_url: 'https://megafixa.com',
-      default_country: 'Bénin',
-      default_currency: 'XOF',
-      maintenance_mode: 'false'
+  if (settingsCount && settingsCount.count === 0 && saasSeededFlag !== 'true') {
+    const superRows = db.prepare("SELECT key, value FROM super_admin_settings").all() as any[];
+    const superMap: Record<string, string> = {};
+    for (const r of superRows) superMap[r.key] = r.value;
+    const initialSettings: Record<string, string> = {
+      app_name: superMap.app_name ?? 'MégafixaEduc Pro',
+      public_url: superMap.public_url ?? 'https://megafixa.com',
+      default_country: superMap.default_country ?? 'Bénin',
+      default_currency: superMap.default_currency ?? 'FCFA',
+      maintenance_mode: superMap.maintenance_mode ?? 'false'
     };
-    const stmt = db.prepare("INSERT INTO saas_settings (key, value) VALUES (?, ?)");
+    const stmt = db.prepare("INSERT OR IGNORE INTO saas_settings (key, value) VALUES (?, ?)");
     for (const [key, value] of Object.entries(initialSettings)) {
       stmt.run(key, value);
     }
+    db.prepare("INSERT OR REPLACE INTO super_admin_settings (key, value) VALUES ('saas_settings_initial_seeded', 'true')").run();
+    db.prepare("INSERT OR REPLACE INTO saas_settings (key, value) VALUES ('saas_settings_initial_seeded', 'true')").run();
     console.log("SaaS settings seeded.");
+  } else if (saasSeededFlag !== 'true') {
+    db.prepare("INSERT OR REPLACE INTO super_admin_settings (key, value) VALUES ('saas_settings_initial_seeded', 'true')").run();
+    db.prepare("INSERT OR REPLACE INTO saas_settings (key, value) VALUES ('saas_settings_initial_seeded', 'true')").run();
   }
 } catch (e) {}
 
@@ -5098,6 +5274,7 @@ function saveProductFeatureMatrixMap(matrix: Record<string, string[]>) {
     db.prepare("INSERT OR REPLACE INTO super_admin_settings (key, value) VALUES ('product_feature_matrix', ?)").run(
       JSON.stringify(matrix || {})
     );
+    markSuperAdminConfigCustomized();
   } catch (err) {
     console.warn("Unable to save product_feature_matrix:", err);
   }
@@ -22450,10 +22627,11 @@ function executeYearTransition(
       // Single source of truth: active plans configured by Super Admin in the `plans` table
       const plans = getConfiguredPlansFromDb(true);
 
-      // Parse activated payment methods
+      // Parse activated payment methods (respect explicit list even if empty)
+      const hasConfiguredPaymentMethods = configMap.payment_methods !== undefined;
       let paymentMethods: any[] = [];
       try {
-        if (configMap.payment_methods) {
+        if (hasConfiguredPaymentMethods) {
           const parsed = JSON.parse(configMap.payment_methods);
           paymentMethods = Array.isArray(parsed) ? parsed.filter((m: any) => m.active !== false) : [];
         }
@@ -22461,7 +22639,7 @@ function executeYearTransition(
         paymentMethods = [];
       }
 
-      if (paymentMethods.length === 0) {
+      if (!hasConfiguredPaymentMethods) {
         paymentMethods = [
           {
             id: 'pay_mtn_bj',
@@ -22563,10 +22741,11 @@ function executeYearTransition(
       const configMap: any = {};
       config.forEach((c: any) => configMap[c.key] = c.value);
 
-      // Parse payment methods configured by Super Admin
+      // Parse payment methods configured by Super Admin (respect explicit list even if empty)
+      const hasConfiguredPaymentMethods = configMap.payment_methods !== undefined;
       let paymentMethods: any[] = [];
       try {
-        if (configMap.payment_methods) {
+        if (hasConfiguredPaymentMethods) {
           const parsed = JSON.parse(configMap.payment_methods);
           paymentMethods = Array.isArray(parsed) ? parsed.filter((m: any) => m.active !== false) : [];
         }
@@ -22574,7 +22753,7 @@ function executeYearTransition(
         paymentMethods = [];
       }
 
-      if (paymentMethods.length === 0) {
+      if (!hasConfiguredPaymentMethods) {
         paymentMethods = [
           {
             id: 'pay_mtn_bj',
@@ -24577,8 +24756,11 @@ Cette clé servira lors du premier accès de votre établissement au système po
         const syncedPlans = getConfiguredPlansFromDb(false);
         upsert.run('product_plans', JSON.stringify(syncedPlans));
         upsert.run('product_feature_matrix', JSON.stringify(Object.keys(normalizedMatrix).length > 0 ? normalizedMatrix : matrixInput));
+        upsert.run('plans_initial_seeded', 'true');
+        db.prepare("INSERT OR REPLACE INTO saas_settings (key, value) VALUES ('plans_initial_seeded', 'true')").run();
         if (paymentMethods) upsert.run('payment_methods', JSON.stringify(paymentMethods));
         if (planPaymentLinks) upsert.run('plan_payment_links', JSON.stringify(planPaymentLinks));
+        markSuperAdminConfigCustomized();
       })();
 
       saveLocalCheckpointSync();
@@ -31022,6 +31204,9 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
           is_active !== undefined ? (is_active ? 1 : 0) : 1
         );
       syncPlanFeatureMatrixEntry(info.lastInsertRowid as number, featuresArr, name, Array.isArray(featureIds) ? featureIds : undefined);
+      db.prepare("INSERT OR REPLACE INTO super_admin_settings (key, value) VALUES ('plans_initial_seeded', 'true')").run();
+      db.prepare("INSERT OR REPLACE INTO saas_settings (key, value) VALUES ('plans_initial_seeded', 'true')").run();
+      markSuperAdminConfigCustomized();
       saveLocalCheckpointSync();
       scheduleCheckpoint('plan_create');
       res.json({ success: true, id: info.lastInsertRowid });
@@ -31052,6 +31237,9 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
           req.params.id
         );
       syncPlanFeatureMatrixEntry(req.params.id, featuresArr, name, Array.isArray(featureIds) ? featureIds : undefined);
+      db.prepare("INSERT OR REPLACE INTO super_admin_settings (key, value) VALUES ('plans_initial_seeded', 'true')").run();
+      db.prepare("INSERT OR REPLACE INTO saas_settings (key, value) VALUES ('plans_initial_seeded', 'true')").run();
+      markSuperAdminConfigCustomized();
       saveLocalCheckpointSync();
       scheduleCheckpoint('plan_update');
       res.json({ success: true });
@@ -31066,6 +31254,9 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       const matrix = getProductFeatureMatrixMap();
       delete matrix[String(req.params.id)];
       saveProductFeatureMatrixMap(matrix);
+      db.prepare("INSERT OR REPLACE INTO super_admin_settings (key, value) VALUES ('plans_initial_seeded', 'true')").run();
+      db.prepare("INSERT OR REPLACE INTO saas_settings (key, value) VALUES ('plans_initial_seeded', 'true')").run();
+      markSuperAdminConfigCustomized();
       markExplicitDeletion();
       saveLocalCheckpointSync();
       scheduleCheckpoint('plan_delete');
@@ -31981,9 +32172,10 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       const configMap: any = {};
       configRows.forEach((c: any) => configMap[c.key] = c.value);
 
+      const hasConfiguredPaymentMethods = configMap.payment_methods !== undefined;
       let paymentMethods: any[] = [];
       try {
-        if (configMap.payment_methods) {
+        if (hasConfiguredPaymentMethods) {
           const parsed = typeof configMap.payment_methods === 'string' ? JSON.parse(configMap.payment_methods) : configMap.payment_methods;
           paymentMethods = Array.isArray(parsed) ? parsed.filter((m: any) => m.active !== false) : [];
         }
@@ -31991,7 +32183,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         paymentMethods = [];
       }
 
-      if (paymentMethods.length === 0) {
+      if (!hasConfiguredPaymentMethods) {
         paymentMethods = [
           {
             id: 'pay_mtn_bj',
@@ -32055,16 +32247,16 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       const plans = getConfiguredPlansFromDb(true);
 
       res.json({
-        app_name: configMap.app_name || 'MégafixaEduc Pro',
-        currency: configMap.default_currency || 'FCFA',
+        app_name: configMap.app_name ?? 'MégafixaEduc Pro',
+        currency: configMap.default_currency ?? 'FCFA',
         payment_methods: paymentMethods,
         plan_payment_links: planPaymentLinks,
         plans,
         support_contacts: {
-          email: configMap.support_email || 'contact@megafixa.com',
-          phone: configMap.support_phone || '(+229) 0161107918',
-          whatsapp: configMap.support_whatsapp || '+2290161107918',
-          delai_max: configMap.support_delai_validation || '24H'
+          email: configMap.support_email ?? 'contact@megafixa.com',
+          phone: configMap.support_phone ?? '(+229) 0161107918',
+          whatsapp: configMap.support_whatsapp ?? '+2290161107918',
+          delai_max: configMap.support_delai_validation ?? '24H'
         }
       });
     } catch (err: any) {
@@ -32927,16 +33119,13 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       const saasSettings = db.prepare("SELECT * FROM saas_settings").all() as any[];
       const superAdminSettings = db.prepare("SELECT * FROM super_admin_settings").all() as any[];
       const settingsMap: any = {};
+      // Load saas_settings first, then let super_admin_settings be the authoritative override
       saasSettings.forEach((s: any) => { settingsMap[s.key] = s.value; });
-      superAdminSettings.forEach((s: any) => {
-        if (settingsMap[s.key] === undefined) {
-          settingsMap[s.key] = s.value;
-        }
-      });
+      superAdminSettings.forEach((s: any) => { settingsMap[s.key] = s.value; });
 
       const secretKeys = [
         'brevo_api_key', 'smtp_pass', 'sms_api_key', 'sms_auth_token',
-        'whatsapp_auth_token', 'whatsapp_api_key', 'fedapay_secret_key', 'openai_api_key'
+        'whatsapp_auth_token', 'whatsapp_api_key', 'fedapay_secret_key', 'stripe_secret_key', 'paypal_secret_key', 'openai_api_key'
       ];
       for (const sk of secretKeys) {
         const hasVal = Boolean(settingsMap[sk] && String(settingsMap[sk]).trim() !== '');
@@ -32956,22 +33145,26 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       const updates = req.body || {};
       const secretKeys = new Set([
         'brevo_api_key', 'smtp_pass', 'sms_api_key', 'sms_auth_token',
-        'whatsapp_auth_token', 'whatsapp_api_key', 'fedapay_secret_key', 'openai_api_key'
+        'whatsapp_auth_token', 'whatsapp_api_key', 'fedapay_secret_key', 'stripe_secret_key', 'paypal_secret_key', 'openai_api_key'
       ]);
       const stmtSaas = db.prepare("INSERT OR REPLACE INTO saas_settings (key, value) VALUES (?, ?)");
       const stmtSuper = db.prepare("INSERT OR REPLACE INTO super_admin_settings (key, value) VALUES (?, ?)");
-      for (const [key, value] of Object.entries(updates)) {
-        if (key.startsWith('has_')) continue;
-        const valStr = typeof value === 'string' ? value : JSON.stringify(value);
-        // Never overwrite stored secret keys with masked placeholder strings
-        if (secretKeys.has(key) && (!valStr.trim() || /^[•*]+$/.test(valStr.trim()))) {
-          continue;
+      db.transaction(() => {
+        for (const [key, value] of Object.entries(updates)) {
+          if (key.startsWith('has_') || key === 'super_admin_config_customized' || key === 'super_admin_config_updated_at') continue;
+          const valStr = typeof value === 'string' ? value : JSON.stringify(value);
+          // Never overwrite stored secret keys with masked placeholder strings
+          if (secretKeys.has(key) && (!valStr.trim() || /^[•*]+$/.test(valStr.trim()))) {
+            continue;
+          }
+          stmtSaas.run(key, valStr);
+          stmtSuper.run(key, valStr);
         }
-        stmtSaas.run(key, valStr);
-        stmtSuper.run(key, valStr);
-      }
+        markSuperAdminConfigCustomized();
+      })();
 
       saveLocalCheckpointSync();
+      scheduleCheckpoint('super_admin_settings');
       saveCheckpoint('super_admin_settings').catch(() => {});
       res.json({ success: true });
     } catch (err) {
@@ -33648,9 +33841,22 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
 
   app.post("/api/super-admin/profile", authenticateToken, requireSuperAdmin, (req, res) => {
     try {
-      const { nom, email } = req.body;
-      db.prepare("UPDATE utilisateurs SET nom = ?, email = ? WHERE id = ?").run(nom, email, (req as any).user.id);
-      res.json({ success: true });
+      const userId = (req as any).user.id;
+      const nom = String(req.body?.nom || '').trim();
+      const email = String(req.body?.email || '').trim().toLowerCase();
+      if (!nom || !email) {
+        return res.status(400).json({ error: "Le nom et l'adresse email sont requis." });
+      }
+      const existingDup = db.prepare("SELECT id FROM utilisateurs WHERE LOWER(TRIM(email)) = ? AND id != ?").get(email, userId) as any;
+      if (existingDup) {
+        return res.status(409).json({ error: "Cette adresse email est déjà utilisée par un autre compte." });
+      }
+      db.prepare("UPDATE utilisateurs SET nom = ?, email = ? WHERE id = ?").run(nom, email, userId);
+      markSuperAdminConfigCustomized();
+      saveLocalCheckpointSync();
+      scheduleCheckpoint('super_admin_profile_update');
+      const updatedUser = db.prepare("SELECT id, nom, email, identifiant, role FROM utilisateurs WHERE id = ?").get(userId);
+      res.json({ success: true, user: updatedUser });
     } catch (err) {
       res.status(500).json({ error: "Erreur lors de la mise à jour du profil." });
     }
@@ -33658,17 +33864,27 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
 
   app.post("/api/super-admin/change-password", authenticateToken, requireSuperAdmin, async (req, res) => {
     try {
-      const { currentPassword, newPassword } = req.body;
-      const user = db.prepare("SELECT * FROM utilisateurs WHERE id = ?").get((req as any).user.id) as any;
-      
-      const passwordMatch = await bcrypt.compare(currentPassword, user.password);
-      if (!passwordMatch) {
-        return res.status(401).json({ error: "Le mot de passe actuel est incorrect." });
+      const userId = (req as any).user.id;
+      const { currentPassword, newPassword } = req.body || {};
+      if (!currentPassword || !newPassword || String(newPassword).length < 6) {
+        return res.status(400).json({ error: "Le mot de passe actuel et un nouveau mot de passe (min. 6 caractères) sont requis." });
+      }
+      const user = db.prepare("SELECT * FROM utilisateurs WHERE id = ?").get(userId) as any;
+      if (!user || !user.mot_de_passe) {
+        return res.status(404).json({ error: "Compte super-administrateur introuvable." });
       }
 
-      const hashedNewPassword = await bcrypt.hash(newPassword, 10);
-      db.prepare("UPDATE utilisateurs SET password = ? WHERE id = ?").run(hashedNewPassword, (req as any).user.id);
-      
+      const passwordMatch = await bcrypt.compare(String(currentPassword), user.mot_de_passe);
+      if (!passwordMatch) {
+        return res.status(400).json({ error: "Le mot de passe actuel est incorrect." });
+      }
+
+      const hashedNewPassword = await bcrypt.hash(String(newPassword), 10);
+      db.prepare("UPDATE utilisateurs SET mot_de_passe = ?, is_first_login = 0, must_change_password = 0 WHERE id = ?").run(hashedNewPassword, userId);
+      markSuperAdminConfigCustomized();
+      saveLocalCheckpointSync();
+      scheduleCheckpoint('super_admin_password_change');
+
       res.json({ success: true });
     } catch (err) {
       res.status(500).json({ error: "Erreur lors de la modification du mot de passe." });

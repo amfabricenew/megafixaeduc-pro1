@@ -92,6 +92,11 @@ export default function PlansManagement() {
 
   useEffect(() => {
     fetchPlans();
+    const handleCloudReconciled = () => {
+      fetchPlans();
+    };
+    window.addEventListener('megafixa-cloud-reconciled', handleCloudReconciled);
+    return () => window.removeEventListener('megafixa-cloud-reconciled', handleCloudReconciled);
   }, []);
 
   const handleToggleActive = async (plan: Plan) => {
@@ -213,7 +218,7 @@ export default function PlansManagement() {
         setPlans(prev => prev.filter(p => p.id !== planToDelete.id));
         setPlanToDelete(null);
         window.dispatchEvent(new Event('school_subscription_updated'));
-        syncCloudVaultWithFirestore().catch(() => {});
+        syncCloudVaultWithFirestore({ allowShrink: true }).catch(() => {});
       } else {
         toast.error("Impossible de supprimer cette formule");
       }

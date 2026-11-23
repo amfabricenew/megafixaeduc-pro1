@@ -70,25 +70,62 @@ export default function SuperAdminProduct() {
   };
   const [plans, setPlans] = useState<any[]>([]);
   const [featureMatrix, setFeatureMatrix] = useState<Record<string, string[]>>({});
+  const [globalSettings, setGlobalSettings] = useState<Record<string, string>>({
+    app_name: 'MégafixaEduc Pro',
+    default_currency: 'FCFA',
+    max_file_size_mb: '50',
+    max_concurrent_sessions: '3',
+    inactivity_timeout_min: '30',
+    notif_new_subscription: 'true',
+    notif_payment_received: 'true',
+    notif_payment_failed: 'true',
+    notif_urgent_ticket: 'true',
+    maintenance_mode: 'false'
+  });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingPlan, setEditingPlan] = useState<any>(null);
+  const [planIdPendingDelete, setPlanIdPendingDelete] = useState<string | null>(null);
 
   useEffect(() => {
     fetchConfig();
+    const handleCloudReconciled = () => {
+      fetchConfig();
+    };
+    window.addEventListener('megafixa-cloud-reconciled', handleCloudReconciled);
+    return () => window.removeEventListener('megafixa-cloud-reconciled', handleCloudReconciled);
   }, []);
 
   const fetchConfig = async () => {
     try {
       setLoading(true);
-      const res = await apiFetch('/api/admin/product-config');
+      const [res, settingsRes] = await Promise.all([
+        apiFetch('/api/admin/product-config'),
+        apiFetch('/api/super-admin/settings')
+      ]);
       if (res.ok) {
         const data = await res.json();
         if (data.featureMatrix) setFeatureMatrix(data.featureMatrix);
         if (Array.isArray(data.plans)) {
           setPlans(data.plans);
         }
+      }
+      if (settingsRes.ok) {
+        const sData = await settingsRes.json();
+        setGlobalSettings(prev => ({
+          ...prev,
+          app_name: sData.app_name ?? prev.app_name,
+          default_currency: sData.default_currency ?? prev.default_currency,
+          max_file_size_mb: sData.max_file_size_mb ?? prev.max_file_size_mb,
+          max_concurrent_sessions: sData.max_concurrent_sessions ?? prev.max_concurrent_sessions,
+          inactivity_timeout_min: sData.inactivity_timeout_min ?? prev.inactivity_timeout_min,
+          notif_new_subscription: sData.notif_new_subscription ?? prev.notif_new_subscription,
+          notif_payment_received: sData.notif_payment_received ?? prev.notif_payment_received,
+          notif_payment_failed: sData.notif_payment_failed ?? prev.notif_payment_failed,
+          notif_urgent_ticket: sData.notif_urgent_ticket ?? prev.notif_urgent_ticket,
+          maintenance_mode: sData.maintenance_mode ?? prev.maintenance_mode
+        }));
       }
     } catch (err) {
       toast.error("Erreur lors du chargement de la configuration");
@@ -97,7 +134,7 @@ export default function SuperAdminProduct() {
     }
   };
 
-  const handlePublish = async () => {
+  const handlePublish = async (settingsOverride?: Record<string, string>) => {
     try {
       setSaving(true);
       const syncedPlans = plans.map((plan) => {
@@ -119,22 +156,29 @@ export default function SuperAdminProduct() {
         };
       });
 
-      const res = await apiFetch('/api/admin/product-config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          plans: syncedPlans, 
-          featureMatrix
+      const [res, settingsRes] = await Promise.all([
+        apiFetch('/api/admin/product-config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            plans: syncedPlans, 
+            featureMatrix
+          }),
         }),
-      });
+        apiFetch('/api/super-admin/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(settingsOverride || globalSettings),
+        })
+      ]);
 
-      if (res.ok) {
+      if (res.ok && settingsRes.ok) {
         toast.success("Configuration publiée et appliquée avec succès !");
         await fetchConfig();
         window.dispatchEvent(new Event('school_subscription_updated'));
-        syncCloudVaultWithFirestore().catch(() => {});
+        syncCloudVaultWithFirestore({ allowShrink: true }).catch(() => {});
       } else {
-        const err = await res.json();
+        const err = await (res.ok ? settingsRes : res).json().catch(() => ({}));
         throw new Error(err.error || "Erreur de publication");
       }
     } catch (err: any) {
@@ -231,14 +275,19 @@ export default function SuperAdminProduct() {
       toast.error("Vous devez garder au moins un plan");
       return;
     }
-    if (window.confirm("Supprimer ce plan et ses configurations de fonctionnalités ?")) {
-      setPlans(plans.filter(p => String(p.id) !== String(id)));
-      setFeatureMatrix(prev => {
-        const newMatrix = { ...prev };
-        delete newMatrix[String(id)];
-        return newMatrix;
-      });
-    }
+    setPlanIdPendingDelete(String(id));
+  };
+
+  const confirmDeletePendingPlan = () => {
+    if (!planIdPendingDelete) return;
+    setPlans(prev => prev.filter(p => String(p.id) !== planIdPendingDelete));
+    setFeatureMatrix(prev => {
+      const newMatrix = { ...prev };
+      delete newMatrix[planIdPendingDelete];
+      return newMatrix;
+    });
+    setPlanIdPendingDelete(null);
+    toast.success("Formule retirée. Cliquez sur « Publier les changements » pour confirmer.");
   };
 
   const toggleFeature = (planId: string, featureId: string) => {
@@ -284,7 +333,7 @@ export default function SuperAdminProduct() {
           <p className="text-xs sm:text-sm text-slate-500">Configurez les plans, les prix et les fonctionnalités distribuées aux écoles.</p>
         </div>
         <button 
-          onClick={handlePublish}
+          onClick={() => handlePublish()}
           disabled={saving}
           className="flex items-center justify-center gap-2 px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-xl text-sm font-bold shadow-lg shadow-indigo-100 transition-all shrink-0"
         >
@@ -574,14 +623,24 @@ export default function SuperAdminProduct() {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
               <div className="space-y-2">
                 <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Nom commercial de la plateforme</label>
-                <input type="text" className="w-full p-4 bg-slate-50 border-none rounded-2xl text-sm font-medium focus:ring-2 focus:ring-indigo-500/20" defaultValue="MégafixaEduc Pro" />
+                <input
+                  type="text"
+                  className="w-full p-4 bg-slate-50 border-none rounded-2xl text-sm font-medium focus:ring-2 focus:ring-indigo-500/20"
+                  value={globalSettings.app_name ?? 'MégafixaEduc Pro'}
+                  onChange={(e) => setGlobalSettings(prev => ({ ...prev, app_name: e.target.value }))}
+                />
               </div>
               <div className="space-y-2">
                 <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Devise de facturation par défaut</label>
-                <select className="w-full p-4 bg-slate-50 border-none rounded-2xl text-sm font-medium focus:ring-2 focus:ring-indigo-500/20">
-                  <option>Franc CFA (XOF)</option>
-                  <option>Dollar US (USD)</option>
-                  <option>Euro (EUR)</option>
+                <select
+                  value={globalSettings.default_currency ?? 'FCFA'}
+                  onChange={(e) => setGlobalSettings(prev => ({ ...prev, default_currency: e.target.value }))}
+                  className="w-full p-4 bg-slate-50 border-none rounded-2xl text-sm font-medium focus:ring-2 focus:ring-indigo-500/20"
+                >
+                  <option value="FCFA">Franc CFA (FCFA)</option>
+                  <option value="XOF">Franc CFA (XOF)</option>
+                  <option value="USD">Dollar US (USD)</option>
+                  <option value="EUR">Euro (EUR)</option>
                 </select>
               </div>
             </div>
@@ -591,15 +650,33 @@ export default function SuperAdminProduct() {
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                 <div className="p-4 bg-slate-50 rounded-2xl space-y-2">
                   <p className="text-[10px] font-bold text-slate-400 uppercase">Taille max fichiers (Mo)</p>
-                  <input type="number" className="w-full bg-transparent border-none p-0 text-lg font-black text-slate-900" defaultValue={50} />
+                  <input
+                    type="number"
+                    min={1}
+                    className="w-full bg-transparent border-none p-0 text-lg font-black text-slate-900"
+                    value={globalSettings.max_file_size_mb ?? '50'}
+                    onChange={(e) => setGlobalSettings(prev => ({ ...prev, max_file_size_mb: e.target.value }))}
+                  />
                 </div>
                 <div className="p-4 bg-slate-50 rounded-2xl space-y-2">
                   <p className="text-[10px] font-bold text-slate-400 uppercase">Sessions simultanées max</p>
-                  <input type="number" className="w-full bg-transparent border-none p-0 text-lg font-black text-slate-900" defaultValue={3} />
+                  <input
+                    type="number"
+                    min={1}
+                    className="w-full bg-transparent border-none p-0 text-lg font-black text-slate-900"
+                    value={globalSettings.max_concurrent_sessions ?? '3'}
+                    onChange={(e) => setGlobalSettings(prev => ({ ...prev, max_concurrent_sessions: e.target.value }))}
+                  />
                 </div>
                 <div className="p-4 bg-slate-50 rounded-2xl space-y-2">
                   <p className="text-[10px] font-bold text-slate-400 uppercase">Délai inactivité (min)</p>
-                  <input type="number" className="w-full bg-transparent border-none p-0 text-lg font-black text-slate-900" defaultValue={30} />
+                  <input
+                    type="number"
+                    min={1}
+                    className="w-full bg-transparent border-none p-0 text-lg font-black text-slate-900"
+                    value={globalSettings.inactivity_timeout_min ?? '30'}
+                    onChange={(e) => setGlobalSettings(prev => ({ ...prev, inactivity_timeout_min: e.target.value }))}
+                  />
                 </div>
               </div>
             </div>
@@ -611,48 +688,84 @@ export default function SuperAdminProduct() {
             <h3 className="font-bold text-slate-900">Notifications Système Administrateur</h3>
             <div className="space-y-4">
               {[
-                { name: 'Nouvel Abonnement', desc: 'Alerte lors d\'une nouvelle création de compte école.' },
-                { name: 'Paiement Reçu', desc: 'Notification de succès de transaction.' },
-                { name: 'Échec de Paiement', desc: 'Alerte pour les transactions rejetées.' },
-                { name: 'Ticket Support Urgent', desc: 'Notification pour les demandes de support prioritaires.' },
-              ].map((notif, i) => (
-                <div key={i} className="flex items-center justify-between p-4 bg-slate-50 rounded-2xl">
-                  <div>
-                    <p className="text-sm font-bold text-slate-900">{notif.name}</p>
-                    <p className="text-xs text-slate-500">{notif.desc}</p>
+                { key: 'notif_new_subscription', name: 'Nouvel Abonnement', desc: 'Alerte lors d\'une nouvelle création de compte école.' },
+                { key: 'notif_payment_received', name: 'Paiement Reçu', desc: 'Notification de succès de transaction.' },
+                { key: 'notif_payment_failed', name: 'Échec de Paiement', desc: 'Alerte pour les transactions rejetées.' },
+                { key: 'notif_urgent_ticket', name: 'Ticket Support Urgent', desc: 'Notification pour les demandes de support prioritaires.' },
+              ].map((notif) => {
+                const enabled = globalSettings[notif.key] !== 'false';
+                return (
+                  <div key={notif.key} className="flex items-center justify-between p-4 bg-slate-50 rounded-2xl">
+                    <div>
+                      <p className="text-sm font-bold text-slate-900">{notif.name}</p>
+                      <p className="text-xs text-slate-500">{notif.desc}</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setGlobalSettings(prev => ({ ...prev, [notif.key]: enabled ? 'false' : 'true' }))}
+                      className={cn(
+                        "w-10 h-5 rounded-full relative transition-colors",
+                        enabled ? "bg-indigo-600" : "bg-slate-300"
+                      )}
+                    >
+                      <div className={cn(
+                        "absolute top-0.5 w-4 h-4 bg-white rounded-full shadow-sm transition-all",
+                        enabled ? "right-0.5" : "left-0.5"
+                      )} />
+                    </button>
                   </div>
-                  <button className="w-10 h-5 bg-indigo-600 rounded-full relative">
-                    <div className="absolute right-0.5 top-0.5 w-4 h-4 bg-white rounded-full shadow-sm" />
-                  </button>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         )}
 
-        {activeTab === 'maintenance' && (
-          <div className="space-y-6">
-             <div className="bg-amber-50 border border-amber-200 p-8 rounded-3xl flex gap-6">
-              <div className="p-4 bg-amber-100 text-amber-600 rounded-2xl h-fit">
-                <AlertCircle size={32} />
-              </div>
-              <div>
-                <h3 className="text-xl font-bold text-amber-900">Mode Maintenance</h3>
-                <p className="text-sm text-amber-700 mt-2 leading-relaxed">
-                  L'activation du mode maintenance suspend tout accès utilisateur. Seuls les super-admins authentifiés pourront naviguer sur la plateforme. Utile pour les migrations de base de données ou les mises à jour majeures.
-                </p>
-                <div className="mt-6 flex gap-3">
-                  <button className="px-8 py-3 bg-amber-600 text-white rounded-2xl text-sm font-bold shadow-lg shadow-amber-200 hover:bg-amber-700 transition-all">
-                    Activer maintenant
-                  </button>
-                  <button className="px-8 py-3 bg-white text-amber-600 border border-amber-200 rounded-2xl text-sm font-bold hover:bg-amber-50 transition-all">
-                    Planifier
-                  </button>
+        {activeTab === 'maintenance' && (() => {
+          const isMaintenance = globalSettings.maintenance_mode === 'true';
+          return (
+            <div className="space-y-6">
+              <div className={cn(
+                "border p-8 rounded-3xl flex gap-6 transition-colors",
+                isMaintenance ? "bg-rose-50 border-rose-200" : "bg-amber-50 border-amber-200"
+              )}>
+                <div className={cn(
+                  "p-4 rounded-2xl h-fit",
+                  isMaintenance ? "bg-rose-100 text-rose-600" : "bg-amber-100 text-amber-600"
+                )}>
+                  <AlertCircle size={32} />
+                </div>
+                <div>
+                  <h3 className={cn("text-xl font-bold", isMaintenance ? "text-rose-900" : "text-amber-900")}>
+                    Mode Maintenance {isMaintenance ? "(ACTIF)" : "(Inactif)"}
+                  </h3>
+                  <p className={cn("text-sm mt-2 leading-relaxed", isMaintenance ? "text-rose-700" : "text-amber-700")}>
+                    L'activation du mode maintenance suspend tout accès utilisateur. Seuls les super-admins authentifiés pourront naviguer sur la plateforme. Utile pour les migrations de base de données ou les mises à jour majeures.
+                  </p>
+                  <div className="mt-6 flex gap-3">
+                    <button
+                      type="button"
+                      disabled={saving}
+                      onClick={() => {
+                        const nextVal = isMaintenance ? 'false' : 'true';
+                        const updated = { ...globalSettings, maintenance_mode: nextVal };
+                        setGlobalSettings(updated);
+                        handlePublish(updated);
+                      }}
+                      className={cn(
+                        "px-8 py-3 text-white rounded-2xl text-sm font-bold shadow-lg transition-all",
+                        isMaintenance
+                          ? "bg-emerald-600 hover:bg-emerald-700 shadow-emerald-200"
+                          : "bg-amber-600 hover:bg-amber-700 shadow-amber-200"
+                      )}
+                    >
+                      {isMaintenance ? "Désactiver la maintenance" : "Activer maintenant"}
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
       </div>
 
       {isModalOpen && editingPlan && (() => {
@@ -856,6 +969,39 @@ export default function SuperAdminProduct() {
           </div>
         );
       })()}
+      {planIdPendingDelete && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="p-2.5 rounded-xl bg-rose-50 text-rose-600 shrink-0">
+                <Trash2 size={20} />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-900">Supprimer cette formule ?</h3>
+                <p className="text-xs text-slate-500 mt-1">
+                  Supprimer ce plan retirera ses configurations de fonctionnalités lors de la publication.
+                </p>
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setPlanIdPendingDelete(null)}
+                className="px-4 py-2 rounded-xl text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-700"
+              >
+                Annuler
+              </button>
+              <button
+                type="button"
+                onClick={confirmDeletePendingPlan}
+                className="px-4 py-2 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white"
+              >
+                Supprimer
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

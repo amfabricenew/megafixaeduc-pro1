@@ -13,6 +13,7 @@ import {
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import toast from 'react-hot-toast';
+import { syncCloudVaultWithFirestore } from '../../utils/cloudVaultSync';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -65,6 +66,7 @@ export default function SuperAdminProfile() {
       });
       if (response.ok) {
         toast.success("Profil mis à jour avec succès");
+        syncCloudVaultWithFirestore().catch(() => {});
       } else {
         const data = await response.json();
         toast.error(data.error || "Erreur lors de la mise à jour");
@@ -95,6 +97,7 @@ export default function SuperAdminProfile() {
       if (response.ok) {
         toast.success("Mot de passe modifié avec succès");
         setPasswordData({ currentPassword: '', newPassword: '', confirmPassword: '' });
+        syncCloudVaultWithFirestore().catch(() => {});
       } else {
         const data = await response.json();
         toast.error(data.error || "Erreur lors de la modification");

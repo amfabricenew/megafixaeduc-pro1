@@ -32,6 +32,7 @@ import {
   MessageCircle
 } from 'lucide-react';
 import SchoolMessagingModal from '../../components/super-admin/SchoolMessagingModal';
+import { syncCloudVaultWithFirestore } from '../../utils/cloudVaultSync';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import toast from 'react-hot-toast';
@@ -132,10 +133,11 @@ export default function SuperAdminSettings() {
 
   // Plans & Payments State (chargés dynamiquement depuis /api/super-admin/plans)
   const [plans, setPlans] = React.useState<any[]>([]);
-  const [paymentMethods, setPaymentMethods] = React.useState<any[]>(DEFAULT_PAYMENT_METHODS);
+  const [paymentMethods, setPaymentMethods] = React.useState<any[]>([]);
   const [planPaymentLinks, setPlanPaymentLinks] = React.useState<Record<string, any>>({});
   const [isPaymentModalOpen, setIsPaymentModalOpen] = React.useState(false);
   const [editingPayment, setEditingPayment] = React.useState<any>(null);
+  const [confirmDeletePaymentId, setConfirmDeletePaymentId] = React.useState<string | null>(null);
 
   // School Messaging Configuration State
   const [schoolsMessagingList, setSchoolsMessagingList] = React.useState<any[]>([]);
@@ -180,7 +182,7 @@ export default function SuperAdminSettings() {
       });
       if (response.ok) {
         const data = await response.json();
-        if (Array.isArray(data) && data.length > 0) {
+        if (Array.isArray(data)) {
           setPlans(data);
         }
       }
@@ -198,19 +200,17 @@ export default function SuperAdminSettings() {
         const data = await response.json();
         setSettings(data);
 
-        // Load payment methods if saved
-        if (data.payment_methods) {
+        // Preserve exact payment methods configured by Super Admin (never re-inject deleted defaults)
+        if (data.payment_methods !== undefined && data.payment_methods !== null) {
           try {
             const parsed = typeof data.payment_methods === 'string' ? JSON.parse(data.payment_methods) : data.payment_methods;
-            if (Array.isArray(parsed) && parsed.length > 0) {
-              // Ensure default methods like Celtiis and Card Visa/Mastercard exist if not present
-              const existingIds = new Set(parsed.map((p: any) => p.id));
-              const missingDefaults = DEFAULT_PAYMENT_METHODS.filter(d => !existingIds.has(d.id));
-              setPaymentMethods([...parsed, ...missingDefaults]);
-            }
+            setPaymentMethods(Array.isArray(parsed) ? parsed : []);
           } catch (e) {
             console.error(e);
+            setPaymentMethods([]);
           }
+        } else {
+          setPaymentMethods(DEFAULT_PAYMENT_METHODS);
         }
 
         // Load plan payment links if saved
@@ -235,6 +235,12 @@ export default function SuperAdminSettings() {
   React.useEffect(() => {
     fetchSettings();
     fetchPlans();
+    const handleCloudReconciled = () => {
+      fetchSettings();
+      fetchPlans();
+    };
+    window.addEventListener('megafixa-cloud-reconciled', handleCloudReconciled);
+    return () => window.removeEventListener('megafixa-cloud-reconciled', handleCloudReconciled);
   }, []);
 
   React.useEffect(() => {
@@ -248,8 +254,14 @@ export default function SuperAdminSettings() {
     try {
       const currentMethods = customMethods !== undefined ? customMethods : paymentMethods;
       const currentLinks = customLinks !== undefined ? customLinks : planPaymentLinks;
+      const rawSettings = { ...(customSettings || settings) };
+      for (const key of Object.keys(rawSettings)) {
+        if (key.startsWith('has_') || key === 'super_admin_config_customized' || key === 'super_admin_config_updated_at') {
+          delete rawSettings[key];
+        }
+      }
       const payload = {
-        ...(customSettings || settings),
+        ...rawSettings,
         payment_methods: JSON.stringify(currentMethods),
         plan_payment_links: JSON.stringify(currentLinks)
       };
@@ -263,7 +275,9 @@ export default function SuperAdminSettings() {
       });
       if (response.ok) {
         toast.success("Paramètres et moyens de paiement enregistrés avec succès");
-        fetchSettings();
+        await fetchSettings();
+        window.dispatchEvent(new Event('school_subscription_updated'));
+        syncCloudVaultWithFirestore({ allowShrink: true }).catch(() => {});
       } else {
         toast.error("Erreur lors de l'enregistrement");
       }
@@ -411,34 +425,28 @@ export default function SuperAdminSettings() {
       toast.error("Le nom public est requis");
       return;
     }
-    
-    let updatedList: any[] = [];
-    setPaymentMethods(prev => {
-      const exists = prev.find(p => p.id === editingPayment.id);
-      if (exists) {
-        updatedList = prev.map(p => p.id === editingPayment.id ? editingPayment : p);
-      } else {
-        updatedList = [...prev, editingPayment];
-      }
-      return updatedList;
-    });
 
+    const exists = paymentMethods.some(p => p.id === editingPayment.id);
+    const updatedList = exists
+      ? paymentMethods.map(p => p.id === editingPayment.id ? editingPayment : p)
+      : [...paymentMethods, editingPayment];
+
+    setPaymentMethods(updatedList);
     setIsPaymentModalOpen(false);
     setEditingPayment(null);
-    toast.success("Moyen de paiement enregistré");
-    
-    setTimeout(() => {
-      handleSave(undefined, updatedList);
-    }, 100);
+    handleSave(undefined, updatedList);
   };
 
   const removePaymentMethod = (id: string) => {
-    if (window.confirm("Supprimer ce moyen de paiement ?")) {
-      const updated = paymentMethods.filter(p => p.id !== id);
-      setPaymentMethods(updated);
-      toast.success("Moyen de paiement supprimé");
-      handleSave(undefined, updated);
-    }
+    setConfirmDeletePaymentId(id);
+  };
+
+  const confirmRemovePaymentMethod = () => {
+    if (!confirmDeletePaymentId) return;
+    const updated = paymentMethods.filter(p => p.id !== confirmDeletePaymentId);
+    setPaymentMethods(updated);
+    setConfirmDeletePaymentId(null);
+    handleSave(undefined, updated);
   };
 
   const toggleMethodActive = (id: string) => {
@@ -524,7 +532,7 @@ export default function SuperAdminSettings() {
                     <label className="text-xs font-bold text-slate-500">Nom de l'application</label>
                     <input 
                       type="text" 
-                      value={settings.app_name || 'MégafixaEduc Pro'} 
+                      value={settings.app_name ?? 'MégafixaEduc Pro'} 
                       onChange={(e) => handleChange('app_name', e.target.value)}
                       className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 font-medium" 
                     />
@@ -533,7 +541,7 @@ export default function SuperAdminSettings() {
                     <label className="text-xs font-bold text-slate-500">URL du site public</label>
                     <input 
                       type="text" 
-                      value={settings.public_url || 'https://megafixa.com'} 
+                      value={settings.public_url ?? 'https://megafixa.com'} 
                       onChange={(e) => handleChange('public_url', e.target.value)}
                       className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 font-medium" 
                     />
@@ -547,7 +555,7 @@ export default function SuperAdminSettings() {
                   <div className="space-y-2">
                     <label className="text-xs font-bold text-slate-500">Pays par défaut</label>
                     <select 
-                      value={settings.default_country || 'Bénin'}
+                      value={settings.default_country ?? 'Bénin'}
                       onChange={(e) => handleChange('default_country', e.target.value)}
                       className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 font-medium"
                     >
@@ -561,7 +569,7 @@ export default function SuperAdminSettings() {
                     <label className="text-xs font-bold text-slate-500">Devise</label>
                     <input 
                       type="text" 
-                      value={settings.default_currency || 'XOF'} 
+                      value={settings.default_currency ?? 'FCFA'} 
                       onChange={(e) => handleChange('default_currency', e.target.value)}
                       className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 font-medium" 
                     />
@@ -581,7 +589,7 @@ export default function SuperAdminSettings() {
                     <label className="text-xs font-bold text-slate-500">Email d'assistance officiel</label>
                     <input 
                       type="email" 
-                      value={settings.support_email || 'contact@megafixa.com'} 
+                      value={settings.support_email ?? 'contact@megafixa.com'} 
                       onChange={(e) => handleChange('support_email', e.target.value)}
                       placeholder="contact@megafixa.com"
                       className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 font-medium" 
@@ -591,7 +599,7 @@ export default function SuperAdminSettings() {
                     <label className="text-xs font-bold text-slate-500">Numéro Téléphone d'assistance</label>
                     <input 
                       type="text" 
-                      value={settings.support_phone || '(+229) 0161107918'} 
+                      value={settings.support_phone ?? '(+229) 0161107918'} 
                       onChange={(e) => handleChange('support_phone', e.target.value)}
                       placeholder="(+229) 0161107918"
                       className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 font-medium" 
@@ -601,7 +609,7 @@ export default function SuperAdminSettings() {
                     <label className="text-xs font-bold text-slate-500">Numéro WhatsApp direct (avec indicatif pays)</label>
                     <input 
                       type="text" 
-                      value={settings.support_whatsapp || '+2290161107918'} 
+                      value={settings.support_whatsapp ?? '+2290161107918'} 
                       onChange={(e) => handleChange('support_whatsapp', e.target.value)}
                       placeholder="+2290161107918"
                       className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 font-medium" 
@@ -611,7 +619,7 @@ export default function SuperAdminSettings() {
                     <label className="text-xs font-bold text-slate-500">Délai maximal de validation promis</label>
                     <input 
                       type="text" 
-                      value={settings.support_delai_validation || '24H'} 
+                      value={settings.support_delai_validation ?? '24H'} 
                       onChange={(e) => handleChange('support_delai_validation', e.target.value)}
                       placeholder="24H"
                       className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 font-medium" 
@@ -2215,6 +2223,41 @@ export default function SuperAdminSettings() {
         }}
         onUpdated={fetchSchoolsMessaging}
       />
+
+      {/* Delete Payment Method Confirmation Modal */}
+      {confirmDeletePaymentId && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="p-2.5 rounded-xl bg-rose-50 text-rose-600 shrink-0">
+                <Trash2 size={20} />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-900">Supprimer ce moyen de paiement ?</h3>
+                <p className="text-xs text-slate-500 mt-1">
+                  Cette action retirera définitivement ce canal de paiement des formulaires et le supprimera de votre configuration.
+                </p>
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setConfirmDeletePaymentId(null)}
+                className="px-4 py-2 rounded-xl text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-700"
+              >
+                Annuler
+              </button>
+              <button
+                type="button"
+                onClick={confirmRemovePaymentMethod}
+                className="px-4 py-2 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white"
+              >
+                Supprimer
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
