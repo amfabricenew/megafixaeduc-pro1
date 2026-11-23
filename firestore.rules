@@ -11,14 +11,18 @@ service cloud.firestore {
     }
 
     // =========================================================================
-    // Helper Functions
+    // Global Hardened Helper Functions
     // =========================================================================
-    function isValidId(id) {
-      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_-]+$');
+    function isSignedIn() {
+      return request.auth != null
+        && request.auth.token.email_verified == true;
     }
 
-    function isSignedIn() {
-      return request.auth != null && request.auth.token.email_verified == true;
+    function isValidId(id) {
+      return id is string
+        && id.size() > 0
+        && id.size() <= 128
+        && id.matches('^[a-zA-Z0-9_-]+$');
     }
 
     function incoming() {
@@ -47,7 +51,8 @@ service cloud.firestore {
     }
 
     function isSuperAdmin() {
-      return isBootstrappedSuperAdmin() || (hasUserProfile() && userProfile().role == 'super_admin');
+      return isBootstrappedSuperAdmin()
+        || (hasUserProfile() && userProfile().role == 'super_admin');
     }
 
     function isSameSchool(schoolId) {
@@ -63,7 +68,10 @@ service cloud.firestore {
 
     function hasSchoolField(docData) {
       return docData.keys().hasAll(['school_id'])
-        && (docData.school_id is int || (docData.school_id is string && docData.school_id.size() > 0 && docData.school_id.size() <= 64));
+        && (
+          docData.school_id is int
+          || (docData.school_id is string && docData.school_id.size() > 0 && docData.school_id.size() <= 64)
+        );
     }
 
     function unchangedSchoolId() {
@@ -73,26 +81,76 @@ service cloud.firestore {
     function isValidBackupDoc(data) {
       return data is map
         && data.keys().hasAll(['last_updated'])
-        && data.last_updated is string
-        && data.last_updated.size() > 0
-        && data.last_updated.size() <= 64;
+        && data.keys().hasOnly([
+          'last_updated', 'version', 'build_id', 'has_real_data',
+          'school_count', 'non_default_school_count', 'user_count',
+          'non_test_user_count', 'student_count', 'request_count',
+          'checksum', 'encoding', 'chunk_count', 'sql_dump', 'vault_json',
+          'index', 'total', 'data', 'archived_at', 'archive_reason',
+          'school_id', 'snapshot_id', 'filename', 'label', 'backup_type',
+          'format', 'size_bytes', 'checksum_sha256', 'created_at',
+          'status', 'storage_location'
+        ])
+        && data.last_updated is string && data.last_updated.size() > 0 && data.last_updated.size() <= 64
+        && (!('build_id' in data) || (data.build_id is string && data.build_id.size() <= 128))
+        && (!('checksum' in data) || (data.checksum is string && data.checksum.size() <= 128))
+        && (!('encoding' in data) || (data.encoding is string && data.encoding.size() <= 64))
+        && (!('sql_dump' in data) || (data.sql_dump is string && data.sql_dump.size() <= 900000))
+        && (!('vault_json' in data) || (data.vault_json is string && data.vault_json.size() <= 900000))
+        && (!('data' in data) || (data.data is string && data.data.size() <= 900000))
+        && (!('version' in data) || data.version is int)
+        && (!('school_count' in data) || data.school_count is int)
+        && (!('non_default_school_count' in data) || data.non_default_school_count is int)
+        && (!('user_count' in data) || data.user_count is int)
+        && (!('non_test_user_count' in data) || data.non_test_user_count is int)
+        && (!('student_count' in data) || data.student_count is int)
+        && (!('request_count' in data) || data.request_count is int)
+        && (!('chunk_count' in data) || data.chunk_count is int)
+        && (!('index' in data) || data.index is int)
+        && (!('total' in data) || data.total is int)
+        && (!('has_real_data' in data) || data.has_real_data is bool);
     }
 
     function isValidSchoolDoc(data) {
       return data is map
         && data.keys().hasAll(['nom'])
-        && data.nom is string && data.nom.size() > 0 && data.nom.size() <= 200;
+        && data.keys().hasOnly(['id', 'nom', 'code_ecole', 'plan_abonnement', 'statut_abonnement', 'updatedAt'])
+        && data.nom is string && data.nom.size() > 0 && data.nom.size() <= 200
+        && (!('id' in data) || data.id is int)
+        && (!('code_ecole' in data) || (data.code_ecole is string && data.code_ecole.size() <= 64))
+        && (!('plan_abonnement' in data) || (data.plan_abonnement is string && data.plan_abonnement.size() <= 80))
+        && (!('statut_abonnement' in data) || (data.statut_abonnement is string && data.statut_abonnement.size() <= 40))
+        && (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 64));
     }
 
     function isValidUserDoc(data) {
       return data is map
         && data.keys().hasAll(['role', 'email'])
-        && data.role is string && data.role.size() > 0 && data.role.size() <= 40
-        && data.email is string && data.email.size() > 0 && data.email.size() <= 254;
+        && data.keys().hasOnly(['uid', 'email', 'role', 'school_id', 'nom', 'updatedAt'])
+        && data.role is string && data.role.size() >= 2 && data.role.size() <= 40
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 254
+        && (!('uid' in data) || isValidId(data.uid))
+        && (!('school_id' in data) || data.school_id is int)
+        && (!('nom' in data) || (data.nom is string && data.nom.size() <= 150))
+        && (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 64));
     }
 
     function isValidScopedDoc(data) {
-      return data is map && hasSchoolField(data);
+      return data is map
+        && hasSchoolField(data)
+        && data.keys().hasOnly(['school_id', 'payload', 'status', 'updatedAt'])
+        && (!('payload' in data) || (data.payload is string && data.payload.size() <= 800000))
+        && (!('status' in data) || (data.status is string && data.status.size() <= 64))
+        && (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 64));
+    }
+
+    function isValidAppDataDoc(data) {
+      return data is map
+        && hasSchoolField(data)
+        && data.keys().hasAll(['school_id', 'payload'])
+        && data.keys().hasOnly(['school_id', 'payload', 'updatedAt'])
+        && data.payload is string && data.payload.size() <= 800000
+        && (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 64));
     }
 
     // =========================================================================
@@ -107,97 +165,124 @@ service cloud.firestore {
     // Global Database Backups & Checkpoints (Strictly Super-Admin Only)
     // =========================================================================
     match /backups/{checkpointId} {
-      allow get: if isValidId(checkpointId) && isSuperAdmin();
+      allow get: if isSignedIn() && isValidId(checkpointId) && isSuperAdmin();
       allow list: if false;
-      allow create, update: if isValidId(checkpointId) && isSuperAdmin() && isValidBackupDoc(incoming());
-      allow delete: if isValidId(checkpointId) && isSuperAdmin();
+      allow create: if isSignedIn() && isValidId(checkpointId) && isValidBackupDoc(incoming()) && isSuperAdmin();
+      allow update: if isSignedIn() && isValidId(checkpointId) && isValidBackupDoc(incoming()) && isSuperAdmin();
+      allow delete: if isSignedIn() && isValidId(checkpointId) && resource != null && isSuperAdmin();
     }
 
     // =========================================================================
     // Multi-Tenant Schools Registry
     // =========================================================================
     match /schools/{schoolId} {
-      allow get: if isValidId(schoolId) && (isSuperAdmin() || isSameSchool(schoolId));
+      allow get: if isSignedIn() && isValidId(schoolId) && (isSuperAdmin() || isSameSchool(schoolId));
       allow list: if false;
-      allow create: if isValidId(schoolId) && isValidSchoolDoc(incoming()) && isSuperAdmin();
-      allow update: if isValidId(schoolId) && isValidSchoolDoc(incoming()) && (isSuperAdmin() || isSchoolAdmin(schoolId));
-      allow delete: if isValidId(schoolId) && isSuperAdmin();
+      allow create: if isSignedIn() && isValidId(schoolId) && isValidSchoolDoc(incoming()) && isSuperAdmin();
+      allow update: if isSignedIn() && isValidId(schoolId) && isValidSchoolDoc(incoming()) && (
+        isSuperAdmin() ||
+        (
+          isSchoolAdmin(schoolId)
+          && incoming().diff(existing()).affectedKeys().hasOnly(['nom', 'updatedAt'])
+        )
+      );
+      allow delete: if isSignedIn() && isValidId(schoolId) && resource != null && isSuperAdmin();
     }
 
     // =========================================================================
     // User Profiles (Ownership & School-Scoped Admin Access; No Role Escalation)
     // =========================================================================
     match /users/{userId} {
-      allow get: if isValidId(userId) && isSignedIn() && (
+      allow get: if isSignedIn() && isValidId(userId) && (
         request.auth.uid == userId ||
         isSuperAdmin() ||
         (resource != null && hasSchoolField(existing()) && isSchoolAdmin(existing().school_id))
       );
       allow list: if false;
-      allow create: if isValidId(userId) && isValidUserDoc(incoming()) && isSuperAdmin();
-      allow update: if isValidId(userId) && isSignedIn() && isValidUserDoc(incoming()) && (
+      allow create: if isSignedIn() && isValidId(userId) && isValidUserDoc(incoming()) && isSuperAdmin();
+      allow update: if isSignedIn() && isValidId(userId) && isValidUserDoc(incoming()) && (
         isSuperAdmin() ||
-        (request.auth.uid == userId && incoming().role == existing().role && unchangedSchoolId())
+        (
+          request.auth.uid == userId
+          && incoming().role == existing().role
+          && unchangedSchoolId()
+          && incoming().diff(existing()).affectedKeys().hasOnly(['nom', 'updatedAt'])
+        )
       );
-      allow delete: if isValidId(userId) && isSuperAdmin();
+      allow delete: if isSignedIn() && isValidId(userId) && resource != null && isSuperAdmin();
     }
 
     // =========================================================================
     // School-Scoped Operational Collections
     // =========================================================================
     match /classes/{classId} {
-      allow get: if isValidId(classId) && isSignedIn() && (
+      allow get: if isSignedIn() && isValidId(classId) && (
         isSuperAdmin() ||
         (resource != null && hasSchoolField(existing()) && isSameSchool(existing().school_id))
       );
       allow list: if false;
-      allow create: if isValidId(classId) && isValidScopedDoc(incoming()) && (isSuperAdmin() || isSchoolAdmin(incoming().school_id));
-      allow update: if isValidId(classId) && isValidScopedDoc(incoming()) && hasSchoolField(existing()) && unchangedSchoolId() && (isSuperAdmin() || isSchoolAdmin(existing().school_id));
-      allow delete: if isValidId(classId) && hasSchoolField(existing()) && (isSuperAdmin() || isSchoolAdmin(existing().school_id));
+      allow create: if isSignedIn() && isValidId(classId) && isValidScopedDoc(incoming()) && (isSuperAdmin() || isSchoolAdmin(incoming().school_id));
+      allow update: if isSignedIn() && isValidId(classId) && isValidScopedDoc(incoming()) && resource != null && hasSchoolField(existing()) && unchangedSchoolId() && (
+        isSuperAdmin() ||
+        (isSchoolAdmin(existing().school_id) && incoming().diff(existing()).affectedKeys().hasOnly(['payload', 'status', 'updatedAt']))
+      );
+      allow delete: if isSignedIn() && isValidId(classId) && resource != null && hasSchoolField(existing()) && (isSuperAdmin() || isSchoolAdmin(existing().school_id));
     }
 
     match /students/{studentId} {
-      allow get: if isValidId(studentId) && isSignedIn() && (
+      allow get: if isSignedIn() && isValidId(studentId) && (
         isSuperAdmin() ||
         (resource != null && hasSchoolField(existing()) && isSameSchool(existing().school_id))
       );
       allow list: if false;
-      allow create: if isValidId(studentId) && isValidScopedDoc(incoming()) && (isSuperAdmin() || isSchoolAdmin(incoming().school_id));
-      allow update: if isValidId(studentId) && isValidScopedDoc(incoming()) && hasSchoolField(existing()) && unchangedSchoolId() && (isSuperAdmin() || isSchoolAdmin(existing().school_id));
-      allow delete: if isValidId(studentId) && hasSchoolField(existing()) && (isSuperAdmin() || isSchoolAdmin(existing().school_id));
+      allow create: if isSignedIn() && isValidId(studentId) && isValidScopedDoc(incoming()) && (isSuperAdmin() || isSchoolAdmin(incoming().school_id));
+      allow update: if isSignedIn() && isValidId(studentId) && isValidScopedDoc(incoming()) && resource != null && hasSchoolField(existing()) && unchangedSchoolId() && (
+        isSuperAdmin() ||
+        (isSchoolAdmin(existing().school_id) && incoming().diff(existing()).affectedKeys().hasOnly(['payload', 'status', 'updatedAt']))
+      );
+      allow delete: if isSignedIn() && isValidId(studentId) && resource != null && hasSchoolField(existing()) && (isSuperAdmin() || isSchoolAdmin(existing().school_id));
     }
 
     match /grades/{gradeId} {
-      allow get: if isValidId(gradeId) && isSignedIn() && (
+      allow get: if isSignedIn() && isValidId(gradeId) && (
         isSuperAdmin() ||
         (resource != null && hasSchoolField(existing()) && isSameSchool(existing().school_id))
       );
       allow list: if false;
-      allow create: if isValidId(gradeId) && isValidScopedDoc(incoming()) && (isSuperAdmin() || isSchoolAdmin(incoming().school_id));
-      allow update: if isValidId(gradeId) && isValidScopedDoc(incoming()) && hasSchoolField(existing()) && unchangedSchoolId() && (isSuperAdmin() || isSchoolAdmin(existing().school_id));
-      allow delete: if isValidId(gradeId) && hasSchoolField(existing()) && (isSuperAdmin() || isSchoolAdmin(existing().school_id));
+      allow create: if isSignedIn() && isValidId(gradeId) && isValidScopedDoc(incoming()) && (isSuperAdmin() || isSchoolAdmin(incoming().school_id));
+      allow update: if isSignedIn() && isValidId(gradeId) && isValidScopedDoc(incoming()) && resource != null && hasSchoolField(existing()) && unchangedSchoolId() && (
+        isSuperAdmin() ||
+        (isSchoolAdmin(existing().school_id) && incoming().diff(existing()).affectedKeys().hasOnly(['payload', 'status', 'updatedAt']))
+      );
+      allow delete: if isSignedIn() && isValidId(gradeId) && resource != null && hasSchoolField(existing()) && (isSuperAdmin() || isSchoolAdmin(existing().school_id));
     }
 
     match /settings/{settingId} {
-      allow get: if isValidId(settingId) && isSignedIn() && (
+      allow get: if isSignedIn() && isValidId(settingId) && (
         isSuperAdmin() ||
         (resource != null && hasSchoolField(existing()) && isSameSchool(existing().school_id))
       );
       allow list: if false;
-      allow create: if isValidId(settingId) && isValidScopedDoc(incoming()) && (isSuperAdmin() || isSchoolAdmin(incoming().school_id));
-      allow update: if isValidId(settingId) && isValidScopedDoc(incoming()) && hasSchoolField(existing()) && unchangedSchoolId() && (isSuperAdmin() || isSchoolAdmin(existing().school_id));
-      allow delete: if isValidId(settingId) && hasSchoolField(existing()) && (isSuperAdmin() || isSchoolAdmin(existing().school_id));
+      allow create: if isSignedIn() && isValidId(settingId) && isValidScopedDoc(incoming()) && (isSuperAdmin() || isSchoolAdmin(incoming().school_id));
+      allow update: if isSignedIn() && isValidId(settingId) && isValidScopedDoc(incoming()) && resource != null && hasSchoolField(existing()) && unchangedSchoolId() && (
+        isSuperAdmin() ||
+        (isSchoolAdmin(existing().school_id) && incoming().diff(existing()).affectedKeys().hasOnly(['payload', 'status', 'updatedAt']))
+      );
+      allow delete: if isSignedIn() && isValidId(settingId) && resource != null && hasSchoolField(existing()) && (isSuperAdmin() || isSchoolAdmin(existing().school_id));
     }
 
     match /app_data/{docId} {
-      allow get: if isValidId(docId) && isSignedIn() && (
+      allow get: if isSignedIn() && isValidId(docId) && (
         isSuperAdmin() ||
         (resource != null && hasSchoolField(existing()) && isSameSchool(existing().school_id))
       );
       allow list: if false;
-      allow create: if isValidId(docId) && isValidScopedDoc(incoming()) && (isSuperAdmin() || isSchoolAdmin(incoming().school_id));
-      allow update: if isValidId(docId) && isValidScopedDoc(incoming()) && hasSchoolField(existing()) && unchangedSchoolId() && (isSuperAdmin() || isSchoolAdmin(existing().school_id));
-      allow delete: if isValidId(docId) && hasSchoolField(existing()) && (isSuperAdmin() || isSchoolAdmin(existing().school_id));
+      allow create: if isSignedIn() && isValidId(docId) && isValidAppDataDoc(incoming()) && (isSuperAdmin() || isSchoolAdmin(incoming().school_id));
+      allow update: if isSignedIn() && isValidId(docId) && isValidAppDataDoc(incoming()) && resource != null && hasSchoolField(existing()) && unchangedSchoolId() && (
+        isSuperAdmin() ||
+        (isSchoolAdmin(existing().school_id) && incoming().diff(existing()).affectedKeys().hasOnly(['payload', 'updatedAt']))
+      );
+      allow delete: if isSignedIn() && isValidId(docId) && resource != null && hasSchoolField(existing()) && (isSuperAdmin() || isSchoolAdmin(existing().school_id));
     }
   }
 }

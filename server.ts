@@ -222,14 +222,17 @@ function initDatabase(dbPath: string): Database.Database {
       }
     }
     const dbInstance = new Database(dbPath);
-    // Verify database health
+    // Verify database health before enabling WAL
     const check = dbInstance.pragma('quick_check') as any[];
     if (!check || check.length === 0 || check[0]?.quick_check !== 'ok') {
       throw new Error(`Database quick_check failed: ${JSON.stringify(check)}`);
     }
+    dbInstance.pragma('busy_timeout = 10000');
     dbInstance.pragma('journal_mode = WAL');
     dbInstance.pragma('synchronous = NORMAL');
     dbInstance.pragma('foreign_keys = ON');
+    dbInstance.pragma('temp_store = MEMORY');
+    dbInstance.pragma('cache_size = -16000');
     dbInstance.pragma('wal_autocheckpoint = 500');
     return dbInstance;
   } catch (err: any) {
@@ -247,9 +250,13 @@ function initDatabase(dbPath: string): Database.Database {
       }
     }
     const freshDb = new Database(dbPath);
+    freshDb.pragma('busy_timeout = 10000');
     freshDb.pragma('journal_mode = WAL');
     freshDb.pragma('synchronous = NORMAL');
     freshDb.pragma('foreign_keys = ON');
+    freshDb.pragma('temp_store = MEMORY');
+    freshDb.pragma('cache_size = -16000');
+    freshDb.pragma('wal_autocheckpoint = 500');
     return freshDb;
   }
 }
@@ -331,66 +338,7 @@ process.on('SIGINT', () => { flushAndCloseDb(); process.exit(0); });
 process.on('SIGTERM', () => { flushAndCloseDb(); process.exit(0); });
 process.on('beforeExit', () => { flushAndCloseDb(); });
 
-// Critical Migrations (Ensuring columns exist in existing databases)
-try { db.prepare("ALTER TABLE eleves ADD COLUMN arrieres_scolarite REAL DEFAULT 0").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE eleve_annees ADD COLUMN arrieres_scolarite REAL DEFAULT 0").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE paiements ADD COLUMN tranche TEXT").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE paiements ADD COLUMN note TEXT").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE paiements ADD COLUMN tranche_numero INTEGER").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE paiements ADD COLUMN annee_concernee_id INTEGER").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE paiements ADD COLUMN annee_concernee_libelle TEXT").run(); } catch(e) {}
-try { db.exec("ALTER TABLE messages_internes ADD COLUMN audio_url TEXT"); } catch(e) {}
-
-try { db.prepare("ALTER TABLE emplois_du_temps ADD COLUMN salle_id INTEGER").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE ressources_materielles ADD COLUMN unite_mesure TEXT DEFAULT 'unite'").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE ressources_materielles ADD COLUMN unites_par_paquet INTEGER DEFAULT 1").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE ressources_materielles ADD COLUMN salle_nom_libre TEXT").run(); } catch(e) {}
-
-// AI Lab Migrations
-try { db.exec("ALTER TABLE school_info ADD COLUMN ai_provider TEXT DEFAULT 'gemini'"); } catch(e) {}
-try { db.exec("ALTER TABLE school_info ADD COLUMN ai_email TEXT"); } catch(e) {}
-try { db.exec("ALTER TABLE school_info ADD COLUMN frais_adhesion_bibliotheque REAL DEFAULT 1000"); } catch(e) {}
-
-try { db.prepare("ALTER TABLE classes ADD COLUMN plafond_conduite REAL DEFAULT 20").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE classes ADD COLUMN plafond_conduite_t1 REAL DEFAULT 20").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE classes ADD COLUMN plafond_conduite_t2 REAL DEFAULT 20").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE classes ADD COLUMN plafond_conduite_t3 REAL DEFAULT 20").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE matieres ADD COLUMN est_disciplinaire INTEGER DEFAULT 0").run(); } catch(e) {}
-
-try { db.prepare("ALTER TABLE school_info ADD COLUMN features_locked INTEGER DEFAULT 0").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE school_info ADD COLUMN features_locked_motif TEXT").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE school_creation_requests ADD COLUMN school_id INTEGER").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE school_creation_requests ADD COLUMN motif_rejet TEXT").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE school_creation_requests ADD COLUMN admin_notes TEXT").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE school_creation_requests ADD COLUMN last_notice_type TEXT").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE school_creation_requests ADD COLUMN last_notice_sent_at DATETIME").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE school_creation_requests ADD COLUMN complaint_text TEXT").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE school_creation_requests ADD COLUMN complaint_at DATETIME").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE school_creation_requests ADD COLUMN auto_rejected_at DATETIME").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE utilisateurs ADD COLUMN must_change_password INTEGER DEFAULT 0").run(); } catch(e) {}
-
-// School Custom SMTP & SMS Gateway Configuration
-try {
-  db.prepare(`
-    CREATE TABLE IF NOT EXISTS school_smtp_configs (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      school_id INTEGER NOT NULL UNIQUE,
-      custom_smtp_enabled INTEGER DEFAULT 0,
-      smtp_host TEXT DEFAULT '',
-      smtp_port TEXT DEFAULT '587',
-      smtp_user TEXT DEFAULT '',
-      smtp_pass TEXT DEFAULT '',
-      smtp_secure TEXT DEFAULT 'false',
-      email_from TEXT DEFAULT '',
-      updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY(school_id) REFERENCES school_info(id) ON DELETE CASCADE
-    )
-  `).run();
-} catch (e) {}
-
-try { db.prepare("ALTER TABLE sms_configs ADD COLUMN custom_sms_enabled INTEGER DEFAULT 0").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE school_smtp_configs ADD COLUMN email_provider TEXT DEFAULT 'smtp'").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE school_smtp_configs ADD COLUMN brevo_api_key TEXT DEFAULT ''").run(); } catch(e) {}
+// Post-schema migrations and dependent tables run safely inside initializeDatabase() after core tables exist.
 
 // Robust Data Persistence Layer (Checkpoint System)
 // Preserves all existing schools, accounts, students, grades, financials, and settings across updates & redeployments.
@@ -1299,8 +1247,23 @@ async function fetchCloudSchoolVault(): Promise<SchoolAccountsVault | null> {
     const snap = await adminDb.collection('backups').doc('school_accounts_registry').get();
     if (!snap.exists) return null;
     const data = snap.data();
-    if (!data?.vault_json || typeof data.vault_json !== 'string') return null;
-    const parsed = JSON.parse(data.vault_json) as SchoolAccountsVault;
+    let rawJson = '';
+    if (data?.encoding === 'plain-chunked' && Number(data?.chunk_count) > 0) {
+      const chunkCount = Number(data.chunk_count);
+      const parts: string[] = [];
+      for (let i = 0; i < chunkCount; i++) {
+        const chunkSnap = await adminDb.collection('backups').doc(`school_accounts_registry_chunk_${i}`).get();
+        if (!chunkSnap.exists || typeof chunkSnap.data()?.data !== 'string') {
+          throw new Error(`Missing cloud vault chunk ${i}/${chunkCount}`);
+        }
+        parts.push(chunkSnap.data().data);
+      }
+      rawJson = parts.join('');
+    } else if (typeof data?.vault_json === 'string' && data.vault_json.length > 0) {
+      rawJson = data.vault_json;
+    }
+    if (!rawJson) return null;
+    const parsed = JSON.parse(rawJson) as SchoolAccountsVault;
     if (!parsed || !parsed.tables) return null;
     return parsed;
   } catch (err) {
@@ -1749,64 +1712,10 @@ async function processAutoRejection() {
 // Check for auto-rejections every hour
 setInterval(processAutoRejection, 60 * 60 * 1000);
 
-// Periodic checkpoint (every 10 minutes to reduce frequency and server load)
-setInterval(saveCheckpoint, 10 * 60 * 1000);
-
-// New Table for Library Adhesion Payments
-db.exec(`
-  CREATE TABLE IF NOT EXISTS bibliotheque_paiements_adhesion (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    num_recu TEXT UNIQUE NOT NULL,
-    eleve_id INTEGER,
-    nom_complet TEXT NOT NULL,
-    telephone TEXT,
-    email TEXT,
-    montant REAL NOT NULL,
-    date_paiement TEXT NOT NULL,
-    type_adherent TEXT DEFAULT 'externe',
-    school_id INTEGER NOT NULL,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY(eleve_id) REFERENCES eleves(id) ON DELETE SET NULL,
-    FOREIGN KEY(school_id) REFERENCES school_info(id) ON DELETE CASCADE
-  )
-`);
-
-try { db.prepare("ALTER TABLE utilisateurs ADD COLUMN question_secrete TEXT").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE utilisateurs ADD COLUMN reponse_secrete TEXT").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE classes ADD COLUMN salle_id INTEGER").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE reunions ADD COLUMN salle_id INTEGER").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE activites_scolaires ADD COLUMN salle_id INTEGER").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE enseignants ADD COLUMN cycle TEXT DEFAULT 'secondaire'").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE enseignants ADD COLUMN salaire_fixe REAL DEFAULT 0").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE enseignants ADD COLUMN taux_horaire REAL DEFAULT 0").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE enseignants ADD COLUMN statut TEXT DEFAULT 'Permanent'").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE enseignants ADD COLUMN sexe TEXT").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE enseignants ADD COLUMN date_naissance TEXT").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE enseignants ADD COLUMN niveau_etudes TEXT").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE enseignants ADD COLUMN diplome_pro TEXT").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE enseignants ADD COLUMN autorisation_enseigner TEXT").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE enseignants ADD COLUMN annees_experience INTEGER DEFAULT 0").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE enseignants ADD COLUMN statut_dossier TEXT DEFAULT 'non_soumis'").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE enseignants ADD COLUMN remarque_dossier TEXT").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE enseignants ADD COLUMN identifiant_compte TEXT").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE enseignant_paiements_mensuels ADD COLUMN montant_paye REAL DEFAULT 0").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE enseignant_paiements_mensuels ADD COLUMN reste_a_payer REAL DEFAULT 0").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE enseignant_bilans_hebdo ADD COLUMN details_creneaux TEXT").run(); } catch(e) {}
-try { db.prepare("ALTER TABLE timetable_requests ADD COLUMN type_modification TEXT DEFAULT 'emploi_du_temps'").run(); } catch(e){}
-try { db.prepare("ALTER TABLE classes ADD COLUMN professeur_principal_id INTEGER").run(); } catch(e){}
-try { db.prepare("ALTER TABLE classes ADD COLUMN cycle TEXT DEFAULT 'secondaire'").run(); } catch(e){}
-
-// Migration: Add annee_id to tables that should persist across years but be filterable
-const tablesToUpdate = [
-  'batiments', 'salles', 'ressources_materielles', 'personnel_administratif',
-  'document_requests', 'alertes', 'livres_physiques', 'timetable_requests',
-  'messages_internes', 'emprunts_bibliotheque', 'consultations_sur_place',
-  'recrutement_campagnes', 'recrutement_candidatures', 'inscription_demandes',
-  'ressources_bibliotheque', 'sms_logs'
-];
-tablesToUpdate.forEach(table => {
-  try { db.prepare(`ALTER TABLE ${table} ADD COLUMN annee_id INTEGER`).run(); } catch(e) {}
-});
+// Periodic checkpoint (every 10 minutes to preserve local & cloud durability)
+setInterval(() => {
+  saveCheckpoint('periodic').catch(() => {});
+}, 10 * 60 * 1000);
 
 // Helper to normalize academic year libelle
 // Rule: A school year cannot be e.g. 2025-2025; it must automatically become 2025-2026.
@@ -4283,18 +4192,128 @@ if (RESET_DB) {
   `);
 }
 
-// Ensure newer schema extensions also exist on fresh databases before checkpoint restore
-try { db.prepare("ALTER TABLE sms_configs ADD COLUMN custom_sms_enabled INTEGER DEFAULT 0").run(); } catch(e){}
-try { db.prepare("ALTER TABLE school_smtp_configs ADD COLUMN email_provider TEXT DEFAULT 'smtp'").run(); } catch(e){}
-try { db.prepare("ALTER TABLE school_smtp_configs ADD COLUMN brevo_api_key TEXT DEFAULT ''").run(); } catch(e){}
-try { db.prepare("ALTER TABLE school_info ADD COLUMN features_locked INTEGER DEFAULT 0").run(); } catch(e){}
-try { db.prepare("ALTER TABLE school_info ADD COLUMN features_locked_motif TEXT").run(); } catch(e){}
-try { db.prepare("ALTER TABLE utilisateurs ADD COLUMN must_change_password INTEGER DEFAULT 0").run(); } catch(e){}
-try { db.prepare("ALTER TABLE paiements ADD COLUMN tranche_numero INTEGER").run(); } catch(e){}
-try { db.exec("ALTER TABLE messages_internes ADD COLUMN audio_url TEXT"); } catch(e){}
-try { db.prepare("ALTER TABLE school_info ADD COLUMN ai_provider TEXT DEFAULT 'gemini'").run(); } catch(e){}
-try { db.prepare("ALTER TABLE school_info ADD COLUMN ai_email TEXT").run(); } catch(e){}
-try { db.prepare("ALTER TABLE school_info ADD COLUMN frais_adhesion_bibliotheque REAL DEFAULT 1000").run(); } catch(e){}
+// Dependent tables & exhaustive schema migrations inside initializeDatabase (guaranteed after core tables exist)
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS school_smtp_configs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      school_id INTEGER NOT NULL UNIQUE,
+      custom_smtp_enabled INTEGER DEFAULT 0,
+      email_provider TEXT DEFAULT 'smtp',
+      brevo_api_key TEXT DEFAULT '',
+      smtp_host TEXT DEFAULT '',
+      smtp_port TEXT DEFAULT '587',
+      smtp_user TEXT DEFAULT '',
+      smtp_pass TEXT DEFAULT '',
+      smtp_secure TEXT DEFAULT 'false',
+      email_from TEXT DEFAULT '',
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(school_id) REFERENCES school_info(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS bibliotheque_paiements_adhesion (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      num_recu TEXT UNIQUE NOT NULL,
+      eleve_id INTEGER,
+      nom_complet TEXT NOT NULL,
+      telephone TEXT,
+      email TEXT,
+      montant REAL NOT NULL,
+      date_paiement TEXT NOT NULL,
+      type_adherent TEXT DEFAULT 'externe',
+      school_id INTEGER NOT NULL,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(eleve_id) REFERENCES eleves(id) ON DELETE SET NULL,
+      FOREIGN KEY(school_id) REFERENCES school_info(id) ON DELETE CASCADE
+    );
+  `);
+} catch (e) {
+  console.warn('[Migration] Dependent tables warning:', e);
+}
+
+const ensureColumn = (tableName: string, colName: string, colDef: string) => {
+  try {
+    const cols = (db.prepare(`PRAGMA table_info("${tableName}")`).all() as any[]).map(c => c.name);
+    if (cols.length > 0 && !cols.includes(colName)) {
+      db.exec(`ALTER TABLE "${tableName}" ADD COLUMN "${colName}" ${colDef}`);
+    }
+  } catch (err: any) {
+    console.warn(`[Migration] Column ${tableName}.${colName} notice:`, err?.message || err);
+  }
+};
+
+ensureColumn('sms_configs', 'custom_sms_enabled', 'INTEGER DEFAULT 0');
+ensureColumn('school_smtp_configs', 'email_provider', "TEXT DEFAULT 'smtp'");
+ensureColumn('school_smtp_configs', 'brevo_api_key', "TEXT DEFAULT ''");
+ensureColumn('school_info', 'features_locked', 'INTEGER DEFAULT 0');
+ensureColumn('school_info', 'features_locked_motif', 'TEXT');
+ensureColumn('school_info', 'ai_provider', "TEXT DEFAULT 'gemini'");
+ensureColumn('school_info', 'ai_email', 'TEXT');
+ensureColumn('school_info', 'frais_adhesion_bibliotheque', 'REAL DEFAULT 1000');
+ensureColumn('utilisateurs', 'must_change_password', 'INTEGER DEFAULT 0');
+ensureColumn('utilisateurs', 'question_secrete', 'TEXT');
+ensureColumn('utilisateurs', 'reponse_secrete', 'TEXT');
+ensureColumn('paiements', 'tranche', 'TEXT');
+ensureColumn('paiements', 'note', 'TEXT');
+ensureColumn('paiements', 'tranche_numero', 'INTEGER');
+ensureColumn('paiements', 'annee_concernee_id', 'INTEGER');
+ensureColumn('paiements', 'annee_concernee_libelle', 'TEXT');
+ensureColumn('messages_internes', 'audio_url', 'TEXT');
+ensureColumn('emplois_du_temps', 'salle_id', 'INTEGER');
+ensureColumn('ressources_materielles', 'unite_mesure', "TEXT DEFAULT 'unite'");
+ensureColumn('ressources_materielles', 'unites_par_paquet', 'INTEGER DEFAULT 1');
+ensureColumn('ressources_materielles', 'salle_nom_libre', 'TEXT');
+ensureColumn('classes', 'salle_id', 'INTEGER');
+ensureColumn('classes', 'professeur_principal_id', 'INTEGER');
+ensureColumn('classes', 'cycle', "TEXT DEFAULT 'secondaire'");
+ensureColumn('classes', 'plafond_conduite', 'REAL DEFAULT 20');
+ensureColumn('classes', 'plafond_conduite_t1', 'REAL DEFAULT 20');
+ensureColumn('classes', 'plafond_conduite_t2', 'REAL DEFAULT 20');
+ensureColumn('classes', 'plafond_conduite_t3', 'REAL DEFAULT 20');
+ensureColumn('reunions', 'salle_id', 'INTEGER');
+ensureColumn('activites_scolaires', 'salle_id', 'INTEGER');
+ensureColumn('matieres', 'est_disciplinaire', 'INTEGER DEFAULT 0');
+ensureColumn('eleves', 'arrieres_scolarite', 'REAL DEFAULT 0');
+ensureColumn('eleve_annees', 'arrieres_scolarite', 'REAL DEFAULT 0');
+ensureColumn('enseignants', 'cycle', "TEXT DEFAULT 'secondaire'");
+ensureColumn('enseignants', 'salaire_fixe', 'REAL DEFAULT 0');
+ensureColumn('enseignants', 'taux_horaire', 'REAL DEFAULT 0');
+ensureColumn('enseignants', 'statut', "TEXT DEFAULT 'Permanent'");
+ensureColumn('enseignants', 'sexe', 'TEXT');
+ensureColumn('enseignants', 'date_naissance', 'TEXT');
+ensureColumn('enseignants', 'niveau_etudes', 'TEXT');
+ensureColumn('enseignants', 'diplome_pro', 'TEXT');
+ensureColumn('enseignants', 'autorisation_enseigner', 'TEXT');
+ensureColumn('enseignants', 'annees_experience', 'INTEGER DEFAULT 0');
+ensureColumn('enseignants', 'statut_dossier', "TEXT DEFAULT 'non_soumis'");
+ensureColumn('enseignants', 'remarque_dossier', 'TEXT');
+ensureColumn('enseignants', 'identifiant_compte', 'TEXT');
+ensureColumn('enseignant_paiements_mensuels', 'montant_paye', 'REAL DEFAULT 0');
+ensureColumn('enseignant_paiements_mensuels', 'reste_a_payer', 'REAL DEFAULT 0');
+ensureColumn('enseignant_bilans_hebdo', 'details_creneaux', 'TEXT');
+ensureColumn('timetable_requests', 'type_modification', "TEXT DEFAULT 'emploi_du_temps'");
+ensureColumn('examen_sessions', 'est_publie', 'INTEGER DEFAULT 0');
+ensureColumn('examen_sessions', 'bulletin_telechargeable', 'INTEGER DEFAULT 1');
+ensureColumn('school_creation_requests', 'school_id', 'INTEGER');
+ensureColumn('school_creation_requests', 'motif_rejet', 'TEXT');
+ensureColumn('school_creation_requests', 'admin_notes', 'TEXT');
+ensureColumn('school_creation_requests', 'last_notice_type', 'TEXT');
+ensureColumn('school_creation_requests', 'last_notice_sent_at', 'DATETIME');
+ensureColumn('school_creation_requests', 'complaint_text', 'TEXT');
+ensureColumn('school_creation_requests', 'complaint_at', 'DATETIME');
+ensureColumn('school_creation_requests', 'auto_rejected_at', 'DATETIME');
+
+// Ensure annee_id column exists on all multi-year filterable tables
+const tablesRequiringAnneeId = [
+  'batiments', 'salles', 'ressources_materielles', 'personnel_administratif',
+  'document_requests', 'alertes', 'livres_physiques', 'timetable_requests',
+  'messages_internes', 'emprunts_bibliotheque', 'consultations_sur_place',
+  'recrutement_campagnes', 'recrutement_candidatures', 'inscription_demandes',
+  'ressources_bibliotheque', 'sms_logs'
+];
+for (const tbl of tablesRequiringAnneeId) {
+  ensureColumn(tbl, 'annee_id', 'INTEGER');
+}
 
 // Attempt restoring or losslessly merging missing school accounts from checkpoints BEFORE orphan cleanup or default seeding
 try {
@@ -4838,25 +4857,50 @@ try {
     "CREATE INDEX IF NOT EXISTS idx_classe_matieres_lookup ON classe_matieres(classe_id, matiere_id, school_id)",
     "CREATE INDEX IF NOT EXISTS idx_enseignant_matieres_lookup ON enseignant_matieres(enseignant_id, matiere_id, school_id)",
     "CREATE INDEX IF NOT EXISTS idx_notes_lookup ON notes(school_id, eleve_id, matiere_id, trimestre)",
-    "CREATE INDEX IF NOT EXISTS idx_notes_classe ON notes(school_id, classe_id, annee_id)",
+    "CREATE INDEX IF NOT EXISTS idx_notes_classe ON notes(school_id, annee_id, trimestre)",
     "CREATE INDEX IF NOT EXISTS idx_paiements_lookup ON paiements(school_id, eleve_id, annee_id)",
     "CREATE INDEX IF NOT EXISTS idx_paiements_date ON paiements(school_id, date_paiement)",
-    "CREATE INDEX IF NOT EXISTS idx_edt_lookup ON emplois_du_temps(school_id, classe_id, annee_id)",
+    "CREATE INDEX IF NOT EXISTS idx_edt_lookup ON emplois_du_temps(school_id, classe_id)",
     "CREATE INDEX IF NOT EXISTS idx_edt_enseignant ON emplois_du_temps(school_id, enseignant_id)",
-    "CREATE INDEX IF NOT EXISTS idx_alertes_lookup ON alertes(school_id, eleve_id)",
+    "CREATE INDEX IF NOT EXISTS idx_alertes_school ON alertes(school_id, date_alerte)",
     "CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(utilisateur_id, lu)",
     "CREATE INDEX IF NOT EXISTS idx_notifications_school ON notifications(school_id, date_creation)",
-    "CREATE INDEX IF NOT EXISTS idx_messages_internes_dest ON messages_internes(destinataire_id, lu)",
-    "CREATE INDEX IF NOT EXISTS idx_messages_internes_exp ON messages_internes(expediteur_id)",
-    "CREATE INDEX IF NOT EXISTS idx_audit_logs_school ON audit_logs(school_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_messages_internes_dest ON messages_internes(school_id, recipient_type, recipient_id)",
+    "CREATE INDEX IF NOT EXISTS idx_messages_internes_exp ON messages_internes(school_id, sender_id)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_logs_school ON audit_logs(school_id, date_activite)",
     "CREATE INDEX IF NOT EXISTS idx_epreuves_school ON epreuves(school_id, annee_id)",
-    "CREATE INDEX IF NOT EXISTS idx_bibliotheque_school ON bibliotheque_ressources(school_id)",
+    "CREATE INDEX IF NOT EXISTS idx_bibliotheque_school ON ressources_bibliotheque(school_id)",
     "CREATE INDEX IF NOT EXISTS idx_depenses_school ON depenses(school_id, annee_id)",
     "CREATE INDEX IF NOT EXISTS idx_autres_recettes_school ON autres_recettes(school_id, annee_id)",
-    "CREATE INDEX IF NOT EXISTS idx_sessions_cours_lookup ON sessions_cours(school_id, enseignant_id, date_cours)"
+    "CREATE INDEX IF NOT EXISTS idx_sessions_cours_lookup ON sessions_cours(school_id, emploi_du_temps_id, date)",
+    "CREATE INDEX IF NOT EXISTS idx_school_requests_statut ON school_creation_requests(statut, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_school_requests_email ON school_creation_requests(LOWER(TRIM(demandeur_email)))",
+    "CREATE INDEX IF NOT EXISTS idx_reclamations_request ON reclamations_demandes(request_id)",
+    "CREATE INDEX IF NOT EXISTS idx_sub_licenses_school ON subscription_licenses(school_id, status)",
+    "CREATE INDEX IF NOT EXISTS idx_sub_licenses_email ON subscription_licenses(LOWER(TRIM(client_email)))",
+    "CREATE INDEX IF NOT EXISTS idx_suivi_eleves_lookup ON suivi_eleves(school_id, date_suivi, classe_id)",
+    "CREATE INDEX IF NOT EXISTS idx_bulletin_mentions_lookup ON bulletin_mentions(school_id, annee_id, eleve_id)",
+    "CREATE INDEX IF NOT EXISTS idx_eleve_exclusions_lookup ON eleve_exclusions(school_id, annee_id, eleve_id)",
+    "CREATE INDEX IF NOT EXISTS idx_inscription_demandes_school ON inscription_demandes(school_id, status)",
+    "CREATE INDEX IF NOT EXISTS idx_personnel_school ON personnel_administratif(school_id)",
+    "CREATE INDEX IF NOT EXISTS idx_personnel_paiements_lookup ON personnel_paiements(school_id, annee_id, personnel_id)",
+    "CREATE INDEX IF NOT EXISTS idx_ens_bilans_lookup ON enseignant_bilans_hebdo(school_id, annee_id, enseignant_id)",
+    "CREATE INDEX IF NOT EXISTS idx_ens_paiements_lookup ON enseignant_paiements_mensuels(school_id, annee_id, enseignant_id)",
+    "CREATE INDEX IF NOT EXISTS idx_salles_school ON salles(school_id, batiment_id)",
+    "CREATE INDEX IF NOT EXISTS idx_livres_school ON livres_physiques(school_id)",
+    "CREATE INDEX IF NOT EXISTS idx_emprunts_school ON emprunts_bibliotheque(school_id, statut)",
+    "CREATE INDEX IF NOT EXISTS idx_adherents_school ON adherents_bibliotheque(school_id, eleve_id)",
+    "CREATE INDEX IF NOT EXISTS idx_backup_snapshots_school ON backup_snapshots(school_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_examen_candidats_lookup ON examen_candidats(school_id, session_id)",
+    "CREATE INDEX IF NOT EXISTS idx_examen_notes_lookup ON examen_notes(school_id, session_id, eleve_id)",
+    "CREATE INDEX IF NOT EXISTS idx_publication_res_lookup ON publication_resultats(school_id, annee_id, type_periode, periode_valeur)"
   ];
   for (const sql of indexStatements) {
-    try { db.exec(sql); } catch {}
+    try {
+      db.exec(sql);
+    } catch (idxErr: any) {
+      console.warn(`[SQLite Index] Skipped index (${sql}):`, idxErr?.message || idxErr);
+    }
   }
 } catch {}
 
@@ -8087,17 +8131,33 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
   // DB Health
   app.get("/api/db/health", authenticateToken, (req: any, res) => {
     try {
-      const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all();
+      const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all();
+      const indexes = db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'").all();
+      const quickCheckRow = db.pragma('quick_check') as any[];
+      const journalModeRow = db.pragma('journal_mode') as any[];
+      const fkRow = db.pragma('foreign_keys') as any[];
+      const dbBytes = fs.existsSync(RESOLVED_DATABASE_PATH) ? fs.statSync(RESOLVED_DATABASE_PATH).size : 0;
+      const walBytes = fs.existsSync(`${RESOLVED_DATABASE_PATH}-wal`) ? fs.statSync(`${RESOLVED_DATABASE_PATH}-wal`).size : 0;
+      const totalBytes = dbBytes + walBytes;
+      const sizeDisplay = totalBytes > 1024 * 1024
+        ? `${(totalBytes / (1024 * 1024)).toFixed(2)} Mo`
+        : `${(totalBytes / 1024).toFixed(1)} Ko`;
+
       const schoolId = req.schoolId || 1;
       const stats = {
         tables: tables.length,
+        indexes: indexes.length,
+        integrity: quickCheckRow?.[0]?.quick_check || 'unknown',
+        journal_mode: journalModeRow?.[0]?.journal_mode || 'unknown',
+        foreign_keys: Boolean(fkRow?.[0]?.foreign_keys),
+        size_bytes: totalBytes,
+        size: sizeDisplay,
         eleves: (db.prepare("SELECT COUNT(*) as count FROM eleves WHERE school_id = ?").get(schoolId) as any)?.count || 0,
         classes: (db.prepare("SELECT COUNT(*) as count FROM classes WHERE school_id = ?").get(schoolId) as any)?.count || 0,
         notes: (db.prepare("SELECT COUNT(*) as count FROM notes WHERE school_id = ?").get(schoolId) as any)?.count || 0,
-        paiements: (db.prepare("SELECT COUNT(*) as count FROM paiements WHERE school_id = ?").get(schoolId) as any)?.count || 0,
-        size: "N/A"
+        paiements: (db.prepare("SELECT COUNT(*) as count FROM paiements WHERE school_id = ?").get(schoolId) as any)?.count || 0
       };
-      res.json({ status: "healthy", stats });
+      res.json({ status: stats.integrity === 'ok' ? "healthy" : "degraded", stats });
     } catch (error: any) {
       res.status(500).json({ status: "error", message: error.message });
     }
@@ -28381,6 +28441,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
     // Reinforce: Sync metadata to Firebase if available
     if (adminDb && isCloudSyncAvailable()) {
       try {
+        const nowIso = new Date().toISOString();
         const synced = await adminDb.collection('backups').doc(`school_${schoolId}_${snapshotId}`).set({
           school_id: schoolId,
           snapshot_id: snapshotId,
@@ -28390,7 +28451,8 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
           format,
           size_bytes: stats.size,
           checksum_sha256: checksum,
-          created_at: new Date().toISOString(),
+          created_at: nowIso,
+          last_updated: nowIso,
           status: 'completed',
           storage_location: 'local_server'
         });
@@ -28754,6 +28816,167 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
     }
   });
 
+  function applyTenantScopedRestorePayload(
+    options: { format: 'json' | 'sql'; content: string; schoolId: number; isSuperAdmin: boolean }
+  ): { applied: number; skipped: number } {
+    const { format, content, schoolId, isSuperAdmin } = options;
+    let applied = 0;
+    let skipped = 0;
+
+    if (format === 'json') {
+      const parsed = typeof content === 'string' ? JSON.parse(content) : content;
+      if (!parsed?.entities || typeof parsed.entities !== 'object') {
+        throw new Error("Format JSON de sauvegarde invalide (clé 'entities' manquante).");
+      }
+
+      db.pragma('foreign_keys = OFF');
+      try {
+        const restoreTransaction = db.transaction(() => {
+          for (const [table, rows] of Object.entries(parsed.entities) as [string, any[]][]) {
+            if (!Array.isArray(rows) || rows.length === 0) continue;
+            if (!/^[a-zA-Z0-9_]+$/.test(table) || table === 'backup_snapshots' || table === 'sqlite_sequence') continue;
+            if (!tableExists(table)) continue;
+
+            const colsInfo = db.prepare(`PRAGMA table_info("${table}")`).all() as any[];
+            const validCols = new Set(colsInfo.map(c => c.name));
+            const hasSchoolId = validCols.has('school_id');
+            if (!isSuperAdmin && !hasSchoolId && table !== 'school_info') {
+              skipped += rows.length;
+              continue;
+            }
+
+            for (const row of rows) {
+              if (!row || typeof row !== 'object') continue;
+              const safeRow: Record<string, any> = {};
+              for (const k of Object.keys(row)) {
+                if (validCols.has(k)) safeRow[k] = row[k];
+              }
+              if (hasSchoolId && !isSuperAdmin) {
+                safeRow.school_id = schoolId;
+              }
+              if (table === 'school_info' && !isSuperAdmin && Number(safeRow.id) !== Number(schoolId)) {
+                skipped++;
+                continue;
+              }
+              if (table === 'utilisateurs' && safeRow.role === 'super_admin' && !isSuperAdmin) {
+                safeRow.role = 'admin';
+              }
+              const cols = Object.keys(safeRow);
+              if (cols.length === 0) continue;
+              const quotedCols = cols.map(c => `"${c}"`).join(', ');
+              const placeholders = cols.map(() => '?').join(', ');
+              const values = cols.map(c => safeRow[c] === undefined ? null : safeRow[c]);
+              try {
+                db.prepare(`INSERT OR REPLACE INTO "${table}" (${quotedCols}) VALUES (${placeholders})`).run(...values);
+                applied++;
+              } catch (rowErr: any) {
+                skipped++;
+                console.warn(`[Restore Warning] (${table}):`, rowErr?.message || rowErr);
+              }
+            }
+          }
+        });
+        restoreTransaction();
+      } finally {
+        try { db.pragma('foreign_keys = ON'); } catch {}
+      }
+      return { applied, skipped };
+    }
+
+    if (isSuperAdmin) {
+      const res = executeResilientSqlRestore(String(content), { mergeOnly: false });
+      return { applied: res.applied + res.adapted, skipped: res.skipped };
+    }
+
+    // Tenant-safe SQL restore using AST-safe statement splitter
+    const statements = splitSqlStatements(String(content));
+    db.pragma('foreign_keys = OFF');
+    try {
+      const restoreTransaction = db.transaction(() => {
+        for (const rawStmt of statements) {
+          const stmt = rawStmt.trim();
+          if (!stmt || stmt.startsWith('--')) continue;
+          const upper = stmt.toUpperCase().replace(/\s+/g, ' ').trim();
+          if (upper.startsWith('PRAGMA') || upper === 'BEGIN' || upper === 'BEGIN TRANSACTION' || upper === 'COMMIT' || upper === 'END TRANSACTION') {
+            continue;
+          }
+          if (!/^INSERT\s+(?:OR\s+(?:REPLACE|IGNORE)\s+)?INTO\s+/i.test(upper)) {
+            skipped++;
+            continue;
+          }
+          if (/\b(DROP|ALTER|ATTACH|DETACH|VACUUM|CREATE|DELETE|UPDATE)\b/i.test(upper)) {
+            skipped++;
+            continue;
+          }
+          const insertMatch = stmt.match(/^INSERT(?:\s+OR\s+(?:REPLACE|IGNORE))?\s+INTO\s+["`]?([a-zA-Z0-9_]+)["`]?\s*\(([^)]+)\)\s*VALUES\s*\(([\s\S]+)\)$/i);
+          if (!insertMatch) {
+            skipped++;
+            continue;
+          }
+          const tblName = insertMatch[1];
+          if (!tableExists(tblName) || tblName === 'backup_snapshots' || tblName === 'sqlite_sequence') {
+            skipped++;
+            continue;
+          }
+          const colsInfo = db.prepare(`PRAGMA table_info("${tblName}")`).all() as any[];
+          const validCols = new Set(colsInfo.map(c => c.name));
+          const cols = insertMatch[2].split(',').map(c => c.trim().replace(/^["`]|["`]$/g, ''));
+          const vals = splitSqlTuple(insertMatch[3]);
+          if (cols.length !== vals.length) {
+            skipped++;
+            continue;
+          }
+          const schoolIdx = cols.indexOf('school_id');
+          if (validCols.has('school_id')) {
+            if (schoolIdx === -1) {
+              skipped++;
+              continue;
+            }
+            vals[schoolIdx] = String(Number(schoolId));
+          } else if (tblName === 'school_info') {
+            const idIdx = cols.indexOf('id');
+            if (idIdx === -1 || Number(vals[idIdx]) !== Number(schoolId)) {
+              skipped++;
+              continue;
+            }
+          } else {
+            skipped++;
+            continue;
+          }
+
+          const keptCols: string[] = [];
+          const keptVals: string[] = [];
+          for (let i = 0; i < cols.length; i++) {
+            if (validCols.has(cols[i])) {
+              keptCols.push(`"${cols[i]}"`);
+              keptVals.push(vals[i]);
+            }
+          }
+          if (keptCols.length === 0) {
+            skipped++;
+            continue;
+          }
+          try {
+            db.exec('SAVEPOINT sp_tenant_restore');
+            db.exec(`INSERT OR REPLACE INTO "${tblName}" (${keptCols.join(', ')}) VALUES (${keptVals.join(', ')})`);
+            db.exec('RELEASE SAVEPOINT sp_tenant_restore');
+            applied++;
+          } catch (stmtErr: any) {
+            try { db.exec('ROLLBACK TO SAVEPOINT sp_tenant_restore'); } catch {}
+            try { db.exec('RELEASE SAVEPOINT sp_tenant_restore'); } catch {}
+            skipped++;
+            console.warn(`[Tenant Restore Warning] (${tblName}):`, stmtErr?.message || stmtErr);
+          }
+        }
+      });
+      restoreTransaction();
+    } finally {
+      try { db.pragma('foreign_keys = ON'); } catch {}
+    }
+
+    return { applied, skipped };
+  }
+
   // POST restore backup snapshot
   app.post("/api/backups/restore/:id", authenticateToken, (req: any, res) => {
     try {
@@ -28772,48 +28995,25 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       }
 
       const fileContent = fs.readFileSync(filePath, 'utf-8');
-
-      if (snapshot.format === 'json') {
-        const parsed = JSON.parse(fileContent);
-        if (!parsed.entities) {
-          return res.status(400).json({ error: "Format JSON de sauvegarde invalide (clé 'entities' manquante)." });
-        }
-
-        const restoreTransaction = db.transaction(() => {
-          for (const [table, rows] of Object.entries(parsed.entities) as [string, any[]][]) {
-            if (!Array.isArray(rows) || rows.length === 0) continue;
-            for (const row of rows) {
-              const cols = Object.keys(row);
-              const placeholders = cols.map(() => '?').join(', ');
-              const values = cols.map(c => row[c]);
-              db.prepare(`INSERT OR REPLACE INTO ${table} (${cols.join(', ')}) VALUES (${placeholders})`).run(...values);
-            }
-          }
-        });
-        restoreTransaction();
-      } else {
-        // SQL restore
-        const statements = fileContent
-          .split(';\n')
-          .map(s => s.trim())
-          .filter(s => s.length > 0 && !s.startsWith('--') && !s.startsWith('PRAGMA') && !s.startsWith('BEGIN') && !s.startsWith('COMMIT'));
-
-        const restoreTransaction = db.transaction(() => {
-          for (const stmt of statements) {
-            try {
-              db.exec(stmt);
-            } catch (stmtErr: any) {
-              console.warn(`[Restore Warning] Skipped or failed statement: ${stmt.substring(0, 50)}...`, stmtErr.message);
-            }
-          }
-        });
-        restoreTransaction();
-      }
+      const format = snapshot.format === 'json' ? 'json' : 'sql';
+      const result = applyTenantScopedRestorePayload({
+        format,
+        content: fileContent,
+        schoolId,
+        isSuperAdmin: req.user?.role === 'super_admin'
+      });
 
       db.prepare("UPDATE backup_snapshots SET restored_at = CURRENT_TIMESTAMP WHERE id = ?").run(snapshot.id);
-      logActivity(req.userId, 'RESTORE_BACKUP', 'backup_snapshots', snapshot.id, { filename: snapshot.filename }, schoolId);
+      logActivity(req.userId, 'RESTORE_BACKUP', 'backup_snapshots', snapshot.id, { filename: snapshot.filename, ...result }, schoolId);
+      bumpServerDataVersion();
+      scheduleCheckpoint('restore_snapshot', 1000);
 
-      res.json({ success: true, message: "Données restaurées avec succès depuis l'archive de sauvegarde." });
+      res.json({
+        success: true,
+        applied: result.applied,
+        skipped: result.skipped,
+        message: "Données restaurées avec succès depuis l'archive de sauvegarde."
+      });
     } catch (err: any) {
       console.error("Restore backup error:", err);
       res.status(500).json({ error: "Erreur lors de la restauration: " + err.message });
@@ -28836,70 +29036,23 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         return res.status(400).json({ error: "Contenu du fichier de sauvegarde manquant." });
       }
 
-      const format = file_format || (file_name?.endsWith('.json') ? 'json' : 'sql');
+      const format = (file_format || (file_name?.endsWith('.json') ? 'json' : 'sql')) === 'json' ? 'json' : 'sql';
+      const result = applyTenantScopedRestorePayload({
+        format,
+        content: typeof file_content === 'string' ? file_content : JSON.stringify(file_content),
+        schoolId,
+        isSuperAdmin: req.user?.role === 'super_admin'
+      });
 
-      if (format === 'json') {
-        const parsed = typeof file_content === 'string' ? JSON.parse(file_content) : file_content;
-        if (!parsed.entities) {
-          return res.status(400).json({ error: "Format JSON non reconnu pour une sauvegarde MégafixaEduc." });
-        }
-
-        const restoreTransaction = db.transaction(() => {
-          for (const [table, rows] of Object.entries(parsed.entities) as [string, any[]][]) {
-            if (!Array.isArray(rows) || rows.length === 0) continue;
-            if (!/^[a-zA-Z0-9_]+$/.test(table)) continue;
-            const tableExistsRow = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = ?").get(table);
-            if (!tableExistsRow) continue;
-            const colsInfo = db.prepare(`PRAGMA table_info(${table})`).all() as any[];
-            const hasSchoolId = colsInfo.some(c => c.name === 'school_id');
-            if (!hasSchoolId && table !== 'school_info') continue;
-
-            for (const row of rows) {
-              const safeRow = { ...row };
-              if (hasSchoolId) safeRow.school_id = schoolId;
-              if (table === 'school_info' && Number(safeRow.id) !== Number(schoolId)) continue;
-              if (table === 'utilisateurs' && safeRow.role === 'super_admin' && req.user?.role !== 'super_admin') {
-                safeRow.role = 'admin';
-              }
-              const cols = Object.keys(safeRow).filter(c => /^[a-zA-Z0-9_]+$/.test(c));
-              const placeholders = cols.map(() => '?').join(', ');
-              const values = cols.map(c => safeRow[c]);
-              db.prepare(`INSERT OR REPLACE INTO ${table} (${cols.join(', ')}) VALUES (${placeholders})`).run(...values);
-            }
-          }
-        });
-        restoreTransaction();
-      } else {
-        // SQL restore: strict tenant-safe filter when invoked by school admin
-        const statements = String(file_content)
-          .split(';\n')
-          .map((s: string) => s.trim())
-          .filter((s: string) => s.length > 0 && !s.startsWith('--') && !s.startsWith('PRAGMA') && !s.startsWith('BEGIN') && !s.startsWith('COMMIT'));
-
-        const restoreTransaction = db.transaction(() => {
-          for (const stmt of statements) {
-            const upper = stmt.toUpperCase().replace(/\s+/g, ' ').trim();
-            if (req.user?.role !== 'super_admin') {
-              // Block destructive DDL or cross-tenant mutations
-              if (!/^INSERT\s+(OR\s+REPLACE\s+|OR\s+IGNORE\s+)?INTO\s+/i.test(upper)) {
-                continue;
-              }
-              if (/\bDROP\b|\bALTER\b|\bATTACH\b|\bDETACH\b|\bVACUUM\b/i.test(upper)) {
-                continue;
-              }
-            }
-            try {
-              db.exec(stmt);
-            } catch (stmtErr: any) {
-              console.warn(`[Upload-Restore Warning]:`, stmtErr.message);
-            }
-          }
-        });
-        restoreTransaction();
-      }
-
-      logActivity(req.userId, 'UPLOAD_RESTORE_BACKUP', 'backup_snapshots', null, { file_name, format }, schoolId);
-      res.json({ success: true, message: "Fichier de sauvegarde importé et restauré avec succès." });
+      logActivity(req.userId, 'UPLOAD_RESTORE_BACKUP', 'backup_snapshots', null, { file_name, format, ...result }, schoolId);
+      bumpServerDataVersion();
+      scheduleCheckpoint('upload_restore', 1000);
+      res.json({
+        success: true,
+        applied: result.applied,
+        skipped: result.skipped,
+        message: "Fichier de sauvegarde importé et restauré avec succès."
+      });
     } catch (err: any) {
       console.error("Upload restore error:", err);
       res.status(500).json({ error: "Échec de la restauration du fichier: " + err.message });
@@ -33564,58 +33717,41 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       });
     }
 
-    try { db.exec("ALTER TABLE examen_sessions ADD COLUMN est_publie INTEGER DEFAULT 0"); } catch(e) {}
-    try { db.exec("ALTER TABLE examen_sessions ADD COLUMN bulletin_telechargeable INTEGER DEFAULT 1"); } catch(e) {}
-    try {
-      db.exec(`
-        CREATE TABLE IF NOT EXISTS publication_resultats (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          school_id INTEGER NOT NULL DEFAULT 1,
-          annee_id INTEGER,
-          classe_id INTEGER,
-          cycle TEXT,
-          type_periode TEXT NOT NULL,
-          periode_valeur TEXT NOT NULL,
-          est_publie INTEGER DEFAULT 1,
-          bulletin_telechargeable INTEGER DEFAULT 1,
-          date_publication TEXT DEFAULT CURRENT_TIMESTAMP,
-          publie_par INTEGER,
-          notes_admin TEXT,
-          created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-          updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-          FOREIGN KEY (annee_id) REFERENCES annees_scolaires(id) ON DELETE SET NULL,
-          FOREIGN KEY (classe_id) REFERENCES classes(id) ON DELETE CASCADE,
-          FOREIGN KEY (school_id) REFERENCES school_info(id) ON DELETE CASCADE
-        );
-      `);
-    } catch(e) {}
-    try {
-      db.exec(`
-        CREATE TABLE IF NOT EXISTS examen_epreuves (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          session_id INTEGER NOT NULL,
-          epreuve_id INTEGER NOT NULL,
-          school_id INTEGER NOT NULL,
-          created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-          FOREIGN KEY (session_id) REFERENCES examen_sessions(id) ON DELETE CASCADE,
-          FOREIGN KEY (epreuve_id) REFERENCES epreuves(id) ON DELETE CASCADE,
-          FOREIGN KEY (school_id) REFERENCES school_info(id) ON DELETE CASCADE,
-          UNIQUE(session_id, epreuve_id)
-        );
-      `);
-    } catch(e) {}
+  // Return clean JSON error on malformed API payloads or unhandled server errors
+  app.use((err: any, req: any, res: any, next: any) => {
+    if (res.headersSent) return next(err);
+    const status = Number(err?.status || err?.statusCode) || (err?.type === 'entity.parse.failed' ? 400 : 500);
+    const message = err?.type === 'entity.parse.failed'
+      ? 'Format JSON de requête invalide.'
+      : (err?.message || 'Erreur interne du serveur.');
+    if (status >= 500) {
+      console.error(`[API Error ${status}] ${req.method} ${req.originalUrl}:`, err);
+    }
+    if (req.originalUrl?.startsWith('/api/')) {
+      return res.status(status).json({ success: false, error: message });
+    }
+    return res.status(status).send(message);
+  });
 
   const server = app.listen(PORT, "0.0.0.0", () => {
-      console.log(`Server running at http://localhost:${PORT}`);
-    });
-
-    server.on("error", (err: any) => {
-      console.error("Server listen error:", err);
-    });
-  }
-
-  startServer().catch((err) => {
-    console.error("Critical error during startServer:", err);
-    process.exit(1);
+    console.log(`Server running at http://localhost:${PORT}`);
   });
+
+  server.on("error", (err: any) => {
+    console.error("Server listen error:", err);
+  });
+}
+
+process.on('unhandledRejection', (reason: any) => {
+  console.error('[Server] Unhandled promise rejection intercepted:', reason);
+});
+
+process.on('uncaughtException', (err: any) => {
+  console.error('[Server] Uncaught exception intercepted:', err);
+});
+
+startServer().catch((err) => {
+  console.error("Critical error during startServer:", err);
+  process.exit(1);
+});
 

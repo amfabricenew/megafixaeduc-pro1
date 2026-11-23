@@ -161,14 +161,50 @@ export default function BackupSettingsTab() {
     }
   };
 
-  const handleDownload = (snapshot: BackupSnapshot) => {
-    window.location.href = `/api/backups/download/${snapshot.id}`;
-    toast.success(`Téléchargement de ${snapshot.filename} démarré...`);
+  const handleDownload = async (snapshot: BackupSnapshot) => {
+    try {
+      toast.loading(`Téléchargement de ${snapshot.filename}...`, { id: `dl-snap-${snapshot.id}` });
+      const res = await apiFetch(`/api/backups/download/${snapshot.id}`);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.error || 'Impossible de télécharger cette sauvegarde.');
+      }
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = snapshot.filename || `sauvegarde_${snapshot.id}.${snapshot.format || 'sql'}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+      toast.success(`Téléchargement de ${snapshot.filename} terminé.`, { id: `dl-snap-${snapshot.id}` });
+    } catch (err: any) {
+      toast.error(err?.message || 'Erreur lors du téléchargement de la sauvegarde.', { id: `dl-snap-${snapshot.id}` });
+    }
   };
 
-  const handleExportUsersJson = () => {
-    window.location.href = `/api/backups/export-users`;
-    toast.success("Exportation des comptes utilisateurs en cours...");
+  const handleExportUsersJson = async () => {
+    try {
+      toast.loading("Exportation des comptes utilisateurs...", { id: "export-users-json" });
+      const res = await apiFetch('/api/backups/export-users');
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.error || "Impossible d'exporter les utilisateurs.");
+      }
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `users_export_${new Date().toISOString().split('T')[0]}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+      toast.success("Exportation des comptes utilisateurs terminée.", { id: "export-users-json" });
+    } catch (err: any) {
+      toast.error(err?.message || "Erreur lors de l'exportation des utilisateurs.", { id: "export-users-json" });
+    }
   };
 
   const handleRestore = async (snapshot: BackupSnapshot) => {

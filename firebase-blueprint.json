@@ -2,18 +2,40 @@
   "entities": {
     "CloudSnapshot": {
       "title": "Cloud Snapshot",
-      "description": "Stores server-managed database backups and account/request vaults restricted to super_admin.",
+      "description": "Stores server-managed database backups, chunks, and account/request vaults restricted to super_admin.",
       "type": "object",
       "properties": {
-        "sql_dump": { "type": "string", "description": "Serialized backup payload." },
-        "vault_json": { "type": "string", "description": "Serialized school accounts and requests registry payload." },
+        "last_updated": { "type": "string", "format": "date-time", "maxLength": 64 },
+        "version": { "type": "integer" },
+        "build_id": { "type": "string", "maxLength": 128 },
+        "has_real_data": { "type": "boolean" },
         "school_count": { "type": "integer" },
         "non_default_school_count": { "type": "integer" },
+        "user_count": { "type": "integer" },
         "non_test_user_count": { "type": "integer" },
+        "student_count": { "type": "integer" },
         "request_count": { "type": "integer" },
-        "build_id": { "type": "string" },
-        "last_updated": { "type": "string", "format": "date-time" },
-        "version": { "type": "integer" }
+        "checksum": { "type": "string", "maxLength": 128 },
+        "encoding": { "type": "string", "maxLength": 64 },
+        "chunk_count": { "type": "integer" },
+        "sql_dump": { "type": "string", "maxLength": 900000, "description": "Serialized backup payload." },
+        "vault_json": { "type": "string", "maxLength": 900000, "description": "Serialized school accounts and requests registry payload." },
+        "index": { "type": "integer" },
+        "total": { "type": "integer" },
+        "data": { "type": "string", "maxLength": 900000 },
+        "archived_at": { "type": "string", "format": "date-time", "maxLength": 64 },
+        "archive_reason": { "type": "string", "maxLength": 200 },
+        "school_id": { "type": "integer" },
+        "snapshot_id": { "type": "integer" },
+        "filename": { "type": "string", "maxLength": 255 },
+        "label": { "type": "string", "maxLength": 255 },
+        "backup_type": { "type": "string", "maxLength": 64 },
+        "format": { "type": "string", "maxLength": 32 },
+        "size_bytes": { "type": "integer" },
+        "checksum_sha256": { "type": "string", "maxLength": 128 },
+        "created_at": { "type": "string", "format": "date-time", "maxLength": 64 },
+        "status": { "type": "string", "maxLength": 64 },
+        "storage_location": { "type": "string", "maxLength": 64 }
       },
       "required": ["last_updated"]
     },
@@ -23,8 +45,11 @@
       "type": "object",
       "properties": {
         "id": { "type": "integer" },
-        "nom": { "type": "string" },
-        "code_ecole": { "type": "string" }
+        "nom": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "code_ecole": { "type": "string", "maxLength": 64 },
+        "plan_abonnement": { "type": "string", "maxLength": 80 },
+        "statut_abonnement": { "type": "string", "maxLength": 40 },
+        "updatedAt": { "type": "string", "format": "date-time", "maxLength": 64 }
       },
       "required": ["nom"]
     },
@@ -33,10 +58,12 @@
       "description": "Authenticated user identity and tenant membership.",
       "type": "object",
       "properties": {
-        "uid": { "type": "string" },
-        "email": { "type": "string" },
-        "role": { "type": "string" },
-        "school_id": { "type": "integer" }
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
+        "email": { "type": "string", "minLength": 3, "maxLength": 254 },
+        "role": { "type": "string", "minLength": 2, "maxLength": 40 },
+        "school_id": { "type": "integer" },
+        "nom": { "type": "string", "maxLength": 150 },
+        "updatedAt": { "type": "string", "format": "date-time", "maxLength": 64 }
       },
       "required": ["email", "role"]
     },
@@ -46,7 +73,9 @@
       "type": "object",
       "properties": {
         "school_id": { "type": "integer" },
-        "updatedAt": { "type": "string", "format": "date-time" }
+        "payload": { "type": "string", "maxLength": 800000 },
+        "status": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "format": "date-time", "maxLength": 64 }
       },
       "required": ["school_id"]
     },
@@ -56,8 +85,8 @@
       "type": "object",
       "properties": {
         "school_id": { "type": "integer" },
-        "payload": { "type": "string" },
-        "updatedAt": { "type": "string", "format": "date-time" }
+        "payload": { "type": "string", "maxLength": 800000 },
+        "updatedAt": { "type": "string", "format": "date-time", "maxLength": 64 }
       },
       "required": ["school_id", "payload"]
     }
@@ -65,7 +94,7 @@
   "firestore": {
     "/backups/{checkpointId}": {
       "schema": "CloudSnapshot",
-      "description": "Restricted master checkpoints (super_admin only)."
+      "description": "Restricted master checkpoints, chunks, and school vault (super_admin only)."
     },
     "/test/{testId}": {
       "schema": "AppDataDoc",

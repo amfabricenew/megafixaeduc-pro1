@@ -2,7 +2,8 @@ import { auth, db, doc, getDocFromServer, setDoc, handleFirestoreError, Operatio
 
 const SUPER_ADMIN_CLOUD_EMAILS = ['ayedeguef@gmail.com', 'amfabricenew@gmail.com'];
 const VAULT_DOC_PATH = 'backups/school_accounts_registry';
-const FIRESTORE_VAULT_BYTE_LIMIT = 800000;
+const FIRESTORE_VAULT_BYTE_LIMIT = 750000;
+const FIRESTORE_CHUNK_SIZE = 650000;
 
 let syncInFlight: Promise<{ reconciled: number; pushed: boolean } | null> | null = null;
 
@@ -16,9 +17,11 @@ function isEligibleSuperAdminFirebaseSession(): boolean {
  * Mirrors school_accounts_registry (schools, users, school_creation_requests,
  * reclamations_demandes, inscription_demandes, plans, settings) with Firestore
  * using the Super Admin's authenticated Firebase session when available.
+ * Automatically chunks payloads > 750 KB so synchronization never stops as data grows.
  */
 export async function syncCloudVaultWithFirestore(options: {
   allowShrink?: boolean;
+  throwOnError?: boolean;
 } = {}): Promise<{ reconciled: number; pushed: boolean } | null> {
   if (syncInFlight) return syncInFlight;
 
@@ -37,13 +40,39 @@ export async function syncCloudVaultWithFirestore(options: {
         const snap = await getDocFromServer(vaultRef);
         if (snap.exists()) {
           remoteMeta = snap.data();
-          if (typeof remoteMeta?.vault_json === 'string' && remoteMeta.vault_json.length > 0) {
+          if (remoteMeta?.encoding === 'plain-chunked' && Number(remoteMeta?.chunk_count) > 0) {
+            const parts: string[] = [];
+            const chunkCount = Number(remoteMeta.chunk_count);
+            for (let i = 0; i < chunkCount; i++) {
+              const chunkPath = `backups/school_accounts_registry_chunk_${i}`;
+              try {
+                const chunkSnap = await getDocFromServer(doc(db, 'backups', `school_accounts_registry_chunk_${i}`));
+                if (!chunkSnap.exists() || typeof chunkSnap.data()?.data !== 'string') {
+                  throw new Error(`Missing vault chunk ${i}/${chunkCount}`);
+                }
+                parts.push(chunkSnap.data().data);
+              } catch (chunkErr: any) {
+                handleFirestoreError(chunkErr, OperationType.GET, chunkPath);
+              }
+            }
+            const joined = parts.join('');
+            if (joined.length > 0) {
+              remoteVault = JSON.parse(joined);
+            }
+          } else if (typeof remoteMeta?.vault_json === 'string' && remoteMeta.vault_json.length > 0) {
             remoteVault = JSON.parse(remoteMeta.vault_json);
           }
         }
       } catch (readErr: any) {
-        handleFirestoreError(readErr, OperationType.GET, VAULT_DOC_PATH);
-        return null;
+        if (options.throwOnError) {
+          handleFirestoreError(readErr, OperationType.GET, VAULT_DOC_PATH);
+        } else {
+          try {
+            handleFirestoreError(readErr, OperationType.GET, VAULT_DOC_PATH);
+          } catch {
+            return null;
+          }
+        }
       }
 
       let reconciled = 0;
@@ -103,25 +132,65 @@ export async function syncCloudVaultWithFirestore(options: {
       }
 
       const vaultJson = JSON.stringify(latestVault);
-      if (new Blob([vaultJson]).size > FIRESTORE_VAULT_BYTE_LIMIT) {
-        return { reconciled, pushed: false };
-      }
+      const nowIso = new Date().toISOString();
+      const baseMeta = {
+        last_updated: nowIso,
+        school_count: Number(latestStats.schoolCount || 0),
+        non_default_school_count: Number(latestStats.nonDefaultSchoolCount || 0),
+        non_test_user_count: Number(latestStats.nonTestUserCount || 0),
+        request_count: localReqCount,
+      };
 
       try {
-        await setDoc(vaultRef, {
-          last_updated: new Date().toISOString(),
-          school_count: Number(latestStats.schoolCount || 0),
-          non_default_school_count: Number(latestStats.nonDefaultSchoolCount || 0),
-          non_test_user_count: Number(latestStats.nonTestUserCount || 0),
-          request_count: localReqCount,
-          vault_json: vaultJson
-        });
+        if (new Blob([vaultJson]).size <= FIRESTORE_VAULT_BYTE_LIMIT) {
+          await setDoc(vaultRef, {
+            ...baseMeta,
+            encoding: 'plain',
+            chunk_count: 0,
+            vault_json: vaultJson
+          });
+        } else {
+          const chunks: string[] = [];
+          for (let offset = 0; offset < vaultJson.length; offset += FIRESTORE_CHUNK_SIZE) {
+            chunks.push(vaultJson.slice(offset, offset + FIRESTORE_CHUNK_SIZE));
+          }
+          for (let i = 0; i < chunks.length; i++) {
+            const chunkPath = `backups/school_accounts_registry_chunk_${i}`;
+            try {
+              await setDoc(doc(db, 'backups', `school_accounts_registry_chunk_${i}`), {
+                index: i,
+                total: chunks.length,
+                data: chunks[i],
+                last_updated: nowIso
+              });
+            } catch (chunkWriteErr: any) {
+              handleFirestoreError(chunkWriteErr, OperationType.WRITE, chunkPath);
+            }
+          }
+          await setDoc(vaultRef, {
+            ...baseMeta,
+            encoding: 'plain-chunked',
+            chunk_count: chunks.length,
+            vault_json: ''
+          });
+        }
         return { reconciled, pushed: true };
       } catch (writeErr: any) {
-        handleFirestoreError(writeErr, OperationType.WRITE, VAULT_DOC_PATH);
+        if (options.throwOnError) {
+          handleFirestoreError(writeErr, OperationType.WRITE, VAULT_DOC_PATH);
+        } else {
+          try {
+            handleFirestoreError(writeErr, OperationType.WRITE, VAULT_DOC_PATH);
+          } catch {
+            return { reconciled, pushed: false };
+          }
+        }
         return { reconciled, pushed: false };
       }
-    } catch {
+    } catch (err) {
+      if (options.throwOnError) {
+        throw err;
+      }
       return null;
     } finally {
       syncInFlight = null;

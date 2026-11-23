@@ -294,10 +294,19 @@ export default function SuperAdminLayout() {
     setCloudSyncBusy(true);
     try {
       await signInWithPopup(auth, googleProvider);
-      const res = await syncCloudVaultWithFirestore();
+      const res = await syncCloudVaultWithFirestore({ throwOnError: true });
+      if (!res) {
+        setCloudSyncLinked(false);
+        toast.error('Utilisez un compte Google Super Admin vérifié pour lier le Cloud Vault.');
+        return;
+      }
       setCloudSyncLinked(true);
-      toast.success('Sauvegarde Cloud Vault synchronisée avec succès !');
-      if (res?.reconciled > 0) {
+      toast.success(
+        res.pushed || res.reconciled > 0
+          ? 'Sauvegarde Cloud Vault synchronisée avec succès !'
+          : 'Session Cloud Vault liée (données déjà à jour).'
+      );
+      if (res.reconciled > 0) {
         fetchNotifications();
         window.dispatchEvent(new CustomEvent('megafixa-cloud-reconciled', { detail: res }));
       }
