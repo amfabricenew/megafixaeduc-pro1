@@ -33,6 +33,7 @@ interface SchoolCreationRequestModalProps {
   defaultPlan?: string;
   defaultEmail?: string;
   defaultNom?: string;
+  defaultSchoolName?: string;
 }
 
 export default function SchoolCreationRequestModal({
@@ -41,6 +42,7 @@ export default function SchoolCreationRequestModal({
   defaultPlan = '',
   defaultEmail = '',
   defaultNom = '',
+  defaultSchoolName = '',
   initialMode = 'creation'
 }: SchoolCreationRequestModalProps & { initialMode?: 'creation' | 'tracking' }) {
   const [mode, setMode] = useState<'creation' | 'tracking'>(initialMode);
@@ -78,7 +80,7 @@ export default function SchoolCreationRequestModal({
 
   // Step 1: Form state
   const [form, setForm] = useState({
-    nom_ecole: '',
+    nom_ecole: defaultSchoolName,
     type_etablissement: 'Maternelle & Primaire & Secondaire',
     pays: 'Bénin',
     ville: '',
@@ -111,6 +113,13 @@ export default function SchoolCreationRequestModal({
   // Reset states on open based on mode
   useEffect(() => {
     if (isOpen) {
+      setForm(prev => ({
+        ...prev,
+        nom_ecole: prev.nom_ecole || defaultSchoolName || '',
+        demandeur_nom: prev.demandeur_nom || defaultNom || '',
+        demandeur_email: prev.demandeur_email || defaultEmail || '',
+        plan_souhaite: prev.plan_souhaite || defaultPlan || ''
+      }));
       if (initialMode === 'tracking') {
         setMode('tracking');
         setStep(1);
@@ -124,7 +133,7 @@ export default function SchoolCreationRequestModal({
         setViewingStatus(null);
       }
     }
-  }, [isOpen, initialMode]);
+  }, [isOpen, initialMode, defaultSchoolName, defaultNom, defaultEmail, defaultPlan]);
 
   // Load config on mount or open
   useEffect(() => {
@@ -255,9 +264,14 @@ export default function SchoolCreationRequestModal({
         throw new Error(data.error || "Échec de l'envoi de la demande");
       }
 
-      setCreatedRequest(data.request);
+      setCreatedRequest({ ...data.request, emailStatus: data.emailStatus });
       setPaymentPhone(form.demandeur_telephone);
-      toast.success("Demande enregistrée ! Procédez au paiement Mobile Money.");
+      const sentTargets = Array.isArray(data?.emailStatus?.recipients) ? data.emailStatus.recipients : [];
+      if (data?.emailStatus?.sent && sentTargets.length > 0) {
+        toast.success(`Demande enregistrée ! Confirmation envoyée par email à : ${sentTargets.join(', ')}`);
+      } else {
+        toast.success("Demande enregistrée ! Procédez au paiement Mobile Money.");
+      }
       setStep(2);
     } catch (err: any) {
       toast.error(err.message || "Erreur de connexion");
@@ -578,6 +592,9 @@ export default function SchoolCreationRequestModal({
                       placeholder="contact@ecole.com"
                       className="w-full px-4 py-2.5 bg-slate-800/80 border border-slate-700 rounded-xl text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                     />
+                    <p className="text-[10px] text-emerald-300/90">
+                      Si renseigné, cet email recevra aussi la confirmation, les notifications et les accès du compte.
+                    </p>
                   </div>
                 </div>
               </div>
@@ -631,7 +648,9 @@ export default function SchoolCreationRequestModal({
                       placeholder="votre.email@gmail.com"
                       className="w-full px-4 py-2.5 bg-slate-800/80 border border-slate-700 rounded-xl text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-emerald-500"
                     />
-                    <p className="text-[10px] text-slate-400">Vos identifiants administrateur vous seront transmis à cette adresse.</p>
+                    <p className="text-[10px] text-slate-400">
+                      Vos confirmations, avertissements et identifiants sécurisés (mot de passe unique auto-généré) seront transmis à cette adresse ainsi qu'à l'email de l'école s'il est renseigné.
+                    </p>
                   </div>
 
                   <div className="space-y-1.5">
@@ -686,6 +705,14 @@ export default function SchoolCreationRequestModal({
                 </div>
               </div>
 
+              {/* Auto Password Security Notice */}
+              <div className="p-3.5 rounded-2xl bg-emerald-500/10 border border-emerald-500/25 flex items-start gap-2.5 text-[11px] text-emerald-200">
+                <ShieldCheck size={16} className="text-emerald-400 shrink-0 mt-0.5" />
+                <span>
+                  Aucun mot de passe n'est requis lors de la demande : à la validation, le système génère automatiquement un mot de passe unique et ultra-sécurisé envoyé par email.
+                </span>
+              </div>
+
               {/* Submit Button */}
               <div className="pt-4 flex items-center justify-end gap-3 border-t border-slate-800">
                 <button
@@ -727,7 +754,11 @@ export default function SchoolCreationRequestModal({
                     Demande enregistrée avec succès ! (Réf : <span className="font-mono">{createdRequest.reference}</span>)
                   </p>
                   <p className="text-slate-300 mt-1">
-                    Pour valider l'initialisation de votre établissement <strong className="text-white">{form.nom_ecole}</strong>, effectuez votre règlement Mobile Money ci-dessous.
+                    Un email de confirmation a été transmis à{' '}
+                    <strong className="text-white">
+                      {[createdRequest.demandeur_email, createdRequest.email_ecole].filter(Boolean).join(' et ')}
+                    </strong>.
+                    Pour valider l'initialisation de <strong className="text-white">{form.nom_ecole}</strong>, effectuez votre règlement Mobile Money ci-dessous.
                   </p>
                 </div>
               </div>
@@ -974,7 +1005,10 @@ export default function SchoolCreationRequestModal({
                       Votre établissement est prêt !
                     </h3>
                     <p className="text-xs sm:text-sm text-slate-300 max-w-lg mx-auto leading-relaxed">
-                      Félicitations ! L'adhésion de <strong className="text-white">{createdRequest.nom_ecole}</strong> a été validée. Un email contenant vos accès a été envoyé à <strong className="text-emerald-400">{createdRequest.demandeur_email}</strong>.
+                      Félicitations ! L'adhésion de <strong className="text-white">{createdRequest.nom_ecole}</strong> a été validée. Un email contenant vos accès sécurisés et uniques a été envoyé à{' '}
+                      <strong className="text-emerald-400">
+                        {[createdRequest.demandeur_email, createdRequest.email_ecole].filter(Boolean).join(' et ')}
+                      </strong>.
                     </p>
                   </div>
 

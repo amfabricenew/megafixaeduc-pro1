@@ -263,7 +263,7 @@ export default function SuperAdminSettings() {
       });
       if (response.ok) {
         toast.success("Paramètres et moyens de paiement enregistrés avec succès");
-        setSettings((prev: any) => ({ ...prev, ...payload }));
+        fetchSettings();
       } else {
         toast.error("Erreur lors de l'enregistrement");
       }
@@ -1178,7 +1178,14 @@ export default function SuperAdminSettings() {
                       </select>
                     </div>
                     <div className="space-y-1.5">
-                      <label className="text-xs font-bold text-slate-600">Clé API Brevo Globale (xkeysib-...)</label>
+                      <div className="flex items-center justify-between gap-2">
+                        <label className="text-xs font-bold text-slate-600">Clé API Brevo Globale (xkeysib-...)</label>
+                        {(settings.has_brevo_api_key || settings.brevo_api_key === '••••••••') && (
+                          <span className="text-[10px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">
+                            ✓ Clé enregistrée en sécurité
+                          </span>
+                        )}
+                      </div>
                       <input
                         type="password"
                         value={settings.brevo_api_key || ''}
@@ -1250,7 +1257,14 @@ export default function SuperAdminSettings() {
                         />
                       </div>
                       <div className="space-y-2">
-                        <label className="text-xs font-bold text-slate-500">Mot de passe SMTP / Clé SMTP Brevo</label>
+                        <div className="flex items-center justify-between gap-2">
+                          <label className="text-xs font-bold text-slate-500">Mot de passe SMTP / Clé SMTP Brevo</label>
+                          {(settings.has_smtp_pass || settings.smtp_pass === '••••••••') && (
+                            <span className="text-[10px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">
+                              ✓ Enregistré en sécurité
+                            </span>
+                          )}
+                        </div>
                         <input 
                           type="password" 
                           value={settings.smtp_pass || ''} 

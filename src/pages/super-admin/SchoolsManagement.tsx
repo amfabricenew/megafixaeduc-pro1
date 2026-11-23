@@ -29,7 +29,10 @@ import {
   BookOpen,
   GraduationCap,
   Smartphone,
-  SlidersHorizontal
+  SlidersHorizontal,
+  Archive,
+  RotateCcw,
+  Download
 } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -44,8 +47,12 @@ function cn(...inputs: ClassValue[]) {
 
 export default function SchoolsManagement() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const [mainTab, setMainTab] = useState<'schools' | 'requests'>(
-    searchParams.get('tab') === 'requests' ? 'requests' : 'schools'
+  const [mainTab, setMainTab] = useState<'schools' | 'requests' | 'archives'>(
+    searchParams.get('tab') === 'requests'
+      ? 'requests'
+      : searchParams.get('tab') === 'archives'
+        ? 'archives'
+        : 'schools'
   );
   const [pendingRequestsCount, setPendingRequestsCount] = useState(0);
 
@@ -77,10 +84,21 @@ export default function SchoolsManagement() {
   const [newGeneratedPasswordResult, setNewGeneratedPasswordResult] = useState<any | null>(null);
   const [submittingReset, setSubmittingReset] = useState(false);
 
-  // Delete Modal State
+  // Delete Modal State (Double Validation + Archive)
   const [deletingSchool, setDeletingSchool] = useState<any | null>(null);
   const [deleteConfirmText, setDeleteConfirmText] = useState('');
+  const [deletionReason, setDeletionReason] = useState('');
+  const [deleteAdminPassword, setDeleteAdminPassword] = useState('');
   const [submittingDelete, setSubmittingDelete] = useState(false);
+
+  // Archives State (Deleted Schools Archive)
+  const [archives, setArchives] = useState<any[]>([]);
+  const [loadingArchives, setLoadingArchives] = useState(false);
+  const [archiveSearch, setArchiveSearch] = useState('');
+  const [selectedArchiveDetails, setSelectedArchiveDetails] = useState<any | null>(null);
+  const [loadingArchiveDetails, setLoadingArchiveDetails] = useState(false);
+  const [confirmRestoreArchive, setConfirmRestoreArchive] = useState<any | null>(null);
+  const [restoringArchiveId, setRestoringArchiveId] = useState<number | null>(null);
 
   // Spaces Lock State (Maternelle & Primaire / Secondaire)
   const [spacesLockSchool, setSpacesLockSchool] = useState<any | null>(null);
@@ -149,8 +167,27 @@ export default function SchoolsManagement() {
     }
   };
 
+  const fetchArchives = async () => {
+    try {
+      setLoadingArchives(true);
+      const token = localStorage.getItem('token');
+      const res = await fetch('/api/super-admin/deleted-schools', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setArchives(Array.isArray(data) ? data : []);
+      }
+    } catch (err) {
+      console.error("Erreur récupération archives:", err);
+    } finally {
+      setLoadingArchives(false);
+    }
+  };
+
   useEffect(() => {
     fetchData();
+    fetchArchives();
 
     // Fetch pending school requests count
     const token = localStorage.getItem('token');
@@ -170,6 +207,9 @@ export default function SchoolsManagement() {
     const tabParam = searchParams.get('tab');
     if (tabParam === 'requests') {
       setMainTab('requests');
+    } else if (tabParam === 'archives') {
+      setMainTab('archives');
+      fetchArchives();
     } else {
       setMainTab('schools');
     }
@@ -406,10 +446,12 @@ export default function SchoolsManagement() {
     }
   };
 
-  // 5. Delete School
+  // 5. Delete School (Double Security + Mandatory Archive)
   const handleOpenDelete = (school: any) => {
     setDeletingSchool(school);
     setDeleteConfirmText('');
+    setDeletionReason('');
+    setDeleteAdminPassword('');
   };
 
   const handleConfirmDelete = async () => {
@@ -417,30 +459,115 @@ export default function SchoolsManagement() {
     if (deleteConfirmText.trim().toLowerCase() !== deletingSchool.nom.trim().toLowerCase()) {
       return toast.error("Veuillez saisir le nom exact de l'école pour confirmer la suppression.");
     }
+    if (deletionReason.trim().length < 5) {
+      return toast.error("Veuillez indiquer un motif de suppression (minimum 5 caractères).");
+    }
+    if (!deleteAdminPassword.trim()) {
+      return toast.error("Veuillez saisir votre mot de passe Super Admin.");
+    }
 
     setSubmittingDelete(true);
     try {
       const token = localStorage.getItem('token');
       const res = await fetch(`/api/super-admin/schools/${deletingSchool.id}`, {
         method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${token}` }
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          confirm_school_name: deleteConfirmText.trim(),
+          deletion_reason: deletionReason.trim(),
+          admin_password: deleteAdminPassword
+        })
       });
       const data = await res.json();
       if (!res.ok || !data.success) {
         throw new Error(data.error || "Erreur de suppression");
       }
 
-      toast.success(data.message || "Établissement supprimé avec succès.");
+      toast.success(data.message || "Établissement archivé et supprimé avec succès.");
       setDeletingSchool(null);
+      setDeleteAdminPassword('');
+      setDeletionReason('');
+      setDeleteConfirmText('');
       if (selectedSchoolDetails && selectedSchoolDetails.school?.id === deletingSchool.id) {
         setSelectedSchoolDetails(null);
       }
       fetchData();
+      fetchArchives();
       syncCloudVaultWithFirestore({ allowShrink: true }).catch(() => {});
     } catch (err: any) {
       toast.error(err.message || "Erreur lors de la suppression");
     } finally {
       setSubmittingDelete(false);
+    }
+  };
+
+  // 6. Archive Details / Download / Restore
+  const handleOpenArchiveDetails = async (archiveId: number) => {
+    setLoadingArchiveDetails(true);
+    setSelectedArchiveDetails(null);
+    try {
+      const token = localStorage.getItem('token');
+      const res = await fetch(`/api/super-admin/deleted-schools/${archiveId}`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Impossible de charger l'archive.");
+      setSelectedArchiveDetails(data);
+    } catch (err: any) {
+      toast.error(err.message || "Erreur chargement archive");
+    } finally {
+      setLoadingArchiveDetails(false);
+    }
+  };
+
+  const handleDownloadArchive = async (archive: any) => {
+    try {
+      const token = localStorage.getItem('token');
+      const res = await fetch(`/api/super-admin/deleted-schools/${archive.id}/download`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (!res.ok) throw new Error("Échec du téléchargement de l'archive.");
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      const safeName = String(archive.code_ecole || archive.school_name || 'ecole').replace(/[^a-zA-Z0-9_-]/g, '_');
+      a.href = url;
+      a.download = `archive_${safeName}_${archive.id}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+      toast.success("Archive JSON téléchargée !");
+    } catch (err: any) {
+      toast.error(err.message || "Erreur de téléchargement");
+    }
+  };
+
+  const handleConfirmRestoreArchive = async () => {
+    if (!confirmRestoreArchive) return;
+    setRestoringArchiveId(confirmRestoreArchive.id);
+    try {
+      const token = localStorage.getItem('token');
+      const res = await fetch(`/api/super-admin/deleted-schools/${confirmRestoreArchive.id}/restore`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || "Échec de la restauration");
+      }
+      toast.success(data.message || "Établissement restauré avec succès !");
+      setConfirmRestoreArchive(null);
+      fetchData();
+      fetchArchives();
+      syncCloudVaultWithFirestore().catch(() => {});
+    } catch (err: any) {
+      toast.error(err.message || "Erreur lors de la restauration");
+    } finally {
+      setRestoringArchiveId(null);
     }
   };
 
@@ -501,7 +628,7 @@ export default function SchoolsManagement() {
       </div>
 
       {/* Main Navigation Tabs */}
-      <div className="flex items-center gap-2 border-b border-slate-200 pb-2">
+      <div className="flex flex-wrap items-center gap-2 border-b border-slate-200 pb-2">
         <button
           type="button"
           onClick={() => {
@@ -540,10 +667,178 @@ export default function SchoolsManagement() {
             </span>
           )}
         </button>
+
+        <button
+          type="button"
+          onClick={() => {
+            setMainTab('archives');
+            setSearchParams({ tab: 'archives' });
+            fetchArchives();
+          }}
+          className={cn(
+            "flex items-center gap-2.5 px-4 py-2.5 rounded-xl text-xs font-black transition-all cursor-pointer",
+            mainTab === 'archives'
+              ? "bg-slate-900 text-white shadow-md shadow-slate-900/20"
+              : "text-slate-600 hover:text-slate-900 hover:bg-slate-100"
+          )}
+        >
+          <Archive size={16} />
+          <span>Archives Écoles Supprimées ({archives.length})</span>
+        </button>
       </div>
 
       {mainTab === 'requests' ? (
         <SchoolRequestsManagement onSchoolApproved={fetchData} />
+      ) : mainTab === 'archives' ? (
+        <div className="space-y-5">
+          <div className="bg-slate-900 text-white rounded-2xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-sm">
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-500/30 text-amber-400 flex items-center justify-center shrink-0">
+                <Archive size={20} />
+              </div>
+              <div>
+                <h2 className="text-sm font-black">Coffre-fort des Établissements Supprimés</h2>
+                <p className="text-xs text-slate-300 mt-0.5">
+                  Chaque suppression d'école sauvegarde automatiquement l'ensemble de ses données (élèves, classes, notes, comptes, configuration) avant effacement. Vous pouvez consulter, exporter en JSON ou restaurer une école à tout moment.
+                </p>
+              </div>
+            </div>
+            <div className="relative sm:w-72 shrink-0">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+              <input
+                type="text"
+                value={archiveSearch}
+                onChange={(e) => setArchiveSearch(e.target.value)}
+                placeholder="Rechercher dans les archives..."
+                className="w-full pl-9 pr-3 py-2 bg-slate-800 border border-slate-700 rounded-xl text-xs text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-500/30"
+              />
+            </div>
+          </div>
+
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+            {loadingArchives ? (
+              <div className="p-12 text-center text-slate-400">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600 mx-auto mb-2" />
+                <p className="text-xs font-semibold">Chargement des archives...</p>
+              </div>
+            ) : archives.filter((a) => {
+              const q = archiveSearch.toLowerCase();
+              return !q ||
+                (a.school_name || '').toLowerCase().includes(q) ||
+                (a.code_ecole || '').toLowerCase().includes(q) ||
+                (a.email || '').toLowerCase().includes(q) ||
+                (a.deletion_reason || '').toLowerCase().includes(q);
+            }).length === 0 ? (
+              <div className="p-12 text-center text-slate-400">
+                <Archive className="w-10 h-10 mx-auto mb-2 opacity-30 text-slate-500" />
+                <p className="text-sm font-bold text-slate-600">Aucune archive d'école supprimée</p>
+                <p className="text-xs text-slate-400 mt-1">Toute école supprimée apparaîtra ici avec son instantané complet restaurable.</p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="bg-slate-50 border-b border-slate-200 text-[10px] font-black uppercase tracking-wider text-slate-400">
+                      <th className="px-5 py-3.5">Établissement Archivé</th>
+                      <th className="px-5 py-3.5">Motif & Auteur</th>
+                      <th className="px-5 py-3.5 text-center">Données Sauvegardées</th>
+                      <th className="px-5 py-3.5">Date & État</th>
+                      <th className="px-5 py-3.5 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 text-xs">
+                    {archives
+                      .filter((a) => {
+                        const q = archiveSearch.toLowerCase();
+                        return !q ||
+                          (a.school_name || '').toLowerCase().includes(q) ||
+                          (a.code_ecole || '').toLowerCase().includes(q) ||
+                          (a.email || '').toLowerCase().includes(q) ||
+                          (a.deletion_reason || '').toLowerCase().includes(q);
+                      })
+                      .map((arc) => (
+                        <tr key={arc.id} className="hover:bg-slate-50/70 transition-colors">
+                          <td className="px-5 py-4">
+                            <p className="font-bold text-slate-900">{arc.school_name}</p>
+                            <div className="flex items-center gap-2 mt-1">
+                              <span className="font-mono text-[10px] font-bold px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 border border-slate-200">
+                                {arc.code_ecole || `#${arc.original_school_id}`}
+                              </span>
+                              <span className="text-[11px] text-slate-500">{arc.plan_abonnement || 'Standard'}</span>
+                            </div>
+                            {arc.email && <p className="text-[11px] text-slate-400 mt-0.5 font-mono">{arc.email}</p>}
+                          </td>
+
+                          <td className="px-5 py-4 max-w-xs">
+                            <p className="text-xs text-slate-700 font-medium line-clamp-2">{arc.deletion_reason}</p>
+                            <p className="text-[10px] text-slate-400 mt-1">
+                              Supprimé par : <span className="font-semibold text-slate-600">{arc.deleted_by_name || arc.deleted_by_email || 'Super Admin'}</span>
+                            </p>
+                          </td>
+
+                          <td className="px-5 py-4 text-center">
+                            <div className="inline-flex items-center gap-2.5 bg-slate-50 px-2.5 py-1 rounded-lg border border-slate-200 text-[11px] font-semibold text-slate-600">
+                              <span>{arc.student_count || 0} élèves</span>
+                              <span className="text-slate-300">|</span>
+                              <span>{arc.user_count || 0} comptes</span>
+                            </div>
+                          </td>
+
+                          <td className="px-5 py-4">
+                            <p className="text-[11px] text-slate-600 font-medium">
+                              {new Date(arc.deleted_at).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' })}
+                            </p>
+                            {arc.restored_at ? (
+                              <span className="inline-flex items-center gap-1 mt-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                                <CheckCircle2 size={10} />
+                                <span>Restaurée (ID #{arc.restored_school_id})</span>
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 mt-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 text-amber-800 border border-amber-200">
+                                <Archive size={10} />
+                                <span>Archivée</span>
+                              </span>
+                            )}
+                          </td>
+
+                          <td className="px-5 py-4 text-right">
+                            <div className="flex items-center justify-end gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => handleOpenArchiveDetails(arc.id)}
+                                className="p-1.5 text-slate-500 hover:text-indigo-600 bg-slate-50 hover:bg-indigo-50 rounded-lg border border-slate-200 cursor-pointer"
+                                title="Consulter les détails de l'archive"
+                              >
+                                <Eye size={15} />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleDownloadArchive(arc)}
+                                className="p-1.5 text-slate-500 hover:text-blue-600 bg-slate-50 hover:bg-blue-50 rounded-lg border border-slate-200 cursor-pointer"
+                                title="Télécharger l'instantané JSON complet"
+                              >
+                                <Download size={15} />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setConfirmRestoreArchive(arc)}
+                                disabled={restoringArchiveId === arc.id}
+                                className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold text-[11px] rounded-lg cursor-pointer transition-colors"
+                                title="Restaurer cet établissement et toutes ses données"
+                              >
+                                <RotateCcw size={13} />
+                                <span>Restaurer</span>
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
       ) : (
         <>
           {/* KPI Cards */}
@@ -1046,7 +1341,7 @@ export default function SchoolsManagement() {
                   <span>Génération automatique des accès</span>
                 </div>
                 <p className="text-[11px] text-slate-600 leading-relaxed">
-                  Le système génèrera un mot de passe par défaut sécurisé (ex: <span className="font-mono font-bold text-indigo-600">Edu2026!xxxx</span>) et une clé unique de licence MFEP. Vous pourrez les copier immédiatement à la fin pour les transmettre au responsable.
+                  Le système génèrera automatiquement un <strong>mot de passe unique et ultra-sécurisé (16 caractères aléatoires)</strong> ainsi qu'une clé unique de licence MFEP, puis les enverra à l'adresse email ci-dessus.
                 </p>
               </div>
 
@@ -1863,7 +2158,7 @@ export default function SchoolsManagement() {
             ) : (
               <div className="space-y-4">
                 <p className="text-xs text-slate-600 leading-relaxed">
-                  Cette action va remplacer le mot de passe actuel du compte administrateur principal de cet établissement par un nouveau mot de passe temporaire par défaut (ex: <code className="bg-slate-100 px-1 py-0.5 rounded font-mono text-indigo-600">Edu2026!xxxx</code>).
+                  Cette action va remplacer le mot de passe actuel du compte administrateur principal de cet établissement par un <strong>nouveau mot de passe unique et sécurisé (16 caractères aléatoires)</strong> généré côté serveur.
                 </p>
 
                 <div className="p-3 rounded-xl bg-amber-50 border border-amber-200/80 text-[11px] text-amber-900 leading-relaxed">
@@ -1901,44 +2196,74 @@ export default function SchoolsManagement() {
       )}
 
       {/* ========================================================================= */}
-      {/* MODAL 6: DELETE SCHOOL CONFIRMATION                                       */}
+      {/* MODAL 6: DELETE SCHOOL CONFIRMATION (DOUBLE VALIDATION + ARCHIVE)          */}
       {/* ========================================================================= */}
       {deletingSchool && (
         <div className="fixed inset-0 bg-slate-950/75 backdrop-blur-xs z-50 flex items-center justify-center p-4 animate-in fade-in duration-150">
-          <div className="bg-white rounded-3xl w-full max-w-md shadow-2xl border border-rose-500/30 overflow-hidden text-left p-6 space-y-4">
+          <div className="bg-white rounded-3xl w-full max-w-lg shadow-2xl border border-rose-500/30 overflow-hidden text-left p-6 space-y-4 max-h-[92vh] overflow-y-auto">
             <div className="flex items-start gap-3">
               <div className="w-10 h-10 rounded-xl bg-rose-100 text-rose-700 flex items-center justify-center shrink-0">
                 <Trash2 size={20} />
               </div>
               <div>
-                <h3 className="font-black text-slate-900 text-base">Supprimer l'Établissement</h3>
-                <p className="text-xs text-slate-500">Action irréversible</p>
+                <h3 className="font-black text-slate-900 text-base">Suppression Sécurisée & Archivage</h3>
+                <p className="text-xs text-slate-500">Double validation Super Admin obligatoire</p>
               </div>
             </div>
 
             <p className="text-xs text-slate-600 leading-relaxed">
-              Êtes-vous sûr de vouloir supprimer définitivement l'établissement <strong className="text-slate-900">{deletingSchool.nom}</strong> ?
+              Vous êtes sur le point de supprimer l'établissement actif <strong className="text-slate-900">{deletingSchool.nom}</strong> ({deletingSchool.code_ecole || 'SANS-CODE'}).
             </p>
 
-            <div className="p-3 bg-rose-50 rounded-xl border border-rose-200/80 text-[11px] text-rose-800 leading-relaxed space-y-1">
-              <p className="font-bold">⚠️ Conséquences de la suppression :</p>
-              <ul className="list-disc list-inside space-y-0.5 text-[10px]">
-                <li>Les comptes utilisateurs rattachés seront supprimés.</li>
-                <li>La licence et la configuration de l'école seront effacées.</li>
-              </ul>
+            <div className="p-3 bg-amber-50 rounded-xl border border-amber-200 text-[11px] text-amber-900 leading-relaxed space-y-1">
+              <p className="font-bold flex items-center gap-1.5">
+                <Archive size={13} />
+                <span>Sauvegarde automatique dans les Archives :</span>
+              </p>
+              <p>
+                Avant la suppression, une archive complète (élèves, classes, notes, comptes, paramètres) est enregistrée dans l'onglet <strong>« Archives Écoles Supprimées »</strong> pour restauration ou export ultérieur.
+              </p>
             </div>
 
-            <div className="space-y-1.5">
-              <label className="text-[11px] font-bold text-slate-600">
-                Veuillez taper <span className="font-mono font-bold text-rose-600 select-all">{deletingSchool.nom}</span> pour confirmer :
-              </label>
-              <input
-                type="text"
-                placeholder="Tapez le nom exact de l'école..."
-                value={deleteConfirmText}
-                onChange={(e) => setDeleteConfirmText(e.target.value)}
-                className="w-full px-3.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-rose-500/20"
-              />
+            <div className="space-y-3">
+              <div className="space-y-1">
+                <label className="text-[11px] font-bold text-slate-700">
+                  1. Tapez le nom exact <span className="font-mono font-bold text-rose-600 select-all">{deletingSchool.nom}</span> *
+                </label>
+                <input
+                  type="text"
+                  placeholder="Nom exact de l'école..."
+                  value={deleteConfirmText}
+                  onChange={(e) => setDeleteConfirmText(e.target.value)}
+                  className="w-full px-3.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-rose-500/20"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-[11px] font-bold text-slate-700">
+                  2. Motif officiel de la suppression (min. 5 caractères) *
+                </label>
+                <textarea
+                  rows={2}
+                  placeholder="Ex: Demande de clôture du promoteur, compte de test, fusion d'établissement..."
+                  value={deletionReason}
+                  onChange={(e) => setDeletionReason(e.target.value)}
+                  className="w-full px-3.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-rose-500/20 resize-none"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-[11px] font-bold text-slate-700">
+                  3. Mot de passe de votre compte Super Admin *
+                </label>
+                <input
+                  type="password"
+                  placeholder="Votre mot de passe Super Admin..."
+                  value={deleteAdminPassword}
+                  onChange={(e) => setDeleteAdminPassword(e.target.value)}
+                  className="w-full px-3.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-rose-500/20"
+                />
+              </div>
             </div>
 
             <div className="flex gap-3 pt-2">
@@ -1952,7 +2277,12 @@ export default function SchoolsManagement() {
               <button 
                 type="button" 
                 onClick={handleConfirmDelete}
-                disabled={submittingDelete || deleteConfirmText.trim().toLowerCase() !== deletingSchool.nom.trim().toLowerCase()}
+                disabled={
+                  submittingDelete ||
+                  deleteConfirmText.trim().toLowerCase() !== deletingSchool.nom.trim().toLowerCase() ||
+                  deletionReason.trim().length < 5 ||
+                  !deleteAdminPassword.trim()
+                }
                 className="flex-1 py-2.5 px-4 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-xl shadow-lg shadow-rose-600/20 transition-all flex items-center justify-center gap-2 disabled:opacity-40 cursor-pointer"
               >
                 {submittingDelete ? (
@@ -1960,7 +2290,119 @@ export default function SchoolsManagement() {
                 ) : (
                   <>
                     <Trash2 size={15} />
-                    <span>Confirmer Suppression</span>
+                    <span>Archiver & Supprimer</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Archive Details Modal */}
+      {(loadingArchiveDetails || selectedArchiveDetails) && (
+        <div className="fixed inset-0 bg-slate-950/75 backdrop-blur-xs z-50 flex items-center justify-center p-4 animate-in fade-in duration-150">
+          <div className="bg-white rounded-3xl w-full max-w-xl shadow-2xl border border-slate-200 overflow-hidden text-left p-6 space-y-5 max-h-[90vh] overflow-y-auto">
+            {loadingArchiveDetails ? (
+              <div className="py-12 text-center text-slate-500">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600 mx-auto mb-2" />
+                <p className="text-xs font-semibold">Chargement de l'archive...</p>
+              </div>
+            ) : selectedArchiveDetails && (
+              <>
+                <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+                  <div>
+                    <h3 className="text-base font-black text-slate-900">{selectedArchiveDetails.school_name}</h3>
+                    <p className="text-xs text-slate-500 font-mono">{selectedArchiveDetails.code_ecole} • Archive #{selectedArchiveDetails.id}</p>
+                  </div>
+                  <button onClick={() => setSelectedArchiveDetails(null)} className="p-2 text-slate-400 hover:text-slate-600 rounded-xl"><X size={18} /></button>
+                </div>
+
+                <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-1.5 text-xs">
+                  <p><strong>Motif :</strong> {selectedArchiveDetails.deletion_reason}</p>
+                  <p><strong>Supprimé par :</strong> {selectedArchiveDetails.deleted_by_name || selectedArchiveDetails.deleted_by_email}</p>
+                  <p><strong>Date d'archivage :</strong> {new Date(selectedArchiveDetails.deleted_at).toLocaleString('fr-FR')}</p>
+                  <p><strong>Plan :</strong> {selectedArchiveDetails.plan_abonnement || 'Standard'}</p>
+                </div>
+
+                {selectedArchiveDetails.tableSummary && (
+                  <div className="space-y-2">
+                    <h4 className="text-xs font-black uppercase tracking-wider text-slate-500">Contenu de l'instantané ({Object.keys(selectedArchiveDetails.tableSummary).length} tables)</h4>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 max-h-48 overflow-y-auto pr-1">
+                      {Object.entries(selectedArchiveDetails.tableSummary).map(([tbl, count]) => (
+                        <div key={tbl} className="px-3 py-2 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between text-[11px]">
+                          <span className="font-mono text-slate-700 truncate mr-2">{tbl}</span>
+                          <span className="font-black text-indigo-600">{String(count)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <div className="flex justify-end gap-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => handleDownloadArchive(selectedArchiveDetails)}
+                    className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Download size={14} />
+                    <span>Télécharger JSON</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const arc = selectedArchiveDetails;
+                      setSelectedArchiveDetails(null);
+                      setConfirmRestoreArchive(arc);
+                    }}
+                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <RotateCcw size={14} />
+                    <span>Restaurer l'école</span>
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Confirm Restore Modal */}
+      {confirmRestoreArchive && (
+        <div className="fixed inset-0 bg-slate-950/75 backdrop-blur-xs z-50 flex items-center justify-center p-4 animate-in fade-in duration-150">
+          <div className="bg-white rounded-3xl w-full max-w-md shadow-2xl border border-emerald-500/30 p-6 space-y-4 text-left">
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0">
+                <RotateCcw size={20} />
+              </div>
+              <div>
+                <h3 className="font-black text-slate-900 text-base">Restaurer l'Établissement</h3>
+                <p className="text-xs text-slate-500">{confirmRestoreArchive.school_name}</p>
+              </div>
+            </div>
+            <p className="text-xs text-slate-600 leading-relaxed">
+              Voulez-vous restaurer l'établissement <strong>{confirmRestoreArchive.school_name}</strong> ainsi que toutes ses données archivées ({confirmRestoreArchive.student_count || 0} élèves, {confirmRestoreArchive.user_count || 0} comptes) ?
+            </p>
+            <div className="flex gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setConfirmRestoreArchive(null)}
+                className="flex-1 py-2.5 px-4 bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold text-xs rounded-xl cursor-pointer"
+              >
+                Annuler
+              </button>
+              <button
+                type="button"
+                disabled={restoringArchiveId === confirmRestoreArchive.id}
+                onClick={handleConfirmRestoreArchive}
+                className="flex-1 py-2.5 px-4 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
+              >
+                {restoringArchiveId === confirmRestoreArchive.id ? (
+                  <span className="inline-block animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent" />
+                ) : (
+                  <>
+                    <RotateCcw size={14} />
+                    <span>Confirmer Restauration</span>
                   </>
                 )}
               </button>

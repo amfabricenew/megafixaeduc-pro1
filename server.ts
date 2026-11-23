@@ -381,6 +381,52 @@ function isWithinExplicitDeletionWindow(): boolean {
   return lastExplicitDeletionAt > 0 && (Date.now() - lastExplicitDeletionAt) < EXPLICIT_DELETION_WINDOW_MS;
 }
 
+function generateSecureUniquePassword(length = 16): string {
+  const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+  const lower = 'abcdefghjkmnpqrstuvwxyz';
+  const digits = '23456789';
+  const symbols = '!@#$%&*?+-';
+  const allChars = upper + lower + digits + symbols;
+  const targetLen = Math.max(12, Math.min(32, length));
+
+  const chars: string[] = [
+    upper[crypto.randomInt(0, upper.length)],
+    upper[crypto.randomInt(0, upper.length)],
+    lower[crypto.randomInt(0, lower.length)],
+    lower[crypto.randomInt(0, lower.length)],
+    digits[crypto.randomInt(0, digits.length)],
+    digits[crypto.randomInt(0, digits.length)],
+    symbols[crypto.randomInt(0, symbols.length)],
+    symbols[crypto.randomInt(0, symbols.length)],
+  ];
+
+  while (chars.length < targetLen) {
+    chars.push(allChars[crypto.randomInt(0, allChars.length)]);
+  }
+
+  for (let i = chars.length - 1; i > 0; i--) {
+    const j = crypto.randomInt(0, i + 1);
+    const tmp = chars[i];
+    chars[i] = chars[j];
+    chars[j] = tmp;
+  }
+
+  return chars.join('');
+}
+
+function getSchoolRequestRecipients(requestRow: { demandeur_email?: string | null; email_ecole?: string | null }): string[] {
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  const unique = new Set<string>();
+  const candidates = [requestRow?.demandeur_email, requestRow?.email_ecole];
+  for (const raw of candidates) {
+    const clean = String(raw || '').trim().toLowerCase();
+    if (clean && emailRegex.test(clean)) {
+      unique.add(clean);
+    }
+  }
+  return Array.from(unique);
+}
+
 function tableExists(tableName: string): boolean {
   const row = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = ?").get(tableName) as any;
   return Boolean(row?.name);
@@ -1217,8 +1263,8 @@ function ensureApprovedRequestsHaveSchools(): number {
       if (schoolRow) {
         const existingAdmin = db.prepare("SELECT id, school_id FROM utilisateurs WHERE LOWER(TRIM(email)) = ?").get(email) as any;
         if (!existingAdmin) {
-          const tempPass = `Edu2026!${String(reqRow.id).padStart(3, '0')}`;
-          const hash = bcrypt.hashSync(tempPass, 8);
+          const tempPass = generateSecureUniquePassword(16);
+          const hash = bcrypt.hashSync(tempPass, 10);
           db.prepare(`
             INSERT INTO utilisateurs (
               nom, email, mot_de_passe, mot_de_passe_initial, role, approuve, is_first_login, must_change_password, can_write, school_id
@@ -1411,6 +1457,7 @@ async function restoreFromCheckpoint() {
     if (localVault) reconciled += reconcileMissingSchoolAccountsFromVault(localVault);
     reconciled += ensureApprovedRequestsHaveSchools();
     if (reconciled > 0) {
+      saveLocalCheckpointSync();
       console.log(`[Persistence] School Accounts Vault restored ${reconciled} missing account/request/tenant record(s) without modifying existing data.`);
     }
   } catch (err) {
@@ -1688,12 +1735,15 @@ async function processAutoRejection() {
 
       console.log(`[Auto-Rejection] Request ${req.reference} rejected after 24h.`);
 
-      // Send Email
-      sendMailWithFallback({
-        to: req.demandeur_email,
-        subject: `⚠️ Mise à jour de votre demande d'école - ${req.nom_ecole}`,
-        text: `Bonjour ${req.demandeur_nom},\n\nNous vous informons que votre demande de création de compte pour « ${req.nom_ecole} » a été classée sans suite car elle est restée en attente pendant plus de 24 heures sans action complémentaire.\n\nSi vous estimez qu'il s'agit d'une erreur ou si vous avez déjà effectué votre paiement, vous pouvez déposer une réclamation en cliquant sur le lien ci-dessous.\n\nLien de réclamation : ${APP_URL}/school-request?ref=${req.reference}&action=complaint\n\nCordialement,\nL'équipe MégafixaEduc Pro`,
-      }).catch(() => {});
+      // Send Email to both school email (if provided) and promoter email
+      const autoRejectRecipients = getSchoolRequestRecipients(req);
+      if (autoRejectRecipients.length > 0) {
+        sendMailWithFallback({
+          to: autoRejectRecipients,
+          subject: `⚠️ Mise à jour de votre demande d'école - ${req.nom_ecole}`,
+          text: `Bonjour ${req.demandeur_nom},\n\nNous vous informons que votre demande de création de compte pour « ${req.nom_ecole} » a été classée sans suite car elle est restée en attente pendant plus de 24 heures sans action complémentaire.\n\nSi vous estimez qu'il s'agit d'une erreur ou si vous avez déjà effectué votre paiement, vous pouvez déposer une réclamation en cliquant sur le lien ci-dessous.\n\nLien de réclamation : ${APP_URL}/school-request?ref=${req.reference}&action=complaint\n\nCordialement,\nL'équipe MégafixaEduc Pro`,
+        }).catch(() => {});
+      }
 
       // Send WhatsApp
       const waMessage = `Bonjour ${req.demandeur_nom}, votre demande pour « ${req.nom_ecole} » (Réf: ${req.reference}) a été rejetée automatiquement après 24H. \n\nVous pouvez faire une réclamation ici : ${APP_URL}/school-request?ref=${req.reference}&action=complaint`;
@@ -2417,11 +2467,31 @@ async function initializeDatabase() {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
+    CREATE TABLE IF NOT EXISTS deleted_schools_archive (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      original_school_id INTEGER,
+      school_name TEXT NOT NULL,
+      code_ecole TEXT,
+      email TEXT,
+      telephone TEXT,
+      pays TEXT,
+      plan_abonnement TEXT,
+      deletion_reason TEXT NOT NULL,
+      deleted_by_user_id INTEGER,
+      deleted_by_email TEXT,
+      deleted_by_name TEXT,
+      student_count INTEGER DEFAULT 0,
+      teacher_count INTEGER DEFAULT 0,
+      user_count INTEGER DEFAULT 0,
+      snapshot_json TEXT NOT NULL,
+      restored_at DATETIME,
+      restored_school_id INTEGER,
+      deleted_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
     `);
   } catch (e) {}
 
-  // Seed default super admin settings if not present
+  // Seed default super admin settings if not present (without hardcoded credentials)
   const seedSettings = [
     { key: 'app_name', value: 'MégafixaEduc Pro' },
     { key: 'default_currency', value: 'FCFA' },
@@ -2437,13 +2507,13 @@ async function initializeDatabase() {
     { key: 'support_phone', value: '(+229) 0161107918' },
     { key: 'support_whatsapp', value: '+2290161107918' },
     { key: 'support_delai_validation', value: '24H' },
-    { key: 'smtp_host', value: 'smtp.gmail.com' },
-    { key: 'smtp_port', value: '465' },
-    { key: 'smtp_secure', value: 'true' },
-    { key: 'smtp_user', value: 'megafixaservices01@gmail.com' },
-    { key: 'smtp_pass', value: 'abeyjblqzjjybsif' },
-    { key: 'email_from', value: '"MégafixaEduc Pro" <megafixaservices01@gmail.com>' },
-    { key: 'email_provider', value: 'smtp' }
+    { key: 'smtp_host', value: 'smtp-relay.brevo.com' },
+    { key: 'smtp_port', value: '587' },
+    { key: 'smtp_secure', value: 'false' },
+    { key: 'smtp_user', value: process.env.SMTP_USER || '' },
+    { key: 'smtp_pass', value: process.env.SMTP_PASS || '' },
+    { key: 'email_from', value: process.env.EMAIL_FROM || '' },
+    { key: 'email_provider', value: process.env.BREVO_API_KEY ? 'brevo_api' : 'smtp' }
   ];
 
   const checkSetting = db.prepare("SELECT count(*) as count FROM super_admin_settings WHERE key = ?");
@@ -4893,7 +4963,9 @@ try {
     "CREATE INDEX IF NOT EXISTS idx_backup_snapshots_school ON backup_snapshots(school_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_examen_candidats_lookup ON examen_candidats(school_id, session_id)",
     "CREATE INDEX IF NOT EXISTS idx_examen_notes_lookup ON examen_notes(school_id, session_id, eleve_id)",
-    "CREATE INDEX IF NOT EXISTS idx_publication_res_lookup ON publication_resultats(school_id, annee_id, type_periode, periode_valeur)"
+    "CREATE INDEX IF NOT EXISTS idx_publication_res_lookup ON publication_resultats(school_id, annee_id, type_periode, periode_valeur)",
+    "CREATE INDEX IF NOT EXISTS idx_deleted_schools_archive_date ON deleted_schools_archive(deleted_at)",
+    "CREATE INDEX IF NOT EXISTS idx_deleted_schools_archive_orig ON deleted_schools_archive(original_school_id)"
   ];
   for (const sql of indexStatements) {
     try {
@@ -5270,12 +5342,16 @@ async function getSmtpConfig(schoolId?: number, overrideConfig?: Partial<{
     } catch (err) {}
   }
 
-  // Apply temporary test overrides (e.g. unsaved values in admin UI) while preserving saved secrets if left blank
+  // Apply temporary test overrides (e.g. unsaved values in admin UI) while preserving saved secrets if masked or blank
   if (overrideConfig && typeof overrideConfig === 'object') {
+    const isMaskedSecret = (v: any) => {
+      const s = String(v || '').trim();
+      return !s || /^[•*]+$/.test(s);
+    };
     if (overrideConfig.email_provider !== undefined && String(overrideConfig.email_provider).trim() !== '') {
       dbProvider = String(overrideConfig.email_provider).trim();
     }
-    if (overrideConfig.brevo_api_key !== undefined && String(overrideConfig.brevo_api_key).trim() !== '') {
+    if (overrideConfig.brevo_api_key !== undefined && !isMaskedSecret(overrideConfig.brevo_api_key)) {
       dbBrevoApiKey = String(overrideConfig.brevo_api_key).trim();
     }
     if (overrideConfig.smtp_host !== undefined && String(overrideConfig.smtp_host).trim() !== '') {
@@ -5287,7 +5363,7 @@ async function getSmtpConfig(schoolId?: number, overrideConfig?: Partial<{
     if (overrideConfig.smtp_user !== undefined && String(overrideConfig.smtp_user).trim() !== '') {
       dbUser = String(overrideConfig.smtp_user).trim();
     }
-    if (overrideConfig.smtp_pass !== undefined && String(overrideConfig.smtp_pass).trim() !== '') {
+    if (overrideConfig.smtp_pass !== undefined && !isMaskedSecret(overrideConfig.smtp_pass)) {
       dbPass = String(overrideConfig.smtp_pass).trim();
     }
     if (overrideConfig.smtp_secure !== undefined && String(overrideConfig.smtp_secure).trim() !== '') {
@@ -5298,7 +5374,8 @@ async function getSmtpConfig(schoolId?: number, overrideConfig?: Partial<{
     }
   }
 
-  const host = (dbHost || process.env.SMTP_HOST || 'smtp.gmail.com').trim();
+  const brevoApiKey = (dbBrevoApiKey || process.env.BREVO_API_KEY || '').trim();
+  const host = (dbHost || process.env.SMTP_HOST || (brevoApiKey ? 'smtp-relay.brevo.com' : 'smtp.gmail.com')).trim();
   const isGmailHost = host.toLowerCase().includes('gmail');
   const rawPort = (dbPort || process.env.SMTP_PORT || (isGmailHost ? '465' : '587')).trim();
   const port = parseInt(rawPort, 10) || (isGmailHost ? 465 : 587);
@@ -5308,17 +5385,17 @@ async function getSmtpConfig(schoolId?: number, overrideConfig?: Partial<{
     : ((port === 587 || port === 25 || port === 2525)
         ? false
         : (dbSecure ? dbSecure === 'true' : process.env.SMTP_SECURE === 'true'));
-  const user = (dbUser || process.env.SMTP_USER || 'megafixaservices01@gmail.com').trim();
-  const pass = (dbPass || process.env.SMTP_PASS || 'abeyjblqzjjybsif').trim();
-  const from = (dbFrom || process.env.EMAIL_FROM || `"MégafixaEduc Pro" <${user}>`).trim();
-  const brevoApiKey = (dbBrevoApiKey || process.env.BREVO_API_KEY || '').trim();
+  const user = (dbUser || process.env.SMTP_USER || '').trim();
+  const pass = (dbPass || process.env.SMTP_PASS || '').trim();
+  const fallbackSenderEmail = user.includes('@') ? user : 'noreply@megafixaeduc.com';
+  const from = (dbFrom || process.env.EMAIL_FROM || `"MégafixaEduc Pro" <${fallbackSenderEmail}>`).trim();
 
-  const isSeededGmailDefault = host === 'smtp.gmail.com' && user === 'megafixaservices01@gmail.com' && !process.env.SMTP_HOST;
+  const hasWorkingSmtp = Boolean(user && pass && isValidSmtpHost(host));
   const shouldAutoPreferBrevoApi = Boolean(brevoApiKey) && (
     dbProvider === 'brevo_api' ||
     host === 'api.brevo.com' ||
     !dbProvider ||
-    (dbProvider === 'smtp' && isSeededGmailDefault)
+    (dbProvider === 'smtp' && !hasWorkingSmtp)
   );
   const provider = (shouldAutoPreferBrevoApi ? 'brevo_api' : (dbProvider || 'smtp')).trim();
 
@@ -31158,10 +31235,9 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         ? code_ecole.trim().toUpperCase() 
         : `MF-${Math.random().toString(36).substring(2, 7).toUpperCase()}`;
 
-      // Generate secure default password meeting strict policies (e.g. Edu2026!7b9x)
-      const randomSuffix = Math.random().toString(36).substring(2, 6).toLowerCase();
-      const defaultPassword = `Edu2026!${randomSuffix}`;
-      const passwordHash = bcrypt.hashSync(defaultPassword, 8);
+      // Generate cryptographically unique & strong password per school account
+      const defaultPassword = generateSecureUniquePassword(16);
+      const passwordHash = bcrypt.hashSync(defaultPassword, 10);
 
       // Generate subscription key & resolve configured plan from Super Admin DB
       const matchedPlan = resolveConfiguredPlan(plan_abonnement, false);
@@ -31258,6 +31334,24 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         email: cleanEmail,
         plan_abonnement: plan
       });
+
+      // Send credentials notification email via Brevo / SMTP
+      sendMailWithFallback({
+        to: cleanEmail,
+        subject: `🎉 Compte établissement créé sur MégafixaEduc Pro — ${nom.trim()} (${cleanCode})`,
+        text: `Bonjour ${admin_nom?.trim() || nom.trim()},\n\nVotre établissement « ${nom.trim()} » vient d'être créé sur MégafixaEduc Pro.\n\nVos identifiants sécurisés :\n- Code École : ${cleanCode}\n- Email : ${cleanEmail}\n- Mot de passe unique : ${defaultPassword}\n- Formule : ${plan}\n\nConnexion : ${APP_URL}/login?code=${encodeURIComponent(cleanCode)}&email=${encodeURIComponent(cleanEmail)}\n\nVeuillez modifier ce mot de passe dès votre première connexion.`,
+        html: `<div style="font-family:sans-serif;padding:24px;background:#f8fafc;border-radius:16px;max-width:560px;margin:auto;">
+          <h2 style="color:#0f172a;margin-top:0;">Compte établissement créé 🎉</h2>
+          <p style="color:#334155;font-size:14px;">Votre établissement <strong>${nom.trim()}</strong> est prêt sur <strong>MégafixaEduc Pro</strong>.</p>
+          <div style="background:#ffffff;border:1px solid #cbd5e1;padding:18px;border-radius:12px;margin:16px 0;">
+            <p style="margin:6px 0;font-size:13px;"><strong>Code École :</strong> ${cleanCode}</p>
+            <p style="margin:6px 0;font-size:13px;"><strong>Email Admin :</strong> ${cleanEmail}</p>
+            <p style="margin:6px 0;font-size:13px;"><strong>Mot de passe unique :</strong> <code>${defaultPassword}</code></p>
+            <p style="margin:6px 0;font-size:13px;"><strong>Formule :</strong> ${plan}</p>
+          </div>
+          <p style="color:#64748b;font-size:12px;">Ce mot de passe est unique et généré de façon sécurisée. Modifiez-le dès votre première connexion.</p>
+        </div>`
+      }).catch(() => {});
 
       res.json({
         success: true,
@@ -31451,9 +31545,10 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
   });
 
   // Reset admin default password for a school
-  app.post("/api/super-admin/schools/:id/reset-password", authenticateToken, requireSuperAdmin, (req, res) => {
+  app.post("/api/super-admin/schools/:id/reset-password", authenticateToken, requireSuperAdmin, async (req, res) => {
     try {
       const schoolId = req.params.id;
+      const schoolRow = db.prepare("SELECT nom, code_ecole, email FROM school_info WHERE id = ?").get(schoolId) as any;
       const admin = db.prepare(`
         SELECT id, nom, email FROM utilisateurs 
         WHERE school_id = ? AND role = 'admin' 
@@ -31464,13 +31559,12 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         return res.status(404).json({ error: "Aucun compte administrateur trouvé pour cet établissement." });
       }
 
-      const randomSuffix = Math.random().toString(36).substring(2, 6).toLowerCase();
-      const newDefaultPassword = `Edu2026!${randomSuffix}`;
-      const passwordHash = bcrypt.hashSync(newDefaultPassword, 8);
+      const newDefaultPassword = generateSecureUniquePassword(16);
+      const passwordHash = bcrypt.hashSync(newDefaultPassword, 10);
 
       db.prepare(`
         UPDATE utilisateurs 
-        SET mot_de_passe = ?, mot_de_passe_initial = ?, is_first_login = 0 
+        SET mot_de_passe = ?, mot_de_passe_initial = ?, is_first_login = 1, must_change_password = 1
         WHERE id = ?
       `).run(passwordHash, newDefaultPassword, admin.id);
 
@@ -31483,88 +31577,396 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
 
       saveLocalCheckpointSync();
       scheduleCheckpoint('reset_school_admin_password');
+
+      // Notify school/admin via Brevo / SMTP
+      const recipients = getSchoolRequestRecipients({ demandeur_email: admin.email, email_ecole: schoolRow?.email });
+      let emailStatus: any = { sent: false, simulated: false };
+      if (recipients.length > 0) {
+        const mailRes = await sendMailWithFallback({
+          to: recipients,
+          subject: `🔐 Réinitialisation de votre mot de passe administrateur — ${schoolRow?.nom || 'MégafixaEduc Pro'}`,
+          text: `Bonjour ${admin.nom},\n\nVotre mot de passe administrateur pour « ${schoolRow?.nom || ''} » a été réinitialisé par le Super Administrateur.\n\nCode École : ${schoolRow?.code_ecole || 'N/A'}\nIdentifiant : ${admin.email}\nNouveau mot de passe unique : ${newDefaultPassword}\n\nConnexion : ${APP_URL}/login\n\nPour votre sécurité, changez ce mot de passe dès la connexion.`,
+        }).catch((e: any) => ({ success: false, simulated: false, error: e?.message }));
+        emailStatus = { sent: Boolean(mailRes?.success && !mailRes?.simulated), simulated: Boolean(mailRes?.simulated), error: mailRes?.error, recipients };
+      }
+
       res.json({
         success: true,
         newDefaultPassword,
         adminEmail: admin.email,
         adminNom: admin.nom,
-        message: "Nouveau mot de passe par défaut généré avec succès."
+        emailStatus,
+        message: "Nouveau mot de passe unique et sécurisé généré avec succès."
       });
     } catch (err: any) {
       res.status(500).json({ error: "Erreur lors de la réinitialisation du mot de passe : " + (err.message || err) });
     }
   });
 
-  // Delete a school with complete cascading cleanup (foreign key safe)
-  app.delete("/api/super-admin/schools/:id", authenticateToken, requireSuperAdmin, (req, res) => {
+  // Delete a school with reinforced Super Admin security check + complete archival snapshot before cascading deletion
+  app.delete("/api/super-admin/schools/:id", authenticateToken, requireSuperAdmin, (req: any, res) => {
     const schoolId = parseInt(req.params.id, 10);
     if (isNaN(schoolId)) {
       return res.status(400).json({ error: "Identifiant d'école invalide." });
     }
 
     try {
-      const school = db.prepare("SELECT nom FROM school_info WHERE id = ?").get(schoolId) as any;
+      const school = db.prepare("SELECT * FROM school_info WHERE id = ?").get(schoolId) as any;
       if (!school) {
         return res.status(404).json({ error: "Établissement introuvable." });
       }
 
-      // Temporarily disable foreign keys for atomic cascade cleanup
-      // Thoroughly disable foreign key checks for this connection before the transaction
-      db.pragma('foreign_keys = OFF');
+      const { confirm_school_name, deletion_reason, admin_password } = req.body || {};
 
+      // 1. Validate exact school name confirmation
+      if (!confirm_school_name || String(confirm_school_name).trim().toLowerCase() !== String(school.nom || '').trim().toLowerCase()) {
+        return res.status(400).json({
+          error: "Le nom de confirmation ne correspond pas exactement au nom de l'établissement."
+        });
+      }
+
+      // 2. Validate mandatory deletion reason
+      const cleanReason = String(deletion_reason || '').trim();
+      if (cleanReason.length < 5) {
+        return res.status(400).json({
+          error: "Un motif de suppression détaillé (au moins 5 caractères) est obligatoire pour l'audit et l'archivage."
+        });
+      }
+
+      // 3. Verify Super Admin identity password
+      const currentAdmin = db.prepare("SELECT id, nom, email, mot_de_passe FROM utilisateurs WHERE id = ? AND role = 'super_admin'").get(req.user?.id) as any;
+      if (!currentAdmin) {
+        return res.status(403).json({ error: "Compte Super Administrateur introuvable ou non autorisé." });
+      }
+      if (!admin_password || !String(admin_password)) {
+        return res.status(400).json({ error: "Le mot de passe de sécurité du Super Administrateur est obligatoire." });
+      }
+      const passwordValid = currentAdmin.mot_de_passe && bcrypt.compareSync(String(admin_password), currentAdmin.mot_de_passe);
+      if (!passwordValid) {
+        return res.status(403).json({ error: "Mot de passe Super Administrateur incorrect. Suppression refusée." });
+      }
+
+      // 4. Build comprehensive pre-deletion archive snapshot across all tenant tables
+      const allTables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all() as any[];
+      const tenantTablesData: Record<string, any[]> = {};
+      for (const t of allTables) {
+        if (t.name === 'deleted_schools_archive' || t.name === 'school_info') continue;
+        try {
+          const cols = db.prepare(`PRAGMA table_info("${t.name}")`).all() as any[];
+          if (cols.some(c => c.name === 'school_id')) {
+            const rows = db.prepare(`SELECT * FROM "${t.name}" WHERE school_id = ?`).all(schoolId) as any[];
+            if (rows.length > 0) {
+              tenantTablesData[t.name] = rows;
+            }
+          }
+        } catch {}
+      }
+
+      const studentCount = tenantTablesData.eleves?.length || 0;
+      const teacherCount = tenantTablesData.enseignants?.length || 0;
+      const userCount = tenantTablesData.utilisateurs?.length || 0;
+
+      const archiveSnapshot = {
+        archive_version: 1,
+        archived_at: new Date().toISOString(),
+        deletion_reason: cleanReason,
+        deleted_by: {
+          id: currentAdmin.id,
+          nom: currentAdmin.nom,
+          email: currentAdmin.email
+        },
+        school,
+        tables: tenantTablesData
+      };
+      const snapshotJson = JSON.stringify(archiveSnapshot);
+
+      let archiveId = 0;
+
+      // Temporarily disable foreign keys for atomic archive + cascade cleanup
+      db.pragma('foreign_keys = OFF');
       try {
         const deleteTx = db.transaction(() => {
-          // 1. Delete dependent records with explicit FK relationships first to be safe
+          // A. Insert into permanent deleted_schools_archive BEFORE removing any record
+          const archInfo = db.prepare(`
+            INSERT INTO deleted_schools_archive (
+              original_school_id, school_name, code_ecole, email, telephone, pays, plan_abonnement,
+              deletion_reason, deleted_by_user_id, deleted_by_email, deleted_by_name,
+              student_count, teacher_count, user_count, snapshot_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(
+            schoolId,
+            school.nom,
+            school.code_ecole || null,
+            school.email || null,
+            school.telephone || null,
+            school.pays || null,
+            school.plan_abonnement || null,
+            cleanReason,
+            currentAdmin.id,
+            currentAdmin.email,
+            currentAdmin.nom,
+            studentCount,
+            teacherCount,
+            userCount,
+            snapshotJson
+          );
+          archiveId = Number(archInfo.lastInsertRowid);
+
+          // B. Cascade delete child records across all tables with school_id
           try {
             db.prepare("DELETE FROM audit_logs WHERE school_id = ?").run(schoolId);
             db.prepare("DELETE FROM utilisateurs WHERE school_id = ?").run(schoolId);
-          } catch (e) {}
+          } catch {}
 
-          // 2. Identify all other tables in the database with a school_id column
-          const allTables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all() as any[];
           for (const t of allTables) {
-            if (t.name === 'school_info' || t.name === 'utilisateurs' || t.name === 'audit_logs') continue;
+            if (['school_info', 'utilisateurs', 'audit_logs', 'deleted_schools_archive', 'subscription_transactions', 'subscription_licenses', 'school_creation_requests'].includes(t.name)) continue;
             try {
-              const cols = db.prepare(`PRAGMA table_info(${t.name})`).all() as any[];
+              const cols = db.prepare(`PRAGMA table_info("${t.name}")`).all() as any[];
               if (cols.some(c => c.name === 'school_id')) {
-                db.prepare(`DELETE FROM ${t.name} WHERE school_id = ?`).run(schoolId);
+                db.prepare(`DELETE FROM "${t.name}" WHERE school_id = ?`).run(schoolId);
               }
-            } catch (tableErr) {
-              // ignore table if locked or special
-            }
+            } catch {}
           }
 
-          // 3. Unlink any transactions or licenses referencing this school_id (set to NULL instead of delete)
-          try {
-            db.prepare("UPDATE subscription_transactions SET school_id = NULL WHERE school_id = ?").run(schoolId);
-          } catch (e) {}
-          try {
-            db.prepare("UPDATE subscription_licenses SET school_id = NULL WHERE school_id = ?").run(schoolId);
-          } catch (e) {}
+          // C. Unlink financial/license/request trace records instead of erasing history
+          try { db.prepare("UPDATE subscription_transactions SET school_id = NULL WHERE school_id = ?").run(schoolId); } catch {}
+          try { db.prepare("UPDATE subscription_licenses SET school_id = NULL WHERE school_id = ?").run(schoolId); } catch {}
+          try { db.prepare("UPDATE school_creation_requests SET school_id = NULL WHERE school_id = ?").run(schoolId); } catch {}
 
-          // 4. Delete the school itself
+          // D. Delete the school record itself
           db.prepare("DELETE FROM school_info WHERE id = ?").run(schoolId);
         });
 
         deleteTx();
       } finally {
-        // Restore foreign keys integrity check
         db.pragma('foreign_keys = ON');
       }
 
       try {
-        recordSaasLog((req as any).user?.id || null, 'DELETE_SCHOOL', { school_id: schoolId, school_name: school.nom }, req);
+        recordSaasLog(req.user?.id || null, 'DELETE_SCHOOL_ARCHIVED', {
+          archive_id: archiveId,
+          school_id: schoolId,
+          school_name: school.nom,
+          deletion_reason: cleanReason,
+          student_count: studentCount,
+          user_count: userCount
+        }, req);
       } catch (e) {}
 
       markExplicitDeletion();
       saveLocalCheckpointSync();
       saveCheckpoint('delete_school').catch(() => {});
-      res.json({ success: true, message: `L'établissement ${school.nom} a été supprimé avec succès.` });
+
+      res.json({
+        success: true,
+        archiveId,
+        message: `L'établissement « ${school.nom} » a été archivé (Archive #${archiveId}) puis supprimé en toute sécurité.`
+      });
     } catch (err: any) {
-      // Ensure foreign keys are restored in case of error
       try { db.pragma('foreign_keys = ON'); } catch (e) {}
       console.error("Erreur suppression école:", err);
       res.status(500).json({ error: "Erreur lors de la suppression de l'établissement : " + (err.message || err) });
+    }
+  });
+
+  // ==========================================
+  // ARCHIVES DES ÉCOLES SUPPRIMÉES (Super Admin)
+  // ==========================================
+
+  app.get("/api/super-admin/deleted-schools", authenticateToken, requireSuperAdmin, (_req, res) => {
+    try {
+      const archives = db.prepare(`
+        SELECT id, original_school_id, school_name, code_ecole, email, telephone, pays, plan_abonnement,
+               deletion_reason, deleted_by_user_id, deleted_by_email, deleted_by_name,
+               student_count, teacher_count, user_count, restored_at, restored_school_id, deleted_at
+        FROM deleted_schools_archive
+        ORDER BY deleted_at DESC, id DESC
+      `).all();
+      res.json(archives);
+    } catch (err: any) {
+      res.status(500).json({ error: "Erreur lors de la récupération des archives : " + (err.message || err) });
+    }
+  });
+
+  app.get("/api/super-admin/deleted-schools/:archiveId", authenticateToken, requireSuperAdmin, (req, res) => {
+    try {
+      const archiveId = parseInt(req.params.archiveId, 10);
+      if (isNaN(archiveId)) return res.status(400).json({ error: "Identifiant d'archive invalide." });
+
+      const archive = db.prepare("SELECT * FROM deleted_schools_archive WHERE id = ?").get(archiveId) as any;
+      if (!archive) return res.status(404).json({ error: "Archive introuvable." });
+
+      let parsedSnapshot: any = null;
+      const tableSummary: Record<string, number> = {};
+      try {
+        parsedSnapshot = JSON.parse(archive.snapshot_json);
+        if (parsedSnapshot?.tables && typeof parsedSnapshot.tables === 'object') {
+          for (const [tbl, rows] of Object.entries(parsedSnapshot.tables)) {
+            if (Array.isArray(rows)) tableSummary[tbl] = rows.length;
+          }
+        }
+      } catch {}
+
+      res.json({
+        id: archive.id,
+        original_school_id: archive.original_school_id,
+        school_name: archive.school_name,
+        code_ecole: archive.code_ecole,
+        email: archive.email,
+        telephone: archive.telephone,
+        pays: archive.pays,
+        plan_abonnement: archive.plan_abonnement,
+        deletion_reason: archive.deletion_reason,
+        deleted_by_email: archive.deleted_by_email,
+        deleted_by_name: archive.deleted_by_name,
+        student_count: archive.student_count,
+        teacher_count: archive.teacher_count,
+        user_count: archive.user_count,
+        restored_at: archive.restored_at,
+        restored_school_id: archive.restored_school_id,
+        deleted_at: archive.deleted_at,
+        school: parsedSnapshot?.school || null,
+        tableSummary
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: "Erreur chargement détail archive : " + (err.message || err) });
+    }
+  });
+
+  app.get("/api/super-admin/deleted-schools/:archiveId/download", authenticateToken, requireSuperAdmin, (req, res) => {
+    try {
+      const archiveId = parseInt(req.params.archiveId, 10);
+      if (isNaN(archiveId)) return res.status(400).json({ error: "Identifiant d'archive invalide." });
+
+      const archive = db.prepare("SELECT id, school_name, code_ecole, snapshot_json FROM deleted_schools_archive WHERE id = ?").get(archiveId) as any;
+      if (!archive) return res.status(404).json({ error: "Archive introuvable." });
+
+      const safeCode = String(archive.code_ecole || archive.school_name || 'ecole').replace(/[^a-zA-Z0-9_-]/g, '_');
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="archive_${safeCode}_${archive.id}.json"`);
+      res.send(archive.snapshot_json);
+    } catch (err: any) {
+      res.status(500).json({ error: "Erreur téléchargement archive : " + (err.message || err) });
+    }
+  });
+
+  app.post("/api/super-admin/deleted-schools/:archiveId/restore", authenticateToken, requireSuperAdmin, (req: any, res) => {
+    const archiveId = parseInt(req.params.archiveId, 10);
+    if (isNaN(archiveId)) return res.status(400).json({ error: "Identifiant d'archive invalide." });
+
+    try {
+      const archive = db.prepare("SELECT * FROM deleted_schools_archive WHERE id = ?").get(archiveId) as any;
+      if (!archive) return res.status(404).json({ error: "Archive introuvable." });
+      if (archive.restored_at && archive.restored_school_id) {
+        const stillExists = db.prepare("SELECT id FROM school_info WHERE id = ?").get(archive.restored_school_id);
+        if (stillExists) {
+          return res.status(400).json({ error: `Cette archive a déjà été restaurée (École ID: ${archive.restored_school_id}).` });
+        }
+      }
+
+      const snapshot = JSON.parse(archive.snapshot_json);
+      const schoolData = snapshot?.school;
+      if (!schoolData || !schoolData.nom) {
+        return res.status(400).json({ error: "Contenu d'archive invalide ou incomplet." });
+      }
+
+      // Check if an active school with same code already exists
+      let restoredCode = schoolData.code_ecole || null;
+      if (restoredCode) {
+        const dupCode = db.prepare("SELECT id FROM school_info WHERE UPPER(TRIM(code_ecole)) = UPPER(?)").get(String(restoredCode).trim());
+        if (dupCode) {
+          restoredCode = `${String(restoredCode).trim()}-R${Date.now().toString(36).slice(-3).toUpperCase()}`;
+        }
+      }
+
+      let restoredSchoolId = 0;
+      let restoredRowsCount = 0;
+
+      db.pragma('foreign_keys = OFF');
+      try {
+        const restoreTx = db.transaction(() => {
+          const schoolCols = new Set((db.prepare(`PRAGMA table_info("school_info")`).all() as any[]).map(c => c.name));
+          const rowCopy = { ...schoolData, code_ecole: restoredCode };
+          const canKeepOriginalId = rowCopy.id != null && !db.prepare("SELECT id FROM school_info WHERE id = ?").get(rowCopy.id);
+          const cols = Object.keys(rowCopy).filter(c => schoolCols.has(c) && (canKeepOriginalId || c !== 'id'));
+          const quotedCols = cols.map(c => `"${c}"`).join(', ');
+          const placeholders = cols.map(() => '?').join(', ');
+          const info = db.prepare(`INSERT INTO school_info (${quotedCols}) VALUES (${placeholders})`).run(...cols.map(c => rowCopy[c] ?? null));
+          restoredSchoolId = Number(info.lastInsertRowid);
+
+          // Restore tenant tables with school_id remapped to restoredSchoolId
+          const tablesMap = (snapshot?.tables && typeof snapshot.tables === 'object') ? snapshot.tables : {};
+          // Insert parents first where possible
+          const preferredOrder = [
+            'annees_scolaires', 'role_permissions', 'batiments', 'salles', 'classes',
+            'matieres', 'enseignants', 'personnel_administratif', 'eleves', 'utilisateurs',
+            'school_smtp_configs', 'sms_configs', 'whatsapp_configs'
+          ];
+          const tableNames = [
+            ...preferredOrder.filter(t => Array.isArray(tablesMap[t])),
+            ...Object.keys(tablesMap).filter(t => !preferredOrder.includes(t))
+          ];
+
+          for (const tbl of tableNames) {
+            const rows = tablesMap[tbl];
+            if (!Array.isArray(rows) || rows.length === 0 || !tableExists(tbl)) continue;
+            const liveCols = new Set((db.prepare(`PRAGMA table_info("${tbl}")`).all() as any[]).map(c => c.name));
+            if (liveCols.size === 0) continue;
+
+            for (const rawRow of rows) {
+              if (!rawRow || typeof rawRow !== 'object') continue;
+              const rCopy: any = { ...rawRow, school_id: restoredSchoolId };
+              if (tbl === 'utilisateurs' && rCopy.email) {
+                const emailConflict = db.prepare("SELECT id FROM utilisateurs WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))").get(String(rCopy.email));
+                if (emailConflict) continue;
+              }
+              const idTaken = rCopy.id != null && db.prepare(`SELECT id FROM "${tbl}" WHERE id = ?`).get(rCopy.id);
+              const insertCols = Object.keys(rCopy).filter(c => liveCols.has(c) && (!idTaken || c !== 'id'));
+              if (insertCols.length === 0) continue;
+              try {
+                const resIns = db.prepare(
+                  `INSERT OR IGNORE INTO "${tbl}" (${insertCols.map(c => `"${c}"`).join(', ')}) VALUES (${insertCols.map(() => '?').join(', ')})`
+                ).run(...insertCols.map(c => rCopy[c] ?? null));
+                restoredRowsCount += resIns.changes;
+              } catch {}
+            }
+          }
+
+          db.prepare(`
+            UPDATE deleted_schools_archive
+            SET restored_at = CURRENT_TIMESTAMP, restored_school_id = ?
+            WHERE id = ?
+          `).run(restoredSchoolId, archiveId);
+        });
+
+        restoreTx();
+      } finally {
+        db.pragma('foreign_keys = ON');
+      }
+
+      try {
+        recordSaasLog(req.user?.id || null, 'RESTORE_SCHOOL_FROM_ARCHIVE', {
+          archive_id: archiveId,
+          restored_school_id: restoredSchoolId,
+          school_name: schoolData.nom,
+          restored_rows: restoredRowsCount
+        }, req);
+      } catch (e) {}
+
+      saveLocalCheckpointSync();
+      saveCheckpoint('restore_school_archive').catch(() => {});
+
+      res.json({
+        success: true,
+        restoredSchoolId,
+        schoolName: schoolData.nom,
+        restoredRows: restoredRowsCount,
+        message: `L'établissement « ${schoolData.nom} » et ses ${restoredRowsCount} enregistrements ont été restaurés avec succès !`
+      });
+    } catch (err: any) {
+      try { db.pragma('foreign_keys = ON'); } catch (e) {}
+      console.error("Erreur restauration archive école:", err);
+      res.status(500).json({ error: "Erreur lors de la restauration de l'archive : " + (err.message || err) });
     }
   });
 
@@ -31762,31 +32164,46 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
 
       saveLocalCheckpointSync();
 
-      // Send acknowledgment email if SMTP is configured
-      try {
-        sendMailWithFallback({
-          to: demandeur_email.trim().toLowerCase(),
-          subject: `📋 Réception de votre demande d'ouverture d'école - ${cleanRef}`,
-          text: `Bonjour ${demandeur_nom},\n\nNous avons bien reçu votre demande de création de compte pour « ${nom_ecole} » sur MégafixaEduc Pro (Réf: ${cleanRef}).\n\nVeuillez procéder au règlement Mobile Money pour finaliser votre dossier.\n\nNos équipes valideront vos accès dans les 24h au plus.\n\nCordialement,\nL'équipe MégafixaEduc Pro`,
-          html: `<div style="font-family:sans-serif;padding:24px;background:#f8fafc;border-radius:16px;max-width:560px;margin:auto;">
-            <h2 style="color:#0f172a;margin-top:0;">Demande de création d'école reçue 📋</h2>
-            <p style="color:#334155;font-size:14px;line-height:1.6;">Bonjour <strong>${demandeur_nom}</strong>,</p>
-            <p style="color:#334155;font-size:14px;line-height:1.6;">Nous confirmons la bonne réception de la demande pour votre établissement <strong>${nom_ecole}</strong> sur la plateforme <strong>MégafixaEduc Pro</strong>.</p>
-            <div style="background:#ffffff;border:1px solid #e2e8f0;padding:16px;border-radius:12px;margin:16px 0;">
-              <p style="margin:4px 0;font-size:13px;"><strong>Référence de dossier :</strong> <span style="color:#4f46e5;font-weight:bold;">${cleanRef}</span></p>
-              <p style="margin:4px 0;font-size:13px;"><strong>Formule choisie :</strong> ${finalPlanName}</p>
-              <p style="margin:4px 0;font-size:13px;"><strong>Délai de traitement :</strong> 24h maximum après confirmation du paiement</p>
-            </div>
-            <p style="color:#64748b;font-size:12px;">Pour toute question, contactez notre équipe au (+229) 0161107918 ou par WhatsApp.</p>
-          </div>`
-        }).catch(e => console.warn("Email demande notification non bloquante:", e));
-      } catch (mailErr) {}
+      // Send acknowledgment email via Brevo / SMTP to both school email (if added) and promoter personal email
+      const submitRecipients = getSchoolRequestRecipients(newRequest);
+      let submitEmailStatus: any = { sent: false, simulated: false, recipients: submitRecipients };
+      if (submitRecipients.length > 0) {
+        try {
+          const mailRes = await sendMailWithFallback({
+            to: submitRecipients,
+            subject: `📋 Réception de votre demande d'ouverture d'école - ${cleanRef}`,
+            text: `Bonjour ${demandeur_nom},\n\nNous avons bien reçu votre demande de création de compte pour « ${nom_ecole} » sur MégafixaEduc Pro (Réf: ${cleanRef}).\n\nFormule souhaitée : ${finalPlanName}\n\nAucun mot de passe n'est requis maintenant : un mot de passe unique et sécurisé sera généré automatiquement lors de la validation de votre dossier.\n\nVeuillez procéder au règlement Mobile Money pour finaliser votre dossier.\n\nNos équipes valideront vos accès dans les 24h au plus.\n\nCordialement,\nL'équipe MégafixaEduc Pro`,
+            html: `<div style="font-family:sans-serif;padding:24px;background:#f8fafc;border-radius:16px;max-width:560px;margin:auto;">
+              <h2 style="color:#0f172a;margin-top:0;">Demande de création d'école reçue 📋</h2>
+              <p style="color:#334155;font-size:14px;line-height:1.6;">Bonjour <strong>${demandeur_nom}</strong>,</p>
+              <p style="color:#334155;font-size:14px;line-height:1.6;">Nous confirmons la bonne réception de la demande pour votre établissement <strong>${nom_ecole}</strong> sur la plateforme <strong>MégafixaEduc Pro</strong>.</p>
+              <div style="background:#ffffff;border:1px solid #e2e8f0;padding:16px;border-radius:12px;margin:16px 0;">
+                <p style="margin:4px 0;font-size:13px;"><strong>Référence de dossier :</strong> <span style="color:#4f46e5;font-weight:bold;">${cleanRef}</span></p>
+                <p style="margin:4px 0;font-size:13px;"><strong>Formule choisie :</strong> ${finalPlanName}</p>
+                <p style="margin:4px 0;font-size:13px;"><strong>Sécurité :</strong> Votre mot de passe unique et sécurisé sera généré automatiquement lors de l'activation.</p>
+                <p style="margin:4px 0;font-size:13px;"><strong>Délai de traitement :</strong> 24h maximum après confirmation du paiement</p>
+              </div>
+              <p style="color:#64748b;font-size:12px;">Suivre votre dossier : <a href="${APP_URL}/school-request?ref=${cleanRef}">${APP_URL}/school-request?ref=${cleanRef}</a></p>
+              <p style="color:#64748b;font-size:12px;">Pour toute question, contactez notre équipe au (+229) 0161107918 ou par WhatsApp.</p>
+            </div>`
+          });
+          submitEmailStatus = {
+            sent: Boolean(mailRes.success && !mailRes.simulated),
+            simulated: Boolean(mailRes.simulated),
+            error: mailRes.error,
+            recipients: submitRecipients
+          };
+        } catch (mailErr: any) {
+          submitEmailStatus = { sent: false, simulated: false, error: mailErr?.message, recipients: submitRecipients };
+        }
+      }
 
       res.status(201).json({
         success: true,
         reference: cleanRef,
         requestId,
         request: newRequest,
+        emailStatus: submitEmailStatus,
         message: "Demande enregistrée avec succès. Vous pouvez maintenant procéder au paiement Mobile Money."
       });
     } catch (err: any) {
@@ -31796,7 +32213,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
   });
 
   // Confirmation du paiement Mobile Money par le demandeur
-  app.post("/api/public/school-requests/:id_or_ref/confirm-payment", (req, res) => {
+  app.post("/api/public/school-requests/:id_or_ref/confirm-payment", async (req, res) => {
     try {
       const { id_or_ref } = req.params;
       const { payment_method, payment_phone, payment_reference } = req.body;
@@ -31810,6 +32227,8 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         return res.status(404).json({ error: "Dossier de demande introuvable." });
       }
 
+      const finalPaymentRef = payment_reference || `MOMO-${Date.now().toString(36).toUpperCase()}`;
+
       db.prepare(`
         UPDATE school_creation_requests 
         SET payment_method = ?,
@@ -31821,14 +32240,14 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       `).run(
         payment_method || 'Mobile Money',
         payment_phone || request.demandeur_telephone,
-        payment_reference || `MOMO-${Date.now().toString(36).toUpperCase()}`,
+        finalPaymentRef,
         request.id
       );
 
       // Notification prioritaire au Super Admin
       try {
         const notifTitre = `💰 Paiement signalé : ${request.nom_ecole} (${request.reference})`;
-        const notifMsg = `Le demandeur ${request.demandeur_nom} (${request.demandeur_telephone}) a confirmé le paiement Mobile Money via ${payment_method || 'Mobile Money'}. Tél payeur : ${payment_phone || 'Non renseigné'}. Réf : ${payment_reference || 'N/A'}. Traitement et vérification dans les 24h.`;
+        const notifMsg = `Le demandeur ${request.demandeur_nom} (${request.demandeur_telephone}) a confirmé le paiement Mobile Money via ${payment_method || 'Mobile Money'}. Tél payeur : ${payment_phone || 'Non renseigné'}. Réf : ${finalPaymentRef}. Traitement et vérification dans les 24h.`;
         
         db.prepare(`
           INSERT INTO super_admin_notifications (titre, message, type, school_id, school_name, school_code, admin_email, lu)
@@ -31838,9 +32257,19 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         console.error("Erreur notification super admin paiement:", e);
       }
 
-      const updated = db.prepare("SELECT * FROM school_creation_requests WHERE id = ?").get(request.id);
+      const updated = db.prepare("SELECT * FROM school_creation_requests WHERE id = ?").get(request.id) as any;
       saveLocalCheckpointSync();
       saveCheckpoint('confirm_payment_school_request').catch(() => {});
+
+      // Notify both school email & promoter personal email of payment confirmation reception
+      const paymentRecipients = getSchoolRequestRecipients(updated || request);
+      if (paymentRecipients.length > 0) {
+        sendMailWithFallback({
+          to: paymentRecipients,
+          subject: `💰 Confirmation de signalement de paiement - ${request.reference}`,
+          text: `Bonjour ${request.demandeur_nom},\n\nVotre paiement pour « ${request.nom_ecole} » (Réf dossier : ${request.reference}) a bien été signalé :\n- Moyen : ${payment_method || 'Mobile Money'}\n- Référence : ${finalPaymentRef}\n\nNos équipes vérifient votre versement et activeront votre compte école avec vos identifiants uniques sous 24h au plus.\n\nCordialement,\nL'équipe MégafixaEduc Pro`
+        }).catch(() => {});
+      }
 
       res.json({
         success: true,
@@ -31932,12 +32361,12 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         ? code_ecole.trim().toUpperCase()
         : `MF-${Math.random().toString(36).substring(2, 7).toUpperCase()}`;
 
-      // Generate secure default password (or use provided custom)
-      const randomSuffix = Math.random().toString(36).substring(2, 6).toLowerCase();
-      const defaultPassword = (custom_password && custom_password.trim()) 
-        ? custom_password.trim() 
-        : `Edu2026!${randomSuffix}`;
-      const passwordHash = bcrypt.hashSync(defaultPassword, 8);
+      // Generate cryptographically secure & unique password (accept explicit override only if strong >= 10 chars)
+      const explicitPass = (custom_password && String(custom_password).trim().length >= 10)
+        ? String(custom_password).trim()
+        : '';
+      const defaultPassword = explicitPass || generateSecureUniquePassword(16);
+      const passwordHash = bcrypt.hashSync(defaultPassword, 10);
 
       // Plan & Subscription Key resolved from Super Admin configured plans
       const matchedApprovePlan = resolveConfiguredPlan(plan_abonnement || request.plan_souhaite, false);
@@ -32044,34 +32473,46 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         console.warn("PDF generation failed during approval:", e);
       }
 
-      // Send email to applicant with credentials and PDF
-      try {
-        await sendMailWithFallback({
-          to: cleanEmail,
-          subject: `🎉 Bienvenue sur MégafixaEduc Pro ! Votre compte école « ${request.nom_ecole} » est actif`,
-          text: `Bonjour ${request.demandeur_nom},\n\nFélicitations ! Votre demande pour « ${request.nom_ecole} » a été acceptée.\n\nVos identifiants :\n- Code École : ${finalCode}\n- Email : ${cleanEmail}\n- Mot de passe : ${defaultPassword}\n\nConnectez-vous ici : ${APP_URL}/login?code=${finalCode}&email=${cleanEmail}\n\nCordialement,`,
-          html: `<div style="font-family:sans-serif;padding:24px;background:#f8fafc;border-radius:16px;max-width:560px;margin:auto;">
-            <h2 style="color:#0f172a;margin-top:0;">Félicitations et bienvenue ! 🎉</h2>
-            <p style="color:#334155;font-size:14px;line-height:1.6;">Bonjour <strong>${request.demandeur_nom}</strong>,</p>
-            <p style="color:#334155;font-size:14px;line-height:1.6;">Votre demande pour <strong>${request.nom_ecole}</strong> a été validée.</p>
-            <div style="background:#ffffff;border:1px solid #cbd5e1;padding:18px;border-radius:12px;margin:20px 0;">
-              <h4 style="margin-top:0;color:#4f46e5;">Vos Accès Administrateur</h4>
-              <p style="margin:6px 0;font-size:13px;"><strong>Code École :</strong> ${finalCode}</p>
-              <p style="margin:6px 0;font-size:13px;"><strong>Identifiant :</strong> ${cleanEmail}</p>
-              <p style="margin:6px 0;font-size:13px;"><strong>Mot de passe initial :</strong> ${defaultPassword}</p>
-            </div>
-            <p style="text-align:center;margin-top:20px;">
-              <a href="${APP_URL}/login?code=${finalCode}&email=${cleanEmail}" style="display:inline-block;padding:12px 24px;background:#4f46e5;color:white;text-decoration:none;border-radius:10px;font-weight:bold;">Se connecter</a>
-            </p>
-            <p style="color:#64748b;font-size:11px;margin-top:20px;">Pour votre sécurité, il vous sera demandé de modifier ce mot de passe dès votre première connexion.</p>
-          </div>`,
-          attachments: pdfBuffer ? [{
-            filename: `Fiche_Creation_Compte_${finalCode}.pdf`,
-            content: pdfBuffer,
-            contentType: 'application/pdf'
-          }] : undefined
-        });
-      } catch (e) {}
+      // Send email to BOTH school email (if added) and applicant personal email with unique credentials and PDF
+      const approveRecipients = getSchoolRequestRecipients(request);
+      let approveEmailStatus: any = { sent: false, simulated: false, recipients: approveRecipients };
+      if (approveRecipients.length > 0) {
+        try {
+          const mailRes = await sendMailWithFallback({
+            to: approveRecipients,
+            subject: `🎉 Bienvenue sur MégafixaEduc Pro ! Votre compte école « ${request.nom_ecole} » est actif`,
+            text: `Bonjour ${request.demandeur_nom},\n\nFélicitations ! Votre demande pour « ${request.nom_ecole} » (Réf: ${request.reference}) a été acceptée et votre compte établissement est désormais actif.\n\nVos identifiants sécurisés :\n- Code École : ${finalCode}\n- Email Admin : ${cleanEmail}\n- Mot de passe unique : ${defaultPassword}\n\nConnectez-vous ici : ${APP_URL}/login?code=${finalCode}&email=${cleanEmail}\n\nPour votre sécurité, il vous sera demandé de modifier ce mot de passe dès votre première connexion.\n\nCordialement,\nL'équipe MégafixaEduc Pro`,
+            html: `<div style="font-family:sans-serif;padding:24px;background:#f8fafc;border-radius:16px;max-width:560px;margin:auto;">
+              <h2 style="color:#0f172a;margin-top:0;">Félicitations et bienvenue ! 🎉</h2>
+              <p style="color:#334155;font-size:14px;line-height:1.6;">Bonjour <strong>${request.demandeur_nom}</strong>,</p>
+              <p style="color:#334155;font-size:14px;line-height:1.6;">Votre demande pour <strong>${request.nom_ecole}</strong> (Réf: ${request.reference}) a été validée et votre compte est actif.</p>
+              <div style="background:#ffffff;border:1px solid #cbd5e1;padding:18px;border-radius:12px;margin:20px 0;">
+                <h4 style="margin-top:0;color:#4f46e5;">Vos Accès Administrateur Uniques</h4>
+                <p style="margin:6px 0;font-size:13px;"><strong>Code École :</strong> ${finalCode}</p>
+                <p style="margin:6px 0;font-size:13px;"><strong>Identifiant :</strong> ${cleanEmail}</p>
+                <p style="margin:6px 0;font-size:13px;"><strong>Mot de passe sécurisé généré :</strong> <code style="background:#f1f5f9;padding:2px 6px;border-radius:4px;">${defaultPassword}</code></p>
+              </div>
+              <p style="text-align:center;margin-top:20px;">
+                <a href="${APP_URL}/login?code=${finalCode}&email=${cleanEmail}" style="display:inline-block;padding:12px 24px;background:#4f46e5;color:white;text-decoration:none;border-radius:10px;font-weight:bold;">Se connecter</a>
+              </p>
+              <p style="color:#64748b;font-size:11px;margin-top:20px;">Pour votre sécurité, ce mot de passe est unique à votre compte et devra être personnalisé dès votre première connexion.</p>
+            </div>`,
+            attachments: pdfBuffer ? [{
+              filename: `Fiche_Creation_Compte_${finalCode}.pdf`,
+              content: pdfBuffer,
+              contentType: 'application/pdf'
+            }] : undefined
+          });
+          approveEmailStatus = {
+            sent: Boolean(mailRes.success && !mailRes.simulated),
+            simulated: Boolean(mailRes.simulated),
+            error: mailRes.error,
+            recipients: approveRecipients
+          };
+        } catch (e: any) {
+          approveEmailStatus = { sent: false, simulated: false, error: e?.message, recipients: approveRecipients };
+        }
+      }
 
       // Send WhatsApp
       try {
@@ -32094,6 +32535,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         success: true,
         message: `L'établissement ${request.nom_ecole} a été validé et activé avec succès.`,
         schoolId: newSchoolId,
+        emailStatus: approveEmailStatus,
         credentials: {
           nom: request.nom_ecole,
           code_ecole: finalCode,
@@ -32109,12 +32551,11 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
     }
   });
 
-  // Rejet d'une demande par le Super Admin
-  // Envoi d'une notification spécifique au demandeur
+  // Envoi d'une notification / avertissement spécifique au demandeur (email école + email promoteur)
   app.post("/api/super-admin/school-requests/:id/send-notice", authenticateToken, requireSuperAdmin, async (req, res) => {
     try {
       const requestId = parseInt(req.params.id, 10);
-      const { type, motif } = req.body; // 'payment_missing', 'incorrect_reference', 'pending_24h'
+      const { type, motif } = req.body; // 'payment_missing', 'incorrect_reference', 'pending_24h', 'custom_warning'
 
       const request = db.prepare("SELECT * FROM school_creation_requests WHERE id = ?").get(requestId) as any;
       if (!request) return res.status(404).json({ error: "Demande introuvable." });
@@ -32125,16 +32566,24 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
 
       if (type === 'payment_missing') {
         subject = `🕒 Rappel : Paiement non reçu pour votre demande - ${request.nom_ecole}`;
-        message = motif || `Bonjour ${request.demandeur_nom},\n\nNous n'avons pas encore reçu la confirmation de paiement pour votre demande de création de compte école « ${request.nom_ecole} ».\n\nMerci de procéder au règlement ou de nous transmettre votre référence de transaction pour finaliser la création.\n\nCordialement,`;
-        waMessage = motif ? `🕒 ${motif}` : `🕒 Bonjour ${request.demandeur_nom}, nous n'avons pas reçu le paiement pour « ${request.nom_ecole} ». Merci de régulariser pour activer votre compte.`;
+        message = (motif && String(motif).trim()) || `Bonjour ${request.demandeur_nom},\n\nNous n'avons pas encore reçu la confirmation de paiement pour votre demande de création de compte école « ${request.nom_ecole} » (Réf: ${request.reference}).\n\nMerci de procéder au règlement ou de nous transmettre votre référence de transaction pour finaliser la création.\n\nCordialement,\nL'équipe MégafixaEduc Pro`;
+        waMessage = (motif && String(motif).trim()) ? `🕒 ${motif}` : `🕒 Bonjour ${request.demandeur_nom}, nous n'avons pas reçu le paiement pour « ${request.nom_ecole} » (${request.reference}). Merci de régulariser pour activer votre compte.`;
       } else if (type === 'incorrect_reference') {
         subject = `⚠️ Référence de paiement incorrecte - ${request.nom_ecole}`;
-        message = motif || `Bonjour ${request.demandeur_nom},\n\nLa référence de paiement que vous avez fournie pour l'établissement « ${request.nom_ecole} » semble incorrecte ou introuvable.\n\nMerci de vérifier et de nous renvoyer la bonne référence.\n\nCordialement,`;
-        waMessage = motif ? `⚠️ ${motif}` : `⚠️ Bonjour ${request.demandeur_nom}, la référence de paiement pour « ${request.nom_ecole} » est incorrecte. Merci de nous renvoyer la bonne référence.`;
+        message = (motif && String(motif).trim()) || `Bonjour ${request.demandeur_nom},\n\nLa référence de paiement que vous avez fournie pour l'établissement « ${request.nom_ecole} » (${request.reference}) semble incorrecte ou introuvable.\n\nMerci de vérifier et de nous renvoyer la bonne référence.\n\nCordialement,\nL'équipe MégafixaEduc Pro`;
+        waMessage = (motif && String(motif).trim()) ? `⚠️ ${motif}` : `⚠️ Bonjour ${request.demandeur_nom}, la référence de paiement pour « ${request.nom_ecole} » est incorrecte. Merci de nous renvoyer la bonne référence.`;
       } else if (type === 'pending_24h') {
         subject = `⏳ Information : Création de compte mise en attente - ${request.nom_ecole}`;
-        message = motif || `Bonjour ${request.demandeur_nom},\n\nVotre demande pour « ${request.nom_ecole} » est en attente de validation finale. Elle sera traitée dans les 24H.\n\nSans action de votre part ou validation de notre part dans ce délai, la demande pourrait être classée.\n\nCordialement,`;
-        waMessage = motif ? `⏳ ${motif}` : `⏳ Bonjour ${request.demandeur_nom}, votre demande pour « ${request.nom_ecole} » est en attente (24H). Elle sera traitée très prochainement.`;
+        message = (motif && String(motif).trim()) || `Bonjour ${request.demandeur_nom},\n\nVotre demande pour « ${request.nom_ecole} » (${request.reference}) est en attente de validation finale. Elle sera traitée dans les 24H.\n\nSans action de votre part ou validation de notre part dans ce délai, la demande pourrait être classée.\n\nCordialement,\nL'équipe MégafixaEduc Pro`;
+        waMessage = (motif && String(motif).trim()) ? `⏳ ${motif}` : `⏳ Bonjour ${request.demandeur_nom}, votre demande pour « ${request.nom_ecole} » est en attente (24H). Elle sera traitée très prochainement.`;
+      } else if (type === 'custom_warning') {
+        const cleanCustom = String(motif || '').trim();
+        if (!cleanCustom) {
+          return res.status(400).json({ error: "Veuillez saisir un message d'avertissement personnalisé." });
+        }
+        subject = `⚠️ Avertissement concernant votre demande d'école (${request.reference}) - ${request.nom_ecole}`;
+        message = `Bonjour ${request.demandeur_nom},\n\nConcernant votre demande pour l'établissement « ${request.nom_ecole} » (Réf: ${request.reference}) :\n\n${cleanCustom}\n\nCordialement,\nL'équipe MégafixaEduc Pro`;
+        waMessage = `⚠️ ${cleanCustom}`;
       } else {
         return res.status(400).json({ error: "Type de notification invalide." });
       }
@@ -32151,13 +32600,39 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       saveLocalCheckpointSync();
       saveCheckpoint('notice_school_request').catch(() => {});
 
-      // Send Email
-      sendMailWithFallback({ to: request.demandeur_email, subject, text: message }).catch(() => {});
-      
+      // Send Email to both school email (if added) and promoter personal email via Brevo / SMTP
+      const recipients = getSchoolRequestRecipients(request);
+      const mailRes = recipients.length > 0
+        ? await sendMailWithFallback({
+            to: recipients,
+            subject,
+            text: message,
+            html: `<div style="font-family:sans-serif;padding:24px;background:#f8fafc;border-radius:16px;max-width:560px;margin:auto;">
+              <h2 style="color:#b45309;margin-top:0;">Message concernant votre demande (${request.reference})</h2>
+              <p style="color:#334155;font-size:14px;line-height:1.6;">${message.replace(/\n/g, '<br>')}</p>
+              <hr style="border:none;border-top:1px solid #e2e8f0;margin:20px 0;" />
+              <p style="color:#64748b;font-size:12px;">Suivre votre dossier : <a href="${APP_URL}/school-request?ref=${request.reference}">${APP_URL}/school-request?ref=${request.reference}</a></p>
+            </div>`
+          }).catch((e: any) => ({ success: false, simulated: false, error: e?.message }))
+        : { success: false, simulated: false, error: "Aucun email valide sur ce dossier." };
+
       // Send WhatsApp
       sendWhatsAppSimulation({ to: request.demandeur_whatsapp || request.demandeur_telephone, message: waMessage, reference: request.reference }).catch(() => {});
 
-      res.json({ success: true, message: "Notification envoyée avec succès au demandeur." });
+      res.json({
+        success: true,
+        emailStatus: {
+          sent: Boolean(mailRes.success && !mailRes.simulated),
+          simulated: Boolean(mailRes.simulated),
+          error: mailRes.error,
+          recipients
+        },
+        message: mailRes.success && !mailRes.simulated
+          ? `Avertissement envoyé par email (${recipients.join(', ')}) !`
+          : mailRes.simulated
+          ? "Notification enregistrée (mode simulation email — configurez votre clé Brevo dans Paramètres)."
+          : `Notification enregistrée mais l'envoi d'email a échoué : ${mailRes.error || 'Erreur SMTP/Brevo'}`
+      });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -32235,7 +32710,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
     }
   });
 
-  app.post("/api/super-admin/school-requests/:id/reject", authenticateToken, requireSuperAdmin, (req, res) => {
+  app.post("/api/super-admin/school-requests/:id/reject", authenticateToken, requireSuperAdmin, async (req, res) => {
     try {
       const requestId = parseInt(req.params.id, 10);
       const { motif_rejet } = req.body || {};
@@ -32245,36 +32720,53 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         return res.status(404).json({ error: "Demande introuvable." });
       }
 
+      const finalReason = motif_rejet || 'Informations incomplètes ou paiement non constaté.';
       db.prepare(`
         UPDATE school_creation_requests
         SET statut = 'rejected',
               motif_rejet = ?,
               updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
-      `).run(motif_rejet || 'Informations incomplètes ou paiement non constaté.', requestId);
+      `).run(finalReason, requestId);
 
       saveLocalCheckpointSync();
       saveCheckpoint('reject_school_request').catch(() => {});
 
-      // Notify applicant by email if possible
-      try {
-        sendMailWithFallback({
-          to: request.demandeur_email,
-          subject: `Information concernant votre demande d'ouverture d'école - ${request.reference}`,
-          text: `Bonjour ${request.demandeur_nom},\n\nVotre demande pour « ${request.nom_ecole} » n'a pas pu être validée pour le motif suivant :\n${motif_rejet || 'Paiement non constaté ou pièces incomplètes.'}\n\nVeuillez contacter notre support au (+229) 0161107918 ou par WhatsApp pour assistance.\n\nL'équipe MégafixaEduc Pro`,
-          html: `<div style="font-family:sans-serif;padding:24px;background:#f8fafc;border-radius:16px;max-width:560px;margin:auto;">
-            <h2 style="color:#e11d48;margin-top:0;">Statut de votre demande : Non validée</h2>
-            <p style="color:#334155;font-size:14px;line-height:1.6;">Bonjour <strong>${request.demandeur_nom}</strong>,</p>
-            <p style="color:#334155;font-size:14px;line-height:1.6;">Votre demande pour l'établissement <strong>${request.nom_ecole}</strong> (Réf: ${request.reference}) n'a pas pu aboutir pour le motif suivant :</p>
-            <div style="background:#fff1f2;border:1px solid #fecdd3;color:#be123c;padding:14px;border-radius:10px;font-size:13px;margin:16px 0;">
-              ${motif_rejet || 'Informations incomplètes ou paiement non confirmé.'}
-            </div>
-            <p style="color:#64748b;font-size:12px;">Vous pouvez contacter directement notre équipe au (+229) 0161107918 ou par WhatsApp pour régulariser votre dossier.</p>
-          </div>`
-        }).catch(e => console.warn(e));
-      } catch (e) {}
+      // Notify BOTH school email (if added) and promoter personal email via Brevo / SMTP
+      const rejectRecipients = getSchoolRequestRecipients(request);
+      let rejectEmailStatus: any = { sent: false, simulated: false, recipients: rejectRecipients };
+      if (rejectRecipients.length > 0) {
+        try {
+          const mailRes = await sendMailWithFallback({
+            to: rejectRecipients,
+            subject: `Information concernant votre demande d'ouverture d'école - ${request.reference}`,
+            text: `Bonjour ${request.demandeur_nom},\n\nVotre demande pour « ${request.nom_ecole} » (Réf: ${request.reference}) n'a pas pu être validée pour le motif suivant :\n${finalReason}\n\nVous pouvez déposer une réclamation ou contacter notre support au (+229) 0161107918 ou par WhatsApp.\n\nL'équipe MégafixaEduc Pro`,
+            html: `<div style="font-family:sans-serif;padding:24px;background:#f8fafc;border-radius:16px;max-width:560px;margin:auto;">
+              <h2 style="color:#e11d48;margin-top:0;">Statut de votre demande : Non validée</h2>
+              <p style="color:#334155;font-size:14px;line-height:1.6;">Bonjour <strong>${request.demandeur_nom}</strong>,</p>
+              <p style="color:#334155;font-size:14px;line-height:1.6;">Votre demande pour l'établissement <strong>${request.nom_ecole}</strong> (Réf: ${request.reference}) n'a pas pu aboutir pour le motif suivant :</p>
+              <div style="background:#fff1f2;border:1px solid #fecdd3;color:#be123c;padding:14px;border-radius:10px;font-size:13px;margin:16px 0;">
+                ${finalReason}
+              </div>
+              <p style="color:#64748b;font-size:12px;">Vous pouvez déposer une réclamation directement sur : <a href="${APP_URL}/school-request?ref=${request.reference}&action=complaint">${APP_URL}/school-request?ref=${request.reference}&action=complaint</a> ou contacter notre équipe au (+229) 0161107918.</p>
+            </div>`
+          });
+          rejectEmailStatus = {
+            sent: Boolean(mailRes.success && !mailRes.simulated),
+            simulated: Boolean(mailRes.simulated),
+            error: mailRes.error,
+            recipients: rejectRecipients
+          };
+        } catch (e: any) {
+          rejectEmailStatus = { sent: false, simulated: false, error: e?.message, recipients: rejectRecipients };
+        }
+      }
 
-      res.json({ success: true, message: "La demande a été rejetée." });
+      res.json({
+        success: true,
+        emailStatus: rejectEmailStatus,
+        message: "La demande a été rejetée et le demandeur a été notifié."
+      });
     } catch (err: any) {
       res.status(500).json({ error: "Erreur lors du rejet de la demande : " + (err.message || err) });
     }
@@ -32441,6 +32933,18 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
           settingsMap[s.key] = s.value;
         }
       });
+
+      const secretKeys = [
+        'brevo_api_key', 'smtp_pass', 'sms_api_key', 'sms_auth_token',
+        'whatsapp_auth_token', 'whatsapp_api_key', 'fedapay_secret_key', 'openai_api_key'
+      ];
+      for (const sk of secretKeys) {
+        const hasVal = Boolean(settingsMap[sk] && String(settingsMap[sk]).trim() !== '');
+        settingsMap[`has_${sk}`] = hasVal || (sk === 'brevo_api_key' && Boolean(process.env.BREVO_API_KEY)) || (sk === 'smtp_pass' && Boolean(process.env.SMTP_PASS));
+        if (hasVal) {
+          settingsMap[sk] = '••••••••';
+        }
+      }
       res.json(settingsMap);
     } catch (err) {
       res.status(500).json({ error: "Erreur lors de la récupération des paramètres." });
@@ -32449,14 +32953,26 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
 
   app.post("/api/super-admin/settings", authenticateToken, requireSuperAdmin, (req, res) => {
     try {
-      const updates = req.body;
+      const updates = req.body || {};
+      const secretKeys = new Set([
+        'brevo_api_key', 'smtp_pass', 'sms_api_key', 'sms_auth_token',
+        'whatsapp_auth_token', 'whatsapp_api_key', 'fedapay_secret_key', 'openai_api_key'
+      ]);
       const stmtSaas = db.prepare("INSERT OR REPLACE INTO saas_settings (key, value) VALUES (?, ?)");
       const stmtSuper = db.prepare("INSERT OR REPLACE INTO super_admin_settings (key, value) VALUES (?, ?)");
       for (const [key, value] of Object.entries(updates)) {
+        if (key.startsWith('has_')) continue;
         const valStr = typeof value === 'string' ? value : JSON.stringify(value);
+        // Never overwrite stored secret keys with masked placeholder strings
+        if (secretKeys.has(key) && (!valStr.trim() || /^[•*]+$/.test(valStr.trim()))) {
+          continue;
+        }
         stmtSaas.run(key, valStr);
         stmtSuper.run(key, valStr);
       }
+
+      saveLocalCheckpointSync();
+      saveCheckpoint('super_admin_settings').catch(() => {});
       res.json({ success: true });
     } catch (err) {
       res.status(500).json({ error: "Erreur lors de la mise à jour des paramètres." });

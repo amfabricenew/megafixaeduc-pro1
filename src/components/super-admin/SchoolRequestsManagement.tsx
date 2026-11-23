@@ -163,7 +163,11 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Erreur d'envoi");
 
-      toast.success("Notification envoyée avec succès !");
+      if (data?.emailStatus && !data.emailStatus.sent) {
+        toast(data.message || "Notification enregistrée.", { icon: '⚠️' });
+      } else {
+        toast.success(data.message || "Notification envoyée avec succès !");
+      }
       setNotifyingRequest(null);
       setNoticeMotif('');
       fetchData();
@@ -205,7 +209,6 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
 
   // Open Approval Modal
   const handleOpenApprove = (req: any) => {
-    const randomSuffix = Math.random().toString(36).substring(2, 6).toLowerCase();
     const cleanCode = `MF-${req.nom_ecole.substring(0, 3).toUpperCase().replace(/[^A-Z]/g, 'SCH')}-${Math.random().toString(36).substring(2, 5).toUpperCase()}`;
 
     const requestedLower = (req.plan_souhaite || '').toLowerCase().trim();
@@ -218,7 +221,7 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
 
     setApproveForm({
       code_ecole: cleanCode,
-      custom_password: `Edu2026!${randomSuffix}`,
+      custom_password: '',
       plan_abonnement: matchedPlan?.name || req.plan_souhaite || fallbackPlan?.name || '',
       duree_mois: '12',
       admin_notes: 'Demande validée et compte école configuré avec succès.'
@@ -248,7 +251,10 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
       }
 
       toast.success(data.message || "Établissement validé et compte créé !");
-      setApprovedCredentialsResult(data.credentials);
+      setApprovedCredentialsResult({
+        ...data.credentials,
+        emailStatus: data.emailStatus
+      });
       fetchData();
       if (onSchoolApproved) onSchoolApproved();
       syncCloudVaultWithFirestore().catch(() => {});
@@ -698,18 +704,31 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
                 <p className="text-[10px] text-slate-500">Informer que le dossier sera traité prochainement.</p>
               </button>
 
-              <div className="pt-2 space-y-1.5">
+              <div className="pt-2 space-y-2">
                 <label className="text-[10px] font-black uppercase tracking-wider text-slate-400">
-                  Motif ou message personnalisé (optionnel)
+                  Motif ou message d'avertissement personnalisé
                 </label>
                 <textarea
                   rows={3}
                   value={noticeMotif}
                   onChange={(e) => setNoticeMotif(e.target.value)}
-                  placeholder="Saisissez ici un message spécifique si besoin..."
+                  placeholder="Saisissez ici un avertissement spécifique ou des instructions..."
                   className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
                 />
-                <p className="text-[9px] text-slate-400 italic">Si vide, un message type sera envoyé selon l'action choisie.</p>
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-[9px] text-slate-400 italic">
+                    Envoyé à l'email de l'école (si renseigné) et à l'email du promoteur.
+                  </p>
+                  <button
+                    type="button"
+                    disabled={submittingNotice || !noticeMotif.trim()}
+                    onClick={() => handleSendNotice(notifyingRequest.id, 'custom_warning')}
+                    className="px-3.5 py-2 bg-amber-600 hover:bg-amber-700 disabled:opacity-40 text-white font-bold text-[11px] rounded-xl flex items-center gap-1.5 shrink-0 cursor-pointer transition-all"
+                  >
+                    <Send size={12} />
+                    <span>Envoyer avertissement</span>
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -776,16 +795,35 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
                     <CheckCircle2 size={18} className="text-emerald-600" />
                     <span>Compte école initialisé avec succès !</span>
                   </p>
-                  <p className="text-xs text-emerald-800">Les accès ont été envoyés par Email et WhatsApp.</p>
+                  {approvedCredentialsResult.emailStatus?.sent ? (
+                    <p className="text-xs text-emerald-800">
+                      Les accès sécurisés ont été envoyés par email à :{' '}
+                      <strong>{(approvedCredentialsResult.emailStatus.recipients || []).join(', ')}</strong>.
+                    </p>
+                  ) : (
+                    <p className="text-xs text-amber-800">
+                      Compte créé (email en mode simulation ou non envoyé : {approvedCredentialsResult.emailStatus?.error || 'vérifiez la configuration Brevo'}). Transmettez ces identifiants ci-dessous :
+                    </p>
+                  )}
                 </div>
                 <div className="p-4 bg-slate-900 rounded-2xl text-white space-y-3 font-mono text-xs">
                   <div className="flex justify-between items-center pb-2 border-b border-slate-800">
                     <span className="text-slate-400">Code École :</span>
                     <span className="font-bold text-emerald-400">{approvedCredentialsResult.code_ecole}</span>
                   </div>
-                  <div className="flex justify-between items-center pb-2 border-b border-slate-800">
-                    <span className="text-slate-400">Mot de passe :</span>
-                    <span className="font-bold text-amber-400">{approvedCredentialsResult.default_password}</span>
+                  <div className="flex justify-between items-center pb-2 border-b border-slate-800 gap-2">
+                    <span className="text-slate-400">Mot de passe unique :</span>
+                    <div className="flex items-center gap-2">
+                      <span className="font-bold text-amber-400 select-all">{approvedCredentialsResult.default_password}</span>
+                      <button
+                        type="button"
+                        onClick={() => copyToClipboard(approvedCredentialsResult.default_password, 'Mot de passe')}
+                        className="p-1 bg-slate-800 hover:bg-slate-700 rounded text-slate-200"
+                        title="Copier le mot de passe"
+                      >
+                        {copiedField === 'Mot de passe' ? <Check size={12} className="text-emerald-400" /> : <Copy size={12} />}
+                      </button>
+                    </div>
                   </div>
                 </div>
                 <button onClick={() => { setApprovingRequest(null); setApprovedCredentialsResult(null); }} className="w-full py-3 bg-slate-900 text-white font-bold text-xs rounded-xl shadow-lg">Terminer</button>
@@ -798,8 +836,17 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
                     <input type="text" value={approveForm.code_ecole} onChange={(e) => setApproveForm({ ...approveForm, code_ecole: e.target.value.toUpperCase() })} className="w-full px-3.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono font-bold" />
                   </div>
                   <div className="space-y-1">
-                    <label className="text-xs font-bold text-slate-700">Mot de passe initial généré</label>
-                    <input type="text" value={approveForm.custom_password} onChange={(e) => setApproveForm({ ...approveForm, custom_password: e.target.value })} className="w-full px-3.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono font-bold" />
+                    <label className="text-xs font-bold text-slate-700">Mot de passe initial (optionnel)</label>
+                    <input
+                      type="text"
+                      value={approveForm.custom_password}
+                      onChange={(e) => setApproveForm({ ...approveForm, custom_password: e.target.value })}
+                      placeholder="Laissez vide : mot de passe unique 16 car. auto-généré par le serveur"
+                      className="w-full px-3.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono font-semibold"
+                    />
+                    <p className="text-[10px] text-slate-400">
+                      Si vide (recommandé), un mot de passe aléatoire unique et robuste de 16 caractères est généré côté serveur.
+                    </p>
                   </div>
                   <div className="grid grid-cols-2 gap-3">
                     <div className="space-y-1">
