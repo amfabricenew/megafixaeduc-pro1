@@ -18,6 +18,7 @@ import {
   MessageCircle
 } from 'lucide-react';
 import toast from 'react-hot-toast';
+import { apiFetch } from '../../utils/api';
 
 interface SchoolMessagingModalProps {
   schoolId: number | null;
@@ -80,6 +81,14 @@ export default function SchoolMessagingModal({
 
   // Global Defaults Info
   const [globalDefaults, setGlobalDefaults] = useState<any>(null);
+  const [secretFlags, setSecretFlags] = useState({
+    has_brevo_api_key: false,
+    has_smtp_pass: false,
+    has_sms_api_key: false,
+    has_sms_auth_token: false,
+    has_wa_api_key: false,
+    has_wa_auth_token: false
+  });
 
   // Test states
   const [testEmail, setTestEmail] = useState('');
@@ -109,24 +118,29 @@ export default function SchoolMessagingModal({
     if (!schoolId) return;
     try {
       setLoading(true);
-      const token = localStorage.getItem('token');
-      const res = await fetch(`/api/super-admin/schools/${schoolId}/messaging-config`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
+      const res = await apiFetch(`/api/super-admin/schools/${schoolId}/messaging-config`);
       if (!res.ok) throw new Error("Impossible de charger la configuration.");
 
       const data = await res.json();
       setSchoolData(data.school);
       setGlobalDefaults(data.globalDefaults);
+      setSecretFlags({
+        has_brevo_api_key: Boolean(data.smtp?.has_brevo_api_key),
+        has_smtp_pass: Boolean(data.smtp?.has_smtp_pass),
+        has_sms_api_key: Boolean(data.sms?.has_api_key),
+        has_sms_auth_token: Boolean(data.sms?.has_auth_token),
+        has_wa_api_key: Boolean(data.whatsapp?.has_api_key),
+        has_wa_auth_token: Boolean(data.whatsapp?.has_auth_token)
+      });
 
       setSmtpForm({
         custom_smtp_enabled: Boolean(data.smtp?.custom_smtp_enabled),
         email_provider: data.smtp?.email_provider || 'smtp',
-        brevo_api_key: '',
+        brevo_api_key: data.smtp?.brevo_api_key || '',
         smtp_host: data.smtp?.smtp_host || '',
         smtp_port: data.smtp?.smtp_port || '587',
         smtp_user: data.smtp?.smtp_user || '',
-        smtp_pass: '', // Don't expose password plain
+        smtp_pass: data.smtp?.smtp_pass || '',
         smtp_secure: String(data.smtp?.smtp_secure || 'false'),
         email_from: data.smtp?.email_from || ''
       });
@@ -136,9 +150,9 @@ export default function SchoolMessagingModal({
         provider: data.sms?.provider || 'simulation',
         sender_number_or_name: data.sms?.sender_number_or_name || 'MEGAFIXA',
         account_sid: data.sms?.account_sid || '',
-        auth_token: '', // Don't expose token plain
+        auth_token: data.sms?.auth_token || '',
         api_url: data.sms?.api_url || '',
-        api_key: '',
+        api_key: data.sms?.api_key || '',
         credit_balance: data.sms?.credit_balance ?? 1000,
         is_active: data.sms?.is_active ?? 1
       });
@@ -148,11 +162,11 @@ export default function SchoolMessagingModal({
         provider: data.whatsapp?.provider || 'simulation',
         is_active: data.whatsapp?.is_active ?? 1,
         account_sid: data.whatsapp?.account_sid || '',
-        auth_token: '',
+        auth_token: data.whatsapp?.auth_token || '',
         phone_number_id: data.whatsapp?.phone_number_id || '',
         sender_number: data.whatsapp?.sender_number || '',
         api_url: data.whatsapp?.api_url || '',
-        api_key: ''
+        api_key: data.whatsapp?.api_key || ''
       });
 
       setTestEmail(data.school?.email || '');
@@ -169,13 +183,9 @@ export default function SchoolMessagingModal({
     if (!schoolId) return;
     try {
       setSaving(true);
-      const token = localStorage.getItem('token');
-      const res = await fetch(`/api/super-admin/schools/${schoolId}/messaging-config`, {
+      const res = await apiFetch(`/api/super-admin/schools/${schoolId}/messaging-config`, {
         method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           smtp: smtpForm,
           sms: smsForm,
@@ -206,13 +216,9 @@ export default function SchoolMessagingModal({
     try {
       setTestingEmail(true);
       setTestEmailResult(null);
-      const token = localStorage.getItem('token');
-      const res = await fetch(`/api/super-admin/schools/${schoolId}/test-smtp`, {
+      const res = await apiFetch(`/api/super-admin/schools/${schoolId}/test-smtp`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           testEmail,
           overrideConfig: smtpForm.custom_smtp_enabled ? {
@@ -252,14 +258,21 @@ export default function SchoolMessagingModal({
     try {
       setTestingSms(true);
       setTestSmsResult(null);
-      const token = localStorage.getItem('token');
-      const res = await fetch(`/api/super-admin/schools/${schoolId}/test-sms`, {
+      const res = await apiFetch(`/api/super-admin/schools/${schoolId}/test-sms`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify({ testPhone })
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          testPhone,
+          overrideConfig: smsForm.custom_sms_enabled ? {
+            custom_sms_enabled: true,
+            sms_provider: smsForm.provider,
+            sms_sender_id: smsForm.sender_number_or_name,
+            account_sid: smsForm.account_sid,
+            sms_auth_token: smsForm.auth_token,
+            api_url: smsForm.api_url,
+            sms_api_key: smsForm.api_key
+          } : undefined
+        })
       });
 
       const data = await res.json();
@@ -268,7 +281,7 @@ export default function SchoolMessagingModal({
         toast.success(data.message);
       } else {
         setTestSmsResult({ success: false, message: data.error || data.message || "Échec d'envoi du SMS." });
-        toast.error(data.error || "Échec du test SMS");
+        toast.error(data.error || data.message || "Échec du test SMS");
       }
     } catch (err: any) {
       setTestSmsResult({ success: false, message: err.message });
@@ -286,14 +299,22 @@ export default function SchoolMessagingModal({
     try {
       setTestingWhatsapp(true);
       setTestWhatsappResult(null);
-      const token = localStorage.getItem('token');
-      const res = await fetch(`/api/super-admin/schools/${schoolId}/test-whatsapp`, {
+      const res = await apiFetch(`/api/super-admin/schools/${schoolId}/test-whatsapp`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify({ testPhone: testWhatsappPhone })
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          testPhone: testWhatsappPhone,
+          overrideConfig: whatsappForm.custom_whatsapp_enabled ? {
+            custom_whatsapp_enabled: true,
+            whatsapp_provider: whatsappForm.provider,
+            whatsapp_account_sid: whatsappForm.account_sid,
+            whatsapp_auth_token: whatsappForm.auth_token,
+            whatsapp_phone_number_id: whatsappForm.phone_number_id,
+            whatsapp_sender_number: whatsappForm.sender_number,
+            whatsapp_api_url: whatsappForm.api_url,
+            whatsapp_api_key: whatsappForm.api_key
+          } : undefined
+        })
       });
 
       const data = await res.json();
@@ -302,7 +323,7 @@ export default function SchoolMessagingModal({
         toast.success(data.message);
       } else {
         setTestWhatsappResult({ success: false, message: data.error || data.message || "Échec d'envoi WhatsApp." });
-        toast.error(data.error || "Échec du test WhatsApp");
+        toast.error(data.error || data.message || "Échec du test WhatsApp");
       }
     } catch (err: any) {
       setTestWhatsappResult({ success: false, message: err.message });
@@ -514,7 +535,14 @@ export default function SchoolMessagingModal({
                       {smtpForm.email_provider === 'brevo_api' ? (
                         <div className="grid grid-cols-1 gap-4">
                           <div className="space-y-1.5">
-                            <label className="text-xs font-bold text-slate-700">Clé API Brevo (xkeysib-...)</label>
+                            <div className="flex items-center justify-between gap-2">
+                              <label className="text-xs font-bold text-slate-700">Clé API Brevo (xkeysib-...)</label>
+                              {(secretFlags.has_brevo_api_key || smtpForm.brevo_api_key === '••••••••') && (
+                                <span className="text-[10px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">
+                                  ✓ Enregistré en sécurité
+                                </span>
+                              )}
+                            </div>
                             <input
                               type="password"
                               placeholder="Laisser vide pour conserver la clé actuelle"
@@ -576,9 +604,16 @@ export default function SchoolMessagingModal({
                             />
                           </div>
                           <div className="space-y-1.5">
-                            <label className="text-xs font-bold text-slate-700">
-                              Mot de passe SMTP / Clé SMTP Brevo
-                            </label>
+                            <div className="flex items-center justify-between gap-2">
+                              <label className="text-xs font-bold text-slate-700">
+                                Mot de passe SMTP / Clé SMTP Brevo
+                              </label>
+                              {(secretFlags.has_smtp_pass || smtpForm.smtp_pass === '••••••••') && (
+                                <span className="text-[10px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">
+                                  ✓ Enregistré en sécurité
+                                </span>
+                              )}
+                            </div>
                             <input
                               type="password"
                               placeholder="Laisser vide pour conserver l'actuel"
@@ -734,10 +769,17 @@ export default function SchoolMessagingModal({
 
                         {smsForm.provider === 'brevo' && (
                           <div className="space-y-1.5 sm:col-span-2">
-                            <label className="text-xs font-bold text-slate-700">Clé API Brevo (xkeysib-...)</label>
+                            <div className="flex items-center justify-between gap-2">
+                              <label className="text-xs font-bold text-slate-700">Clé API Brevo (xkeysib-...)</label>
+                              {(secretFlags.has_sms_api_key || smsForm.api_key === '••••••••') && (
+                                <span className="text-[10px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">
+                                  ✓ Enregistré en sécurité
+                                </span>
+                              )}
+                            </div>
                             <input
                               type="password"
-                              placeholder="Laisser vide pour conserver la clé actuelle"
+                              placeholder="Laisser vide pour conserver la clé actuelle ou utiliser la clé globale"
                               value={smsForm.api_key}
                               onChange={(e) => setSmsForm({ ...smsForm, api_key: e.target.value })}
                               className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-xs focus:ring-2 focus:ring-emerald-500/20 outline-none font-mono"
@@ -938,10 +980,17 @@ export default function SchoolMessagingModal({
 
                         {whatsappForm.provider === 'brevo_whatsapp' && (
                           <div className="space-y-1.5 sm:col-span-2">
-                            <label className="text-xs font-bold text-slate-700">Clé API Brevo (xkeysib-...)</label>
+                            <div className="flex items-center justify-between gap-2">
+                              <label className="text-xs font-bold text-slate-700">Clé API Brevo (xkeysib-...)</label>
+                              {(secretFlags.has_wa_api_key || whatsappForm.api_key === '••••••••') && (
+                                <span className="text-[10px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">
+                                  ✓ Enregistré en sécurité
+                                </span>
+                              )}
+                            </div>
                             <input
                               type="password"
-                              placeholder="Laisser vide pour conserver la clé actuelle"
+                              placeholder="Laisser vide pour conserver la clé actuelle ou utiliser la clé globale"
                               value={whatsappForm.api_key}
                               onChange={(e) => setWhatsappForm({ ...whatsappForm, api_key: e.target.value })}
                               className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-xs font-mono outline-none"

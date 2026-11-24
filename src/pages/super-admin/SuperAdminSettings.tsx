@@ -33,6 +33,7 @@ import {
 } from 'lucide-react';
 import SchoolMessagingModal from '../../components/super-admin/SchoolMessagingModal';
 import { syncCloudVaultWithFirestore } from '../../utils/cloudVaultSync';
+import { apiFetch } from '../../utils/api';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import toast from 'react-hot-toast';
@@ -151,9 +152,7 @@ export default function SuperAdminSettings() {
   const fetchSchoolsMessaging = async () => {
     try {
       setLoadingSchoolsMessaging(true);
-      const res = await fetch('/api/super-admin/messaging/schools', {
-        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
-      });
+      const res = await apiFetch('/api/super-admin/messaging/schools');
       if (res.ok) {
         const data = await res.json();
         setSchoolsMessagingList(data.schools || []);
@@ -176,10 +175,7 @@ export default function SuperAdminSettings() {
 
   const fetchPlans = async () => {
     try {
-      const token = localStorage.getItem('token');
-      const response = await fetch('/api/super-admin/plans', {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
+      const response = await apiFetch('/api/super-admin/plans');
       if (response.ok) {
         const data = await response.json();
         if (Array.isArray(data)) {
@@ -193,9 +189,7 @@ export default function SuperAdminSettings() {
 
   const fetchSettings = async () => {
     try {
-      const response = await fetch('/api/super-admin/settings', {
-        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
-      });
+      const response = await apiFetch('/api/super-admin/settings');
       if (response.ok) {
         const data = await response.json();
         setSettings(data);
@@ -252,9 +246,19 @@ export default function SuperAdminSettings() {
   const handleSave = async (customSettings?: any, customMethods?: any[], customLinks?: any) => {
     setSaving(true);
     try {
+      // Ignore React SyntheticEvent / DOM events when passed accidentally by an onClick handler
+      const safeCustomSettings =
+        customSettings &&
+        typeof customSettings === 'object' &&
+        !('nativeEvent' in customSettings) &&
+        typeof customSettings.preventDefault !== 'function' &&
+        !('currentTarget' in customSettings)
+          ? customSettings
+          : undefined;
+
       const currentMethods = customMethods !== undefined ? customMethods : paymentMethods;
       const currentLinks = customLinks !== undefined ? customLinks : planPaymentLinks;
-      const rawSettings = { ...(customSettings || settings) };
+      const rawSettings = { ...(safeCustomSettings || settings) };
       for (const key of Object.keys(rawSettings)) {
         if (key.startsWith('has_') || key === 'super_admin_config_customized' || key === 'super_admin_config_updated_at') {
           delete rawSettings[key];
@@ -265,12 +269,9 @@ export default function SuperAdminSettings() {
         payment_methods: JSON.stringify(currentMethods),
         plan_payment_links: JSON.stringify(currentLinks)
       };
-      const response = await fetch('/api/super-admin/settings', {
+      const response = await apiFetch('/api/super-admin/settings', {
         method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('token')}`
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
       if (response.ok) {
@@ -279,10 +280,11 @@ export default function SuperAdminSettings() {
         window.dispatchEvent(new Event('school_subscription_updated'));
         syncCloudVaultWithFirestore({ allowShrink: true }).catch(() => {});
       } else {
-        toast.error("Erreur lors de l'enregistrement");
+        const errData = await response.json().catch(() => null);
+        toast.error(errData?.error || "Erreur lors de l'enregistrement");
       }
-    } catch (error) {
-      toast.error("Erreur lors de l'enregistrement");
+    } catch (error: any) {
+      toast.error(error?.message || "Erreur lors de l'enregistrement");
     } finally {
       setSaving(false);
     }
@@ -298,12 +300,9 @@ export default function SuperAdminSettings() {
   const handleTestEmail = async () => {
     setTestEmailLoading(true);
     try {
-      const response = await fetch('/api/super-admin/test-email', {
+      const response = await apiFetch('/api/super-admin/test-email', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('token')}`
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           toEmail: testEmailAddress || undefined,
           overrideConfig: {
@@ -326,7 +325,7 @@ export default function SuperAdminSettings() {
           toast.success(data.message || "Email de test envoyé avec succès !");
         }
       } else {
-        toast.error(data.error || "Échec de l'envoi de l'email de test");
+        toast.error(data.error || data.message || "Échec de l'envoi de l'email de test");
       }
     } catch (err: any) {
       toast.error(err.message || "Erreur lors du test d'envoi");
@@ -342,13 +341,19 @@ export default function SuperAdminSettings() {
     }
     setTestSmsLoading(true);
     try {
-      const response = await fetch('/api/super-admin/test-sms', {
+      const response = await apiFetch('/api/super-admin/test-sms', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('token')}`
-        },
-        body: JSON.stringify({ phone: testSmsPhone })
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          phone: testSmsPhone,
+          overrideConfig: {
+            sms_provider: settings.sms_provider,
+            sms_api_key: settings.sms_api_key,
+            sms_auth_token: settings.sms_auth_token,
+            sms_sender_id: settings.sms_sender_id,
+            brevo_api_key: settings.brevo_api_key
+          }
+        })
       });
       const data = await response.json();
       if (response.ok && data.success) {
@@ -358,7 +363,7 @@ export default function SuperAdminSettings() {
           toast.success(data.message || "SMS de test envoyé avec succès !");
         }
       } else {
-        toast.error(data.error || "Échec de l'envoi du SMS de test");
+        toast.error(data.error || data.message || "Échec de l'envoi du SMS de test");
       }
     } catch (err: any) {
       toast.error(err.message || "Erreur lors du test d'envoi SMS");
@@ -374,13 +379,23 @@ export default function SuperAdminSettings() {
     }
     setTestWhatsappLoading(true);
     try {
-      const response = await fetch('/api/super-admin/test-whatsapp', {
+      const response = await apiFetch('/api/super-admin/test-whatsapp', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('token')}`
-        },
-        body: JSON.stringify({ phone: testWhatsappPhone })
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          phone: testWhatsappPhone,
+          overrideConfig: {
+            whatsapp_provider: settings.whatsapp_provider,
+            whatsapp_sender_number: settings.whatsapp_sender_number,
+            support_whatsapp: settings.support_whatsapp,
+            whatsapp_api_key: settings.whatsapp_api_key,
+            whatsapp_account_sid: settings.whatsapp_account_sid,
+            whatsapp_auth_token: settings.whatsapp_auth_token,
+            whatsapp_phone_number_id: settings.whatsapp_phone_number_id,
+            whatsapp_api_url: settings.whatsapp_api_url,
+            brevo_api_key: settings.brevo_api_key
+          }
+        })
       });
       const data = await response.json();
       if (response.ok && data.success) {
@@ -390,7 +405,7 @@ export default function SuperAdminSettings() {
           toast.success(data.message || "Message WhatsApp de test envoyé avec succès !");
         }
       } else {
-        toast.error(data.error || "Échec de l'envoi WhatsApp de test");
+        toast.error(data.error || data.message || "Échec de l'envoi WhatsApp de test");
       }
     } catch (err: any) {
       toast.error(err.message || "Erreur lors du test WhatsApp");
@@ -492,7 +507,8 @@ export default function SuperAdminSettings() {
           <p className="text-slate-500">Gérez les paramètres globaux de la plateforme SaaS.</p>
         </div>
         <button 
-          onClick={handleSave}
+          type="button"
+          onClick={() => handleSave()}
           disabled={saving}
           className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-xl font-bold text-sm shadow-lg shadow-indigo-200 hover:bg-indigo-700 transition-all disabled:opacity-50"
         >
@@ -1158,16 +1174,18 @@ export default function SuperAdminSettings() {
                     </div>
                     <button
                       type="button"
-                      onClick={() => {
-                        setSettings((prev: any) => ({
-                          ...prev,
+                      onClick={async () => {
+                        const nextSettings = {
+                          ...settings,
                           email_provider: 'brevo_api',
                           sms_provider: 'brevo',
                           whatsapp_provider: 'brevo_whatsapp'
-                        }));
-                        toast.success("Brevo activé pour Email, SMS et WhatsApp ! Enregistrez pour valider.");
+                        };
+                        setSettings(nextSettings);
+                        await handleSave(nextSettings);
                       }}
-                      className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl shrink-0 transition-colors cursor-pointer"
+                      disabled={saving}
+                      className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl shrink-0 transition-colors cursor-pointer disabled:opacity-50"
                     >
                       Activer Brevo (3 canaux)
                     </button>
@@ -1199,13 +1217,20 @@ export default function SuperAdminSettings() {
                         value={settings.brevo_api_key || ''}
                         onChange={(e) => {
                           const val = e.target.value;
+                          const isBrevoKey = val.trim().startsWith('xkeysib-');
                           setSettings((prev: any) => {
                             const isDefaultHost = !prev.smtp_host || prev.smtp_host === 'smtp.gmail.com';
                             return {
                               ...prev,
                               brevo_api_key: val,
-                              ...(val.trim().startsWith('xkeysib-') && isDefaultHost && (!prev.email_provider || prev.email_provider === 'smtp')
+                              ...(isBrevoKey && isDefaultHost && (!prev.email_provider || prev.email_provider === 'smtp')
                                 ? { email_provider: 'brevo_api' }
+                                : {}),
+                              ...(isBrevoKey && (!prev.sms_provider || prev.sms_provider === 'simulation')
+                                ? { sms_provider: 'brevo' }
+                                : {}),
+                              ...(isBrevoKey && (!prev.whatsapp_provider || prev.whatsapp_provider === 'simulation')
+                                ? { whatsapp_provider: 'brevo_whatsapp' }
                                 : {})
                             };
                           });
@@ -1358,56 +1383,93 @@ export default function SuperAdminSettings() {
                   </span>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <label className="text-xs font-bold text-slate-500">Service Provider SMS</label>
-                    <select 
-                      value={settings.sms_provider || 'simulation'} 
-                      onChange={(e) => handleChange('sms_provider', e.target.value)}
-                      className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 font-medium" 
-                    >
-                      <option value="simulation">Simulation (Log console uniquement)</option>
-                      <option value="brevo">Brevo Transactional SMS (API v3)</option>
-                      <option value="twilio">Twilio (International)</option>
-                      <option value="infobip">Infobip</option>
-                      <option value="orange">Orange SMS API</option>
-                    </select>
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-xs font-bold text-slate-500">Sender ID (Nom d'expéditeur)</label>
-                    <input 
-                      type="text" 
-                      value={settings.sms_sender_id || ''} 
-                      onChange={(e) => handleChange('sms_sender_id', e.target.value)}
-                      placeholder="MEGAFIXA (Max 11 car.)"
-                      className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 font-medium" 
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-xs font-bold text-slate-500">
-                      {settings.sms_provider === 'brevo' ? 'Clé API Brevo SMS (ou laisse vide si clé globale ci-dessus)' : 'API Key / Account SID'}
-                    </label>
-                    <input 
-                      type="password" 
-                      value={settings.sms_api_key || ''} 
-                      onChange={(e) => handleChange('sms_api_key', e.target.value)}
-                      placeholder={settings.sms_provider === 'brevo' ? 'xkeysib-... (optionnel si clé Brevo globale remplie)' : 'ACxxxxxxxxxxxxxxxxxxxxxxxx'}
-                      className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm font-mono focus:ring-2 focus:ring-indigo-500/20 font-medium" 
-                    />
-                  </div>
-                  {settings.sms_provider !== 'brevo' && (
-                    <div className="space-y-2">
-                      <label className="text-xs font-bold text-slate-500">Auth Token / Secret</label>
-                      <input 
-                        type="password" 
-                        value={settings.sms_auth_token || ''} 
-                        onChange={(e) => handleChange('sms_auth_token', e.target.value)}
-                        placeholder="••••••••••••••••••••"
-                        className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 font-medium" 
-                      />
+                {(() => {
+                  const hasGlobalBrevo = Boolean(
+                    settings.has_brevo_api_key ||
+                    String(settings.brevo_api_key || '').trim().startsWith('xkeysib-') ||
+                    String(settings.sms_api_key || '').trim().startsWith('xkeysib-')
+                  );
+                  const effectiveSmsProvider =
+                    settings.sms_provider && settings.sms_provider !== 'simulation'
+                      ? settings.sms_provider
+                      : (hasGlobalBrevo ? 'brevo' : (settings.sms_provider || 'simulation'));
+
+                  return (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div className="space-y-2">
+                        <label className="text-xs font-bold text-slate-500">Service Provider SMS</label>
+                        <select 
+                          value={effectiveSmsProvider} 
+                          onChange={(e) => handleChange('sms_provider', e.target.value)}
+                          className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 font-medium" 
+                        >
+                          <option value="simulation">Simulation (Log console uniquement)</option>
+                          <option value="brevo">Brevo Transactional SMS (API v3)</option>
+                          <option value="twilio">Twilio (International)</option>
+                          <option value="infobip">Infobip</option>
+                          <option value="orange">Orange SMS API</option>
+                        </select>
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-xs font-bold text-slate-500">Sender ID (Nom d'expéditeur)</label>
+                        <input 
+                          type="text" 
+                          value={settings.sms_sender_id || ''} 
+                          onChange={(e) => handleChange('sms_sender_id', e.target.value)}
+                          placeholder="MEGAFIXA (Max 11 car.)"
+                          className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 font-medium" 
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <label className="text-xs font-bold text-slate-500">
+                            {effectiveSmsProvider === 'brevo' ? 'Clé API Brevo SMS (ou laisse vide si clé globale ci-dessus)' : 'API Key / Account SID'}
+                          </label>
+                          {(settings.has_sms_api_key || settings.sms_api_key === '••••••••') && (
+                            <span className="text-[10px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">
+                              ✓ Enregistré en sécurité
+                            </span>
+                          )}
+                        </div>
+                        <input 
+                          type="password" 
+                          value={settings.sms_api_key || ''} 
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setSettings((prev: any) => ({
+                              ...prev,
+                              sms_api_key: val,
+                              ...(val.trim().startsWith('xkeysib-') && (!prev.sms_provider || prev.sms_provider === 'simulation')
+                                ? { sms_provider: 'brevo' }
+                                : {})
+                            }));
+                          }}
+                          placeholder={effectiveSmsProvider === 'brevo' ? 'xkeysib-... (optionnel si clé Brevo globale remplie)' : 'ACxxxxxxxxxxxxxxxxxxxxxxxx'}
+                          className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm font-mono focus:ring-2 focus:ring-indigo-500/20 font-medium" 
+                        />
+                      </div>
+                      {effectiveSmsProvider !== 'brevo' && (
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <label className="text-xs font-bold text-slate-500">Auth Token / Secret</label>
+                            {(settings.has_sms_auth_token || settings.sms_auth_token === '••••••••') && (
+                              <span className="text-[10px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">
+                                ✓ Enregistré en sécurité
+                              </span>
+                            )}
+                          </div>
+                          <input 
+                            type="password" 
+                            value={settings.sms_auth_token || ''} 
+                            onChange={(e) => handleChange('sms_auth_token', e.target.value)}
+                            placeholder="••••••••••••••••••••"
+                            className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 font-medium" 
+                          />
+                        </div>
+                      )}
                     </div>
-                  )}
-                </div>
+                  );
+                })()}
 
                 <div className="p-4 rounded-2xl bg-amber-50 border border-amber-100 space-y-4">
                   <div className="space-y-2">
@@ -1458,120 +1520,171 @@ export default function SuperAdminSettings() {
                   </span>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <label className="text-xs font-bold text-slate-500">Fournisseur WhatsApp</label>
-                    <select
-                      value={settings.whatsapp_provider || 'simulation'}
-                      onChange={(e) => handleChange('whatsapp_provider', e.target.value)}
-                      className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-teal-500/20 font-medium"
-                    >
-                      <option value="simulation">Simulation (Console interne)</option>
-                      <option value="brevo_whatsapp">Brevo WhatsApp Business API (v3)</option>
-                      <option value="meta_cloud_api">Meta WhatsApp Cloud API (Officiel)</option>
-                      <option value="twilio_whatsapp">Twilio WhatsApp Business</option>
-                      <option value="custom_webhook">Webhook WhatsApp personnalisé</option>
-                    </select>
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-xs font-bold text-slate-500">Numéro expéditeur WhatsApp</label>
-                    <input
-                      type="text"
-                      value={settings.whatsapp_sender_number || ''}
-                      onChange={(e) => handleChange('whatsapp_sender_number', e.target.value)}
-                      placeholder="+2290100000000"
-                      className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-teal-500/20 font-medium"
-                    />
-                  </div>
+                {(() => {
+                  const hasGlobalBrevoWa = Boolean(
+                    settings.has_brevo_api_key ||
+                    String(settings.brevo_api_key || '').trim().startsWith('xkeysib-') ||
+                    String(settings.whatsapp_api_key || '').trim().startsWith('xkeysib-')
+                  );
+                  const effectiveWaProvider =
+                    settings.whatsapp_provider && settings.whatsapp_provider !== 'simulation'
+                      ? settings.whatsapp_provider
+                      : (hasGlobalBrevoWa ? 'brevo_whatsapp' : (settings.whatsapp_provider || 'simulation'));
 
-                  {(settings.whatsapp_provider === 'brevo_whatsapp') && (
-                    <div className="space-y-2 md:col-span-2">
-                      <label className="text-xs font-bold text-slate-500">Clé API Brevo WhatsApp (optionnel si clé Brevo globale remplie)</label>
-                      <input
-                        type="password"
-                        value={settings.whatsapp_api_key || ''}
-                        onChange={(e) => handleChange('whatsapp_api_key', e.target.value)}
-                        placeholder="xkeysib-... (repli automatique sur la clé Brevo globale)"
-                        className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm font-mono focus:ring-2 focus:ring-teal-500/20"
-                      />
+                  return (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div className="space-y-2">
+                        <label className="text-xs font-bold text-slate-500">Fournisseur WhatsApp</label>
+                        <select
+                          value={effectiveWaProvider}
+                          onChange={(e) => handleChange('whatsapp_provider', e.target.value)}
+                          className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-teal-500/20 font-medium"
+                        >
+                          <option value="simulation">Simulation (Console interne)</option>
+                          <option value="brevo_whatsapp">Brevo WhatsApp Business API (v3)</option>
+                          <option value="meta_cloud_api">Meta WhatsApp Cloud API (Officiel)</option>
+                          <option value="twilio_whatsapp">Twilio WhatsApp Business</option>
+                          <option value="custom_webhook">Webhook WhatsApp personnalisé</option>
+                        </select>
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-xs font-bold text-slate-500">Numéro expéditeur WhatsApp</label>
+                        <input
+                          type="text"
+                          value={settings.whatsapp_sender_number || ''}
+                          onChange={(e) => handleChange('whatsapp_sender_number', e.target.value)}
+                          placeholder={settings.support_whatsapp || '+2290100000000'}
+                          className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-teal-500/20 font-medium"
+                        />
+                      </div>
+
+                      {effectiveWaProvider === 'brevo_whatsapp' && (
+                        <div className="space-y-2 md:col-span-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <label className="text-xs font-bold text-slate-500">Clé API Brevo WhatsApp (optionnel si clé Brevo globale remplie)</label>
+                            {(settings.has_whatsapp_api_key || settings.whatsapp_api_key === '••••••••') && (
+                              <span className="text-[10px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">
+                                ✓ Enregistré en sécurité
+                              </span>
+                            )}
+                          </div>
+                          <input
+                            type="password"
+                            value={settings.whatsapp_api_key || ''}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setSettings((prev: any) => ({
+                                ...prev,
+                                whatsapp_api_key: val,
+                                ...(val.trim().startsWith('xkeysib-') && (!prev.whatsapp_provider || prev.whatsapp_provider === 'simulation')
+                                  ? { whatsapp_provider: 'brevo_whatsapp' }
+                                  : {})
+                              }));
+                            }}
+                            placeholder="xkeysib-... (repli automatique sur la clé Brevo globale)"
+                            className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm font-mono focus:ring-2 focus:ring-teal-500/20"
+                          />
+                        </div>
+                      )}
+
+                      {effectiveWaProvider === 'twilio_whatsapp' && (
+                        <>
+                          <div className="space-y-2">
+                            <label className="text-xs font-bold text-slate-500">Twilio Account SID</label>
+                            <input
+                              type="text"
+                              value={settings.whatsapp_account_sid || ''}
+                              onChange={(e) => handleChange('whatsapp_account_sid', e.target.value)}
+                              placeholder="ACxxxxxxxxxxxxxxxxxxxxxxxx"
+                              className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm font-mono focus:ring-2 focus:ring-teal-500/20"
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <div className="flex items-center justify-between gap-2">
+                              <label className="text-xs font-bold text-slate-500">Twilio Auth Token</label>
+                              {(settings.has_whatsapp_auth_token || settings.whatsapp_auth_token === '••••••••') && (
+                                <span className="text-[10px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">
+                                  ✓ Enregistré en sécurité
+                                </span>
+                              )}
+                            </div>
+                            <input
+                              type="password"
+                              value={settings.whatsapp_auth_token || ''}
+                              onChange={(e) => handleChange('whatsapp_auth_token', e.target.value)}
+                              placeholder="••••••••••••••••••••"
+                              className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm font-mono focus:ring-2 focus:ring-teal-500/20"
+                            />
+                          </div>
+                        </>
+                      )}
+
+                      {effectiveWaProvider === 'meta_cloud_api' && (
+                        <>
+                          <div className="space-y-2">
+                            <label className="text-xs font-bold text-slate-500">Meta Phone Number ID</label>
+                            <input
+                              type="text"
+                              value={settings.whatsapp_phone_number_id || ''}
+                              onChange={(e) => handleChange('whatsapp_phone_number_id', e.target.value)}
+                              placeholder="109283746512345"
+                              className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm font-mono focus:ring-2 focus:ring-teal-500/20"
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <div className="flex items-center justify-between gap-2">
+                              <label className="text-xs font-bold text-slate-500">Meta Permanent Access Token</label>
+                              {(settings.has_whatsapp_auth_token || settings.whatsapp_auth_token === '••••••••') && (
+                                <span className="text-[10px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">
+                                  ✓ Enregistré en sécurité
+                                </span>
+                              )}
+                            </div>
+                            <input
+                              type="password"
+                              value={settings.whatsapp_auth_token || ''}
+                              onChange={(e) => handleChange('whatsapp_auth_token', e.target.value)}
+                              placeholder="EAAG..."
+                              className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm font-mono focus:ring-2 focus:ring-teal-500/20"
+                            />
+                          </div>
+                        </>
+                      )}
+
+                      {effectiveWaProvider === 'custom_webhook' && (
+                        <>
+                          <div className="space-y-2">
+                            <label className="text-xs font-bold text-slate-500">URL Webhook WhatsApp (POST)</label>
+                            <input
+                              type="text"
+                              value={settings.whatsapp_api_url || ''}
+                              onChange={(e) => handleChange('whatsapp_api_url', e.target.value)}
+                              placeholder="https://api.whatsapp-gateway.com/send"
+                              className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm font-mono focus:ring-2 focus:ring-teal-500/20"
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <div className="flex items-center justify-between gap-2">
+                              <label className="text-xs font-bold text-slate-500">Clé API / Bearer Token</label>
+                              {(settings.has_whatsapp_api_key || settings.whatsapp_api_key === '••••••••') && (
+                                <span className="text-[10px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">
+                                  ✓ Enregistré en sécurité
+                                </span>
+                              )}
+                            </div>
+                            <input
+                              type="password"
+                              value={settings.whatsapp_api_key || ''}
+                              onChange={(e) => handleChange('whatsapp_api_key', e.target.value)}
+                              placeholder="••••••••••••••••••••"
+                              className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm font-mono focus:ring-2 focus:ring-teal-500/20"
+                            />
+                          </div>
+                        </>
+                      )}
                     </div>
-                  )}
-
-                  {(settings.whatsapp_provider === 'twilio_whatsapp') && (
-                    <>
-                      <div className="space-y-2">
-                        <label className="text-xs font-bold text-slate-500">Twilio Account SID</label>
-                        <input
-                          type="text"
-                          value={settings.whatsapp_account_sid || ''}
-                          onChange={(e) => handleChange('whatsapp_account_sid', e.target.value)}
-                          placeholder="ACxxxxxxxxxxxxxxxxxxxxxxxx"
-                          className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm font-mono focus:ring-2 focus:ring-teal-500/20"
-                        />
-                      </div>
-                      <div className="space-y-2">
-                        <label className="text-xs font-bold text-slate-500">Twilio Auth Token</label>
-                        <input
-                          type="password"
-                          value={settings.whatsapp_auth_token || ''}
-                          onChange={(e) => handleChange('whatsapp_auth_token', e.target.value)}
-                          placeholder="••••••••••••••••••••"
-                          className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm font-mono focus:ring-2 focus:ring-teal-500/20"
-                        />
-                      </div>
-                    </>
-                  )}
-
-                  {(settings.whatsapp_provider === 'meta_cloud_api') && (
-                    <>
-                      <div className="space-y-2">
-                        <label className="text-xs font-bold text-slate-500">Meta Phone Number ID</label>
-                        <input
-                          type="text"
-                          value={settings.whatsapp_phone_number_id || ''}
-                          onChange={(e) => handleChange('whatsapp_phone_number_id', e.target.value)}
-                          placeholder="109283746512345"
-                          className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm font-mono focus:ring-2 focus:ring-teal-500/20"
-                        />
-                      </div>
-                      <div className="space-y-2">
-                        <label className="text-xs font-bold text-slate-500">Meta Permanent Access Token</label>
-                        <input
-                          type="password"
-                          value={settings.whatsapp_auth_token || ''}
-                          onChange={(e) => handleChange('whatsapp_auth_token', e.target.value)}
-                          placeholder="EAAG..."
-                          className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm font-mono focus:ring-2 focus:ring-teal-500/20"
-                        />
-                      </div>
-                    </>
-                  )}
-
-                  {(settings.whatsapp_provider === 'custom_webhook') && (
-                    <>
-                      <div className="space-y-2">
-                        <label className="text-xs font-bold text-slate-500">URL Webhook WhatsApp (POST)</label>
-                        <input
-                          type="text"
-                          value={settings.whatsapp_api_url || ''}
-                          onChange={(e) => handleChange('whatsapp_api_url', e.target.value)}
-                          placeholder="https://api.whatsapp-gateway.com/send"
-                          className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm font-mono focus:ring-2 focus:ring-teal-500/20"
-                        />
-                      </div>
-                      <div className="space-y-2">
-                        <label className="text-xs font-bold text-slate-500">Clé API / Bearer Token</label>
-                        <input
-                          type="password"
-                          value={settings.whatsapp_api_key || ''}
-                          onChange={(e) => handleChange('whatsapp_api_key', e.target.value)}
-                          placeholder="••••••••••••••••••••"
-                          className="w-full px-4 py-2.5 bg-slate-50 border-none rounded-xl text-sm font-mono focus:ring-2 focus:ring-teal-500/20"
-                        />
-                      </div>
-                    </>
-                  )}
-                </div>
+                  );
+                })()}
 
                 <div className="p-4 rounded-2xl bg-teal-50 border border-teal-100 space-y-3">
                   <div className="flex items-center justify-between">

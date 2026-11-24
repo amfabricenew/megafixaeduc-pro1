@@ -155,6 +155,67 @@ const OFFLINE_MODE = process.env.OFFLINE_MODE === 'true';
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || (firebaseConfig as any)?.oAuthClientId;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
 const APP_URL = process.env.APP_URL || 'http://localhost:3000';
+let lastKnownPublicAppUrl = '';
+
+function isLocalOrDefaultUrl(urlStr?: string | null): boolean {
+  if (!urlStr) return true;
+  const s = String(urlStr).trim().toLowerCase();
+  if (!s) return true;
+  return (
+    s.includes('localhost') ||
+    s.includes('127.0.0.1') ||
+    s === 'https://megafixa.com' ||
+    s === 'http://megafixa.com'
+  );
+}
+
+function capturePublicOriginFromReq(req: any): void {
+  try {
+    const xfProto = String(req?.headers?.['x-forwarded-proto'] || '').split(',')[0].trim();
+    const xfHost = String(req?.headers?.['x-forwarded-host'] || '').split(',')[0].trim();
+    const hostHeader = xfHost || String(req?.headers?.host || '').trim();
+    const proto = xfProto || (hostHeader && !hostHeader.includes('localhost') && !hostHeader.startsWith('127.') ? 'https' : 'http');
+    const originHeader = String(req?.headers?.origin || '').trim();
+
+    if (originHeader && /^https?:\/\//i.test(originHeader) && !isLocalOrDefaultUrl(originHeader)) {
+      lastKnownPublicAppUrl = originHeader.replace(/\/+$/, '');
+      return;
+    }
+    if (hostHeader && !isLocalOrDefaultUrl(hostHeader)) {
+      lastKnownPublicAppUrl = `${proto}://${hostHeader}`.replace(/\/+$/, '');
+    }
+  } catch {}
+}
+
+function getEffectiveAppUrl(req?: any): string {
+  try {
+    if (req) {
+      capturePublicOriginFromReq(req);
+      const xfProto = String(req?.headers?.['x-forwarded-proto'] || '').split(',')[0].trim();
+      const xfHost = String(req?.headers?.['x-forwarded-host'] || '').split(',')[0].trim();
+      const hostHeader = xfHost || String(req?.headers?.host || '').trim();
+      const originHeader = String(req?.headers?.origin || '').trim();
+      if (originHeader && /^https?:\/\//i.test(originHeader) && !originHeader.includes('localhost')) {
+        return originHeader.replace(/\/+$/, '');
+      }
+      if (hostHeader && !hostHeader.includes('localhost')) {
+        const proto = xfProto || 'https';
+        return `${proto}://${hostHeader}`.replace(/\/+$/, '');
+      }
+    }
+    if (lastKnownPublicAppUrl) return lastKnownPublicAppUrl;
+    if (process.env.APP_URL && !isLocalOrDefaultUrl(process.env.APP_URL)) {
+      return process.env.APP_URL.replace(/\/+$/, '');
+    }
+    if (db && db.open && tableExists('super_admin_settings')) {
+      const pubRow = db.prepare("SELECT value FROM super_admin_settings WHERE key = 'public_url'").get() as any;
+      if (pubRow?.value && /^https?:\/\//i.test(String(pubRow.value).trim()) && !isLocalOrDefaultUrl(pubRow.value)) {
+        return String(pubRow.value).trim().replace(/\/+$/, '');
+      }
+    }
+  } catch {}
+  return APP_URL.replace(/\/+$/, '');
+}
 
 // Automatic build & data version tracking for cross-level auto-updates
 function computeAppBuildId(): string {
@@ -1896,16 +1957,17 @@ async function processAutoRejection() {
 
       // Send Email to both school email (if provided) and promoter email
       const autoRejectRecipients = getSchoolRequestRecipients(req);
+      const effectiveBaseUrl = getEffectiveAppUrl();
       if (autoRejectRecipients.length > 0) {
         sendMailWithFallback({
           to: autoRejectRecipients,
           subject: `⚠️ Mise à jour de votre demande d'école - ${req.nom_ecole}`,
-          text: `Bonjour ${req.demandeur_nom},\n\nNous vous informons que votre demande de création de compte pour « ${req.nom_ecole} » a été classée sans suite car elle est restée en attente pendant plus de 24 heures sans action complémentaire.\n\nSi vous estimez qu'il s'agit d'une erreur ou si vous avez déjà effectué votre paiement, vous pouvez déposer une réclamation en cliquant sur le lien ci-dessous.\n\nLien de réclamation : ${APP_URL}/school-request?ref=${req.reference}&action=complaint\n\nCordialement,\nL'équipe MégafixaEduc Pro`,
+          text: `Bonjour ${req.demandeur_nom},\n\nNous vous informons que votre demande de création de compte pour « ${req.nom_ecole} » a été classée sans suite car elle est restée en attente pendant plus de 24 heures sans action complémentaire.\n\nSi vous estimez qu'il s'agit d'une erreur ou si vous avez déjà effectué votre paiement, vous pouvez déposer une réclamation en cliquant sur le lien ci-dessous.\n\nLien de réclamation : ${effectiveBaseUrl}/school-request?ref=${req.reference}&action=complaint\n\nCordialement,\nL'équipe MégafixaEduc Pro`,
         }).catch(() => {});
       }
 
       // Send WhatsApp
-      const waMessage = `Bonjour ${req.demandeur_nom}, votre demande pour « ${req.nom_ecole} » (Réf: ${req.reference}) a été rejetée automatiquement après 24H. \n\nVous pouvez faire une réclamation ici : ${APP_URL}/school-request?ref=${req.reference}&action=complaint`;
+      const waMessage = `Bonjour ${req.demandeur_nom}, votre demande pour « ${req.nom_ecole} » (Réf: ${req.reference}) a été rejetée automatiquement après 24H. \n\nVous pouvez faire une réclamation ici : ${effectiveBaseUrl}/school-request?ref=${req.reference}&action=complaint`;
       sendWhatsAppSimulation({ to: req.demandeur_whatsapp || req.demandeur_telephone, message: waMessage, reference: req.reference }).catch(() => {});
     }
 
@@ -5579,8 +5641,14 @@ async function getSmtpConfig(schoolId?: number, overrideConfig?: Partial<{
   return { provider, brevoApiKey, host, port, secure, user, pass, from, isCustom };
 }
 
-async function getGlobalSmsConfig() {
-  let provider = 'simulation';
+async function getGlobalSmsConfig(overrideConfig?: Partial<{
+  sms_provider: string;
+  sms_api_key: string;
+  sms_auth_token: string;
+  sms_sender_id: string;
+  brevo_api_key: string;
+}>) {
+  let rawProvider = '';
   let apiKey = '';
   let authToken = '';
   let senderId = 'MEGAFIXA';
@@ -5589,19 +5657,52 @@ async function getGlobalSmsConfig() {
   try {
     const rows = db.prepare("SELECT key, value FROM super_admin_settings WHERE key IN ('sms_provider', 'sms_api_key', 'sms_auth_token', 'sms_sender_id', 'brevo_api_key')").all() as any[];
     for (const r of rows) {
-      if (r.key === 'sms_provider' && r.value) provider = r.value;
-      if (r.key === 'sms_api_key' && r.value) apiKey = r.value;
-      if (r.key === 'sms_auth_token' && r.value) authToken = r.value;
-      if (r.key === 'sms_sender_id' && r.value) senderId = r.value;
-      if (r.key === 'brevo_api_key' && r.value) brevoApiKey = r.value;
+      if (r.key === 'sms_provider' && r.value) rawProvider = String(r.value).trim();
+      if (r.key === 'sms_api_key' && r.value) apiKey = String(r.value).trim();
+      if (r.key === 'sms_auth_token' && r.value) authToken = String(r.value).trim();
+      if (r.key === 'sms_sender_id' && r.value) senderId = String(r.value).trim();
+      if (r.key === 'brevo_api_key' && r.value) brevoApiKey = String(r.value).trim();
     }
   } catch (err) {}
 
-  if (provider === 'brevo' && !apiKey && brevoApiKey) {
-    apiKey = brevoApiKey;
+  if (overrideConfig && typeof overrideConfig === 'object') {
+    const isMaskedSecret = (v: any) => {
+      const s = String(v || '').trim();
+      return !s || /^[•*]+$/.test(s);
+    };
+    if (overrideConfig.sms_provider !== undefined && String(overrideConfig.sms_provider).trim() !== '') {
+      rawProvider = String(overrideConfig.sms_provider).trim();
+    }
+    if (overrideConfig.sms_api_key !== undefined && !isMaskedSecret(overrideConfig.sms_api_key)) {
+      apiKey = String(overrideConfig.sms_api_key).trim();
+    }
+    if (overrideConfig.sms_auth_token !== undefined && !isMaskedSecret(overrideConfig.sms_auth_token)) {
+      authToken = String(overrideConfig.sms_auth_token).trim();
+    }
+    if (overrideConfig.sms_sender_id !== undefined && String(overrideConfig.sms_sender_id).trim() !== '') {
+      senderId = String(overrideConfig.sms_sender_id).trim();
+    }
+    if (overrideConfig.brevo_api_key !== undefined && !isMaskedSecret(overrideConfig.brevo_api_key)) {
+      brevoApiKey = String(overrideConfig.brevo_api_key).trim();
+    }
   }
 
-  return { provider, apiKey, authToken, senderId, brevoApiKey };
+  const effectiveBrevoKey = (apiKey.startsWith('xkeysib-') ? apiKey : '') || brevoApiKey || (rawProvider === 'brevo' ? apiKey : '');
+  const hasExplicitOtherProvider = Boolean(rawProvider && rawProvider !== 'simulation' && rawProvider !== 'brevo');
+  const shouldUseBrevo =
+    rawProvider === 'brevo' ||
+    apiKey.startsWith('xkeysib-') ||
+    ((!rawProvider || rawProvider === 'simulation') && Boolean(effectiveBrevoKey));
+
+  const provider = shouldUseBrevo && !hasExplicitOtherProvider
+    ? 'brevo'
+    : (rawProvider || 'simulation');
+
+  if (provider === 'brevo' && !apiKey && effectiveBrevoKey) {
+    apiKey = effectiveBrevoKey;
+  }
+
+  return { provider, apiKey, authToken, senderId: senderId || 'MEGAFIXA', brevoApiKey: effectiveBrevoKey };
 }
 
 async function createMailTransporter(schoolId?: number, preloadedCfg?: Awaited<ReturnType<typeof getSmtpConfig>>) {
@@ -5663,7 +5764,20 @@ interface SendEmailResult {
   error?: string;
 }
 
-async function getWhatsAppConfig(schoolId?: number) {
+type WhatsAppOverrideConfig = Partial<{
+  whatsapp_provider: string;
+  whatsapp_account_sid: string;
+  whatsapp_auth_token: string;
+  whatsapp_phone_number_id: string;
+  whatsapp_sender_number: string;
+  whatsapp_api_url: string;
+  whatsapp_api_key: string;
+  brevo_api_key: string;
+  support_whatsapp: string;
+  custom_whatsapp_enabled: boolean | number;
+}>;
+
+async function getWhatsAppConfig(schoolId?: number, overrideConfig?: WhatsAppOverrideConfig) {
   let provider = 'simulation';
   let isActive = 1;
   let accountSid = '';
@@ -5672,23 +5786,60 @@ async function getWhatsAppConfig(schoolId?: number) {
   let senderNumber = '';
   let apiUrl = '';
   let apiKey = '';
+  let brevoKey = (process.env.BREVO_API_KEY || '').trim();
   let isCustom = false;
+
+  const isMaskedSecret = (v: any) => {
+    const s = String(v || '').trim();
+    return !s || /^[•*]+$/.test(s);
+  };
 
   if (schoolId) {
     try {
       const schoolWa = db.prepare("SELECT * FROM whatsapp_configs WHERE school_id = ?").get(schoolId) as any;
       if (schoolWa && schoolWa.custom_whatsapp_enabled === 1) {
-        provider = schoolWa.provider || 'simulation';
+        provider = (schoolWa.provider || 'simulation').trim();
         isActive = schoolWa.is_active !== 0 ? 1 : 0;
-        accountSid = schoolWa.account_sid || '';
-        authToken = schoolWa.auth_token || '';
-        phoneNumberId = schoolWa.phone_number_id || '';
-        senderNumber = schoolWa.sender_number || '';
-        apiUrl = schoolWa.api_url || '';
-        apiKey = schoolWa.api_key || '';
+        accountSid = (schoolWa.account_sid || '').trim();
+        authToken = (schoolWa.auth_token || '').trim();
+        phoneNumberId = (schoolWa.phone_number_id || '').trim();
+        senderNumber = (schoolWa.sender_number || '').trim();
+        apiUrl = (schoolWa.api_url || '').trim();
+        apiKey = (schoolWa.api_key || '').trim();
+        if ((!provider || provider === 'simulation') && apiKey.startsWith('xkeysib-')) {
+          provider = 'brevo_whatsapp';
+        }
         isCustom = true;
       }
     } catch (e) {}
+  }
+
+  // Allow school modal to test unsaved custom WhatsApp override before saving
+  if (schoolId && overrideConfig && overrideConfig.custom_whatsapp_enabled) {
+    isCustom = true;
+    if (overrideConfig.whatsapp_provider !== undefined && String(overrideConfig.whatsapp_provider).trim() !== '') {
+      provider = String(overrideConfig.whatsapp_provider).trim();
+    }
+    if (overrideConfig.whatsapp_account_sid !== undefined) accountSid = String(overrideConfig.whatsapp_account_sid || '').trim();
+    if (overrideConfig.whatsapp_phone_number_id !== undefined) phoneNumberId = String(overrideConfig.whatsapp_phone_number_id || '').trim();
+    if (overrideConfig.whatsapp_sender_number !== undefined) senderNumber = String(overrideConfig.whatsapp_sender_number || '').trim();
+    if (overrideConfig.whatsapp_api_url !== undefined) apiUrl = String(overrideConfig.whatsapp_api_url || '').trim();
+    if (overrideConfig.whatsapp_auth_token !== undefined && !isMaskedSecret(overrideConfig.whatsapp_auth_token)) {
+      authToken = String(overrideConfig.whatsapp_auth_token).trim();
+    }
+    if (overrideConfig.whatsapp_api_key !== undefined && !isMaskedSecret(overrideConfig.whatsapp_api_key)) {
+      apiKey = String(overrideConfig.whatsapp_api_key).trim();
+    }
+    if ((!provider || provider === 'simulation') && apiKey.startsWith('xkeysib-')) {
+      provider = 'brevo_whatsapp';
+    }
+  }
+
+  if (isCustom && !brevoKey) {
+    try {
+      const globalBrevoRow = db.prepare("SELECT value FROM super_admin_settings WHERE key = 'brevo_api_key'").get() as any;
+      if (globalBrevoRow?.value) brevoKey = String(globalBrevoRow.value).trim();
+    } catch {}
   }
 
   if (!isCustom) {
@@ -5698,28 +5849,76 @@ async function getWhatsAppConfig(schoolId?: number) {
         WHERE key IN (
           'whatsapp_provider', 'whatsapp_account_sid', 'whatsapp_auth_token',
           'whatsapp_phone_number_id', 'whatsapp_sender_number', 'whatsapp_api_url', 'whatsapp_api_key',
-          'brevo_api_key'
+          'brevo_api_key', 'support_whatsapp'
         )
       `).all() as any[];
       const map: Record<string, string> = {};
       for (const r of rows) {
-        if (r.value) map[r.key] = r.value;
+        if (r.value) map[r.key] = String(r.value).trim();
       }
-      if (map.whatsapp_provider && map.whatsapp_provider !== 'simulation') {
-        provider = map.whatsapp_provider;
+
+      if (overrideConfig && typeof overrideConfig === 'object' && !overrideConfig.custom_whatsapp_enabled) {
+        if (overrideConfig.whatsapp_provider !== undefined && String(overrideConfig.whatsapp_provider).trim() !== '') {
+          map.whatsapp_provider = String(overrideConfig.whatsapp_provider).trim();
+        }
+        if (overrideConfig.whatsapp_account_sid !== undefined) map.whatsapp_account_sid = String(overrideConfig.whatsapp_account_sid || '').trim();
+        if (overrideConfig.whatsapp_phone_number_id !== undefined) map.whatsapp_phone_number_id = String(overrideConfig.whatsapp_phone_number_id || '').trim();
+        if (overrideConfig.whatsapp_sender_number !== undefined && String(overrideConfig.whatsapp_sender_number).trim() !== '') {
+          map.whatsapp_sender_number = String(overrideConfig.whatsapp_sender_number).trim();
+        }
+        if (overrideConfig.support_whatsapp !== undefined && String(overrideConfig.support_whatsapp).trim() !== '') {
+          map.support_whatsapp = String(overrideConfig.support_whatsapp).trim();
+        }
+        if (overrideConfig.whatsapp_api_url !== undefined) map.whatsapp_api_url = String(overrideConfig.whatsapp_api_url || '').trim();
+        if (overrideConfig.whatsapp_auth_token !== undefined && !isMaskedSecret(overrideConfig.whatsapp_auth_token)) {
+          map.whatsapp_auth_token = String(overrideConfig.whatsapp_auth_token).trim();
+        }
+        if (overrideConfig.whatsapp_api_key !== undefined && !isMaskedSecret(overrideConfig.whatsapp_api_key)) {
+          map.whatsapp_api_key = String(overrideConfig.whatsapp_api_key).trim();
+        }
+        if (overrideConfig.brevo_api_key !== undefined && !isMaskedSecret(overrideConfig.brevo_api_key)) {
+          map.brevo_api_key = String(overrideConfig.brevo_api_key).trim();
+        }
+      }
+
+      const rawProvider = (map.whatsapp_provider || '').trim();
+      const rawWaApiKey = (map.whatsapp_api_key || '').trim();
+      brevoKey = (rawWaApiKey.startsWith('xkeysib-') ? rawWaApiKey : '') || (map.brevo_api_key || '').trim() || (process.env.BREVO_API_KEY || '').trim();
+      const fallbackSender = (map.whatsapp_sender_number || map.support_whatsapp || '').trim();
+
+      const hasExplicitOtherProvider = Boolean(
+        rawProvider &&
+        rawProvider !== 'simulation' &&
+        rawProvider !== 'brevo_whatsapp'
+      );
+      const shouldUseBrevoWa =
+        rawProvider === 'brevo_whatsapp' ||
+        rawWaApiKey.startsWith('xkeysib-') ||
+        ((!rawProvider || rawProvider === 'simulation') && Boolean(brevoKey));
+
+      if (hasExplicitOtherProvider) {
+        provider = rawProvider;
         accountSid = map.whatsapp_account_sid || '';
         authToken = map.whatsapp_auth_token || '';
         phoneNumberId = map.whatsapp_phone_number_id || '';
-        senderNumber = map.whatsapp_sender_number || '';
+        senderNumber = fallbackSender;
         apiUrl = map.whatsapp_api_url || '';
-        apiKey = map.whatsapp_api_key || (provider === 'brevo_whatsapp' ? (map.brevo_api_key || process.env.BREVO_API_KEY || '') : '');
+        apiKey = rawWaApiKey;
+      } else if (shouldUseBrevoWa) {
+        provider = 'brevo_whatsapp';
+        accountSid = map.whatsapp_account_sid || '';
+        authToken = map.whatsapp_auth_token || '';
+        phoneNumberId = map.whatsapp_phone_number_id || '';
+        senderNumber = fallbackSender;
+        apiUrl = map.whatsapp_api_url || '';
+        apiKey = rawWaApiKey || brevoKey;
       } else {
         const globalSms = await getGlobalSmsConfig();
         if (globalSms.provider === 'twilio' && globalSms.apiKey && globalSms.authToken) {
           provider = 'twilio_whatsapp';
           accountSid = globalSms.apiKey;
           authToken = globalSms.authToken;
-          senderNumber = map.whatsapp_sender_number || globalSms.senderId || '';
+          senderNumber = fallbackSender || globalSms.senderId || '';
         }
       }
     } catch (e) {}
@@ -5734,6 +5933,7 @@ async function getWhatsAppConfig(schoolId?: number) {
     senderNumber,
     apiUrl,
     apiKey,
+    brevoKey,
     isCustom
   };
 }
@@ -5744,8 +5944,9 @@ async function sendWhatsAppService(options: {
   schoolId?: number;
   recipientName?: string;
   reference?: string;
+  overrideConfig?: WhatsAppOverrideConfig;
 }): Promise<{ success: boolean; simulated: boolean; status: string; provider: string; isCustom?: boolean; error?: string }> {
-  const { to, message, schoolId, reference } = options;
+  const { to, message, schoolId, reference, overrideConfig } = options;
   const cleanPhone = (to || '').replace(/[^0-9+]/g, '');
   if (!cleanPhone || cleanPhone.replace(/[^0-9]/g, '').length < 8) {
     return { success: false, simulated: false, status: 'failed', provider: 'none', error: 'Numéro WhatsApp invalide' };
@@ -5753,7 +5954,7 @@ async function sendWhatsAppService(options: {
 
   const formattedPhone = cleanPhone.startsWith('+') ? cleanPhone : `+${cleanPhone}`;
   const digitsOnly = formattedPhone.replace(/[^0-9]/g, '');
-  const cfg = await getWhatsAppConfig(schoolId);
+  const cfg = await getWhatsAppConfig(schoolId, overrideConfig);
 
   if (cfg.isActive === 0) {
     return { success: false, simulated: false, status: 'failed', provider: cfg.provider, isCustom: cfg.isCustom, error: 'Passerelle WhatsApp désactivée' };
@@ -5829,43 +6030,68 @@ async function sendWhatsAppService(options: {
   }
 
   if (cfg.provider === 'brevo_whatsapp') {
-    const brevoKey = (cfg.apiKey || cfg.authToken || process.env.BREVO_API_KEY || '').trim();
+    const brevoKey = (cfg.apiKey || cfg.brevoKey || cfg.authToken || process.env.BREVO_API_KEY || '').trim();
     const senderDigits = (cfg.senderNumber || '').replace(/[^0-9]/g, '');
-    if (brevoKey && senderDigits) {
-      try {
-        const brevoRes = await fetch('https://api.brevo.com/v3/whatsapp/sendMessage', {
-          method: 'POST',
-          headers: {
-            'api-key': brevoKey,
-            'Content-Type': 'application/json',
-            'Accept': 'application/json'
-          },
-          body: JSON.stringify({
-            senderNumber: senderDigits,
-            contactNumbers: [digitsOnly],
-            text: message
-          })
-        });
+    if (!brevoKey) {
+      return {
+        success: false,
+        simulated: false,
+        status: 'failed',
+        provider: 'brevo_whatsapp',
+        isCustom: cfg.isCustom,
+        error: "Clé API Brevo manquante pour WhatsApp (xkeysib-...)."
+      };
+    }
+    if (!senderDigits) {
+      return {
+        success: false,
+        simulated: false,
+        status: 'failed',
+        provider: 'brevo_whatsapp',
+        isCustom: cfg.isCustom,
+        error: "Numéro expéditeur WhatsApp Business manquant. Renseignez « Numéro expéditeur WhatsApp » (avec indicatif, ex: +229...) enregistré dans votre compte Brevo."
+      };
+    }
+    try {
+      const brevoRes = await fetch('https://api.brevo.com/v3/whatsapp/sendMessage', {
+        method: 'POST',
+        headers: {
+          'api-key': brevoKey,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify({
+          senderNumber: senderDigits,
+          contactNumbers: [digitsOnly],
+          text: message
+        }),
+        signal: AbortSignal.timeout(15000)
+      });
 
-        if (brevoRes.ok) {
-          console.log(`[WHATSAPP BREVO SUCCESS] Sent to ${digitsOnly}`);
-          return { success: true, simulated: false, status: 'delivered', provider: 'brevo_whatsapp', isCustom: cfg.isCustom };
-        } else {
-          const errData = await brevoRes.json().catch(() => ({}));
-          console.error("Brevo WhatsApp API error:", errData);
-          return {
-            success: false,
-            simulated: false,
-            status: 'failed',
-            provider: 'brevo_whatsapp',
-            isCustom: cfg.isCustom,
-            error: errData?.message || 'Erreur API Brevo WhatsApp'
-          };
+      if (brevoRes.ok) {
+        console.log(`[WHATSAPP BREVO SUCCESS] Sent to ${digitsOnly}`);
+        return { success: true, simulated: false, status: 'delivered', provider: 'brevo_whatsapp', isCustom: cfg.isCustom };
+      } else {
+        const errData = await brevoRes.json().catch(() => ({}));
+        let errMsg = errData?.message || `Erreur API Brevo WhatsApp (HTTP ${brevoRes.status})`;
+        if (brevoRes.status === 401) {
+          errMsg = "Clé API Brevo (xkeysib-...) invalide ou refusée pour WhatsApp.";
+        } else if (typeof errMsg === 'string' && errMsg.toLowerCase().includes('sender')) {
+          errMsg = `${errMsg} — Vérifiez que le numéro expéditeur (${cfg.senderNumber}) est validé dans Brevo WhatsApp Campaigns/Transactional.`;
         }
-      } catch (e: any) {
-        console.error("Brevo WhatsApp exception:", e);
-        return { success: false, simulated: false, status: 'failed', provider: 'brevo_whatsapp', isCustom: cfg.isCustom, error: e.message };
+        console.error("Brevo WhatsApp API error:", errData);
+        return {
+          success: false,
+          simulated: false,
+          status: 'failed',
+          provider: 'brevo_whatsapp',
+          isCustom: cfg.isCustom,
+          error: errMsg
+        };
       }
+    } catch (e: any) {
+      console.error("Brevo WhatsApp exception:", e);
+      return { success: false, simulated: false, status: 'failed', provider: 'brevo_whatsapp', isCustom: cfg.isCustom, error: e.message };
     }
   }
 
@@ -6379,6 +6605,7 @@ async function startServer() {
 
   // Auto-persist mutations & propagate build/data version headers to all connected levels
   app.use('/api', (req: any, res: any, next: any) => {
+    capturePublicOriginFromReq(req);
     res.setHeader('X-App-Build-Version', APP_BUILD_ID);
     res.setHeader('X-App-Data-Version', String(serverDataVersion));
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
@@ -20915,7 +21142,7 @@ function executeYearTransition(
       userId = result.lastInsertRowid as number;
     }
 
-    const setupLink = `${APP_URL}/setup-password?email=${encodeURIComponent(staff.email)}&otp=${otp}`;
+    const setupLink = `${getEffectiveAppUrl(req)}/setup-password?email=${encodeURIComponent(staff.email)}&otp=${otp}`;
     const textBody = `Bonjour ${staff.prenom} ${staff.nom},\n\nUn compte d'accès pour le poste de "${staff.poste}" (Rôle: ${role.toUpperCase()}) a été configuré pour vous sur MégafixaEduc Pro.\n\nEmail de connexion : ${staff.email}\nCode OTP d'activation : ${otp}\nMot de passe temporaire : ${password}\n\nPour activer votre compte et définir votre mot de passe personnel, veuillez cliquer sur le lien ci-dessous :\n${setupLink}\n\nCe lien expire dans 24 heures.`;
     const htmlBody = textBody.replace(/\n/g, '<br>').replace(setupLink, `<a href="${setupLink}" style="display: inline-block; padding: 10px 20px; background-color: #013efb; color: white; text-decoration: none; border-radius: 8px; font-weight: bold;">Activer mon compte</a>`);
 
@@ -21000,7 +21227,7 @@ function executeYearTransition(
 
           createdCount++;
 
-          const setupLink = `${APP_URL}/setup-password?email=${encodeURIComponent(member.email)}&otp=${otpCode}`;
+          const setupLink = `${getEffectiveAppUrl(req)}/setup-password?email=${encodeURIComponent(member.email)}&otp=${otpCode}`;
           const body = `Bonjour ${member.prenom} ${member.nom},\n\nUn compte d'accès MégafixaEduc Pro (${member.poste}) a été créé pour vous.\n\nIdentifiants :\nEmail : ${member.email}\nCode OTP : ${otpCode}\n\nPour activer votre compte et définir votre mot de passe personnel, veuillez cliquer sur le lien suivant :\n${setupLink}\n\nCe lien expire dans 24 heures.`;
           const htmlBody = body.replace(/\n/g, '<br>').replace(setupLink, `<a href="${setupLink}" style="display: inline-block; padding: 10px 20px; background-color: #013efb; color: white; text-decoration: none; border-radius: 8px; font-weight: bold;">Activer mon compte</a>`);
 
@@ -21191,7 +21418,7 @@ function executeYearTransition(
     // Send email with credentials if email is present
     let emailSent = false;
     if (enseignant.email && enseignant.email.includes('@')) {
-      const textBody = `Bonjour ${enseignant.prenom} ${enseignant.nom},\n\nUn compte enseignant a été créé pour vous sur MégafixaEduc Pro.\n\nIdentifiant : ${identifier}\nEmail de connexion : ${userEmail}\nMot de passe : ${password}\nLien de connexion : ${APP_URL}${schoolLoginUrl}\n\nPour vous connecter, utilisez directement vos identifiants ci-dessus sans code OTP requis.`;
+      const textBody = `Bonjour ${enseignant.prenom} ${enseignant.nom},\n\nUn compte enseignant a été créé pour vous sur MégafixaEduc Pro.\n\nIdentifiant : ${identifier}\nEmail de connexion : ${userEmail}\nMot de passe : ${password}\nLien de connexion : ${getEffectiveAppUrl(req)}${schoolLoginUrl}\n\nPour vous connecter, utilisez directement vos identifiants ci-dessus sans code OTP requis.`;
       const htmlBody = textBody.replace(/\n/g, '<br>');
 
       try {
@@ -21514,7 +21741,7 @@ function executeYearTransition(
 
           createdCount++;
 
-          const body = `Bonjour ${teacher.prenom} ${teacher.nom},\n\nUn compte enseignant a été créé pour vous sur MégafixaEduc Pro.\n\nVos identifiants de connexion :\nIdentifiant : ${identifier}\nEmail de connexion : ${userEmail}\nMot de passe : ${defaultPassword}\nLien de connexion : ${APP_URL}/login\n\nVous pouvez vous connecter directement avec ces identifiants sans code OTP requis.`;
+          const body = `Bonjour ${teacher.prenom} ${teacher.nom},\n\nUn compte enseignant a été créé pour vous sur MégafixaEduc Pro.\n\nVos identifiants de connexion :\nIdentifiant : ${identifier}\nEmail de connexion : ${userEmail}\nMot de passe : ${defaultPassword}\nLien de connexion : ${getEffectiveAppUrl(req)}/login\n\nVous pouvez vous connecter directement avec ces identifiants sans code OTP requis.`;
           const htmlBody = body.replace(/\n/g, '<br>');
 
           const mailRes = await sendMailWithFallback({
@@ -21599,7 +21826,7 @@ function executeYearTransition(
       );
       
       // Send email with credentials
-      const setupLink = `${APP_URL}/setup-password?email=${encodeURIComponent(email)}&otp=${otp}`;
+      const setupLink = `${getEffectiveAppUrl(req)}/setup-password?email=${encodeURIComponent(email)}&otp=${otp}`;
       const textBody = `Bonjour ${nom},\n\nUn compte d'accès (Rôle : ${assignedRole.toUpperCase()}) a été créé pour vous par votre administrateur sur MégafixaEduc Pro.\n\nEmail : ${email}\nCode de confirmation (OTP) : ${otp}\nMot de passe temporaire : ${password}\n\nPour activer votre compte et configurer votre mot de passe, veuillez cliquer sur le lien ci-dessous :\n${setupLink}\n\nCe lien expire dans 24 heures.`;
       const htmlBody = textBody.replace(/\n/g, '<br>').replace(setupLink, `<a href="${setupLink}" style="display: inline-block; padding: 10px 20px; background-color: #013efb; color: white; text-decoration: none; border-radius: 8px; font-weight: bold;">Activer mon compte</a>`);
 
@@ -21700,7 +21927,7 @@ function executeYearTransition(
       db.prepare("UPDATE utilisateurs SET approuve = 1, role = ?, permissions = ?, otp_code = ?, otp_expiry = ?, is_first_login = 1 WHERE id = ? AND school_id = ?")
         .run(assignedRole, permissionsStr, otp, expiry, id, req.schoolId);
       
-      const setupLink = `${APP_URL}/setup-password?email=${encodeURIComponent(user.email)}&otp=${otp}`;
+      const setupLink = `${getEffectiveAppUrl(req)}/setup-password?email=${encodeURIComponent(user.email)}&otp=${otp}`;
       const textBody = `Bonjour ${user.nom},\n\nVotre compte MégafixaEduc Pro a été approuvé par l'administrateur avec le rôle "${assignedRole.toUpperCase()}".\n\nPour activer votre compte et configurer votre mot de passe, veuillez cliquer sur le lien ci-dessous :\n${setupLink}\n\nCode de confirmation (OTP) : ${otp}\n\nCe lien expire dans 24 heures.`;
       const htmlBody = textBody.replace(/\n/g, '<br>').replace(setupLink, `<a href="${setupLink}" style="display: inline-block; padding: 10px 20px; background-color: #013efb; color: white; text-decoration: none; border-radius: 8px; font-weight: bold;">Activer mon compte</a>`);
 
@@ -22122,7 +22349,7 @@ function executeYearTransition(
     if (!GOOGLE_CLIENT_ID) {
       return res.status(500).json({ error: "Google Client ID non configuré" });
     }
-    const redirectUri = `${APP_URL}/api/auth/google/callback`;
+    const redirectUri = `${getEffectiveAppUrl(req)}/api/auth/google/callback`;
     const url = googleClient.generateAuthUrl({
       access_type: 'offline',
       scope: 'https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/userinfo.email',
@@ -22136,7 +22363,7 @@ function executeYearTransition(
     if (!code) return res.status(400).send("Code manquant");
 
     try {
-      const redirectUri = `${APP_URL}/api/auth/google/callback`;
+      const redirectUri = `${getEffectiveAppUrl(req)}/api/auth/google/callback`;
       const { tokens } = await googleClient.getToken({
         code: code as string,
         redirect_uri: redirectUri
@@ -23337,7 +23564,7 @@ function executeYearTransition(
     } = data;
 
     const formattedAmount = typeof amount === 'number' ? amount.toLocaleString('fr-FR') : amount;
-    const portalUrl = appUrl || process.env.APP_URL || 'https://ais-dev-zd7qxhnwatli2x7sfezpbx-323991635372.europe-west2.run.app';
+    const portalUrl = appUrl || getEffectiveAppUrl();
 
     const featuresHtml = features.map(feat => `
       <tr style="border-bottom: 1px solid #f1f5f9;">
@@ -26348,10 +26575,30 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
   // ==========================================
 
   // SMS Dispatcher / Gateway simulation & execution
-  async function sendSmsService(schoolId: number, senderId: number, recipientPhone: string, recipientName: string, recipientType: string, messageText: string) {
+  async function sendSmsService(
+    schoolId: number,
+    senderId: number,
+    recipientPhone: string,
+    recipientName: string,
+    recipientType: string,
+    messageText: string,
+    overrideConfig?: Partial<{
+      custom_sms_enabled: boolean | number;
+      sms_provider: string;
+      sms_api_key: string;
+      sms_auth_token: string;
+      sms_sender_id: string;
+      account_sid: string;
+      api_url: string;
+    }>
+  ) {
     try {
       const config = db.prepare("SELECT * FROM sms_configs WHERE school_id = ?").get(schoolId) as any;
       const globalConfig = await getGlobalSmsConfig();
+      const isMaskedSecret = (v: any) => {
+        const s = String(v || '').trim();
+        return !s || /^[•*]+$/.test(s);
+      };
 
       let provider = 'simulation';
       let senderNumberOrName = 'MEGAFIXA';
@@ -26361,14 +26608,33 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       let apiUrl = '';
       let isCustom = false;
 
-      // 1. Check if school has custom SMS credentials enabled
-      if (config && config.custom_sms_enabled === 1 && config.is_active !== 0) {
-        provider = config.provider || 'simulation';
+      // 1. Check if school has custom SMS credentials enabled (or explicit custom override in test modal)
+      const useCustomOverride = overrideConfig && overrideConfig.custom_sms_enabled;
+      if (useCustomOverride) {
+        isCustom = true;
+        provider = (overrideConfig?.sms_provider || config?.provider || 'simulation').trim();
+        senderNumberOrName = (overrideConfig?.sms_sender_id || config?.sender_number_or_name || 'MEGAFIXA').trim();
+        accountSid = (overrideConfig?.account_sid ?? config?.account_sid ?? '').trim();
+        authToken = !isMaskedSecret(overrideConfig?.sms_auth_token)
+          ? String(overrideConfig?.sms_auth_token).trim()
+          : (config?.auth_token || '').trim();
+        apiKey = !isMaskedSecret(overrideConfig?.sms_api_key)
+          ? String(overrideConfig?.sms_api_key).trim()
+          : (config?.api_key || '').trim();
+        apiUrl = (overrideConfig?.api_url ?? config?.api_url ?? '').trim();
+        if ((!provider || provider === 'simulation') && apiKey.startsWith('xkeysib-')) {
+          provider = 'brevo';
+        }
+      } else if (config && config.custom_sms_enabled === 1 && config.is_active !== 0) {
+        provider = (config.provider || 'simulation').trim();
         senderNumberOrName = config.sender_number_or_name || 'MEGAFIXA';
         accountSid = config.account_sid || '';
         authToken = config.auth_token || '';
         apiKey = config.api_key || '';
         apiUrl = config.api_url || '';
+        if ((!provider || provider === 'simulation') && apiKey.startsWith('xkeysib-')) {
+          provider = 'brevo';
+        }
         isCustom = true;
       } else {
         // 2. Fallback to platform global SMS settings if school has no custom credentials
@@ -26429,7 +26695,9 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
               const errData = await brevoRes.json().catch(() => ({}));
               console.error("Brevo SMS error:", errData);
               status = 'failed';
-              errorDetail = errData?.message || `Erreur API Brevo SMS (HTTP ${brevoRes.status})`;
+              errorDetail = brevoRes.status === 401
+                ? "Clé API Brevo (xkeysib-...) invalide ou refusée pour les SMS."
+                : (errData?.message || `Erreur API Brevo SMS (HTTP ${brevoRes.status})`);
             }
           } catch (e: any) {
             console.error("Brevo SMS exception:", e);
@@ -26954,7 +27222,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
             const mailRes = await sendMailWithFallback({
               to: em,
               subject: emailSubject,
-              text: `Bonjour ${destName},\n\nVous avez reçu un nouveau message sur votre espace MégafixaEduc Pro :\n\nExpéditeur : ${senderName}\nObjet : ${emailSubject}\n\nMessage :\n${content || ''}\n\nPour consulter ce message et y répondre, connectez-vous sur votre espace sécurisé : ${APP_URL}/messagerie\n\nCordialement,\nL'équipe administrative`,
+              text: `Bonjour ${destName},\n\nVous avez reçu un nouveau message sur votre espace MégafixaEduc Pro :\n\nExpéditeur : ${senderName}\nObjet : ${emailSubject}\n\nMessage :\n${content || ''}\n\nPour consulter ce message et y répondre, connectez-vous sur votre espace sécurisé : ${getEffectiveAppUrl(req)}/messagerie\n\nCordialement,\nL'équipe administrative`,
               html: `
                 <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 16px;">
                   <div style="border-bottom: 2px solid #013efb; padding-bottom: 12px; margin-bottom: 20px;">
@@ -26969,7 +27237,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
                     ${(content || '').replace(/\n/g, '<br/>')}
                   </div>
                   <div style="text-align: center; margin: 28px 0;">
-                    <a href="${APP_URL}/messagerie" style="display: inline-block; padding: 12px 24px; background: #013efb; color: #ffffff; text-decoration: none; border-radius: 12px; font-weight: bold; font-size: 14px; box-shadow: 0 4px 12px rgba(1, 62, 251, 0.3);">
+                    <a href="${getEffectiveAppUrl(req)}/messagerie" style="display: inline-block; padding: 12px 24px; background: #013efb; color: #ffffff; text-decoration: none; border-radius: 12px; font-weight: bold; font-size: 14px; box-shadow: 0 4px 12px rgba(1, 62, 251, 0.3);">
                       Accéder à la Messagerie pour Répondre
                     </a>
                   </div>
@@ -30533,7 +30801,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         description: `${type_paiement} pour ${safeStudentName}`,
         amount: Number(montant),
         currency: { iso: 'XOF' },
-        callback_url: `${APP_URL}/mon-enfant?payment_status=success`,
+        callback_url: `${getEffectiveAppUrl(req)}/mon-enfant?payment_status=success`,
         customer: {
           firstname: safeStudentName.split(' ')[0],
           lastname: safeStudentName.split(' ').slice(1).join(' ') || 'Élève',
@@ -31530,7 +31798,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       sendMailWithFallback({
         to: cleanEmail,
         subject: `🎉 Compte établissement créé sur MégafixaEduc Pro — ${nom.trim()} (${cleanCode})`,
-        text: `Bonjour ${admin_nom?.trim() || nom.trim()},\n\nVotre établissement « ${nom.trim()} » vient d'être créé sur MégafixaEduc Pro.\n\nVos identifiants sécurisés :\n- Code École : ${cleanCode}\n- Email : ${cleanEmail}\n- Mot de passe unique : ${defaultPassword}\n- Formule : ${plan}\n\nConnexion : ${APP_URL}/login?code=${encodeURIComponent(cleanCode)}&email=${encodeURIComponent(cleanEmail)}\n\nVeuillez modifier ce mot de passe dès votre première connexion.`,
+        text: `Bonjour ${admin_nom?.trim() || nom.trim()},\n\nVotre établissement « ${nom.trim()} » vient d'être créé sur MégafixaEduc Pro.\n\nVos identifiants sécurisés :\n- Code École : ${cleanCode}\n- Email : ${cleanEmail}\n- Mot de passe unique : ${defaultPassword}\n- Formule : ${plan}\n\nConnexion : ${getEffectiveAppUrl(req)}/login?code=${encodeURIComponent(cleanCode)}&email=${encodeURIComponent(cleanEmail)}\n\nVeuillez modifier ce mot de passe dès votre première connexion.`,
         html: `<div style="font-family:sans-serif;padding:24px;background:#f8fafc;border-radius:16px;max-width:560px;margin:auto;">
           <h2 style="color:#0f172a;margin-top:0;">Compte établissement créé 🎉</h2>
           <p style="color:#334155;font-size:14px;">Votre établissement <strong>${nom.trim()}</strong> est prêt sur <strong>MégafixaEduc Pro</strong>.</p>
@@ -31776,7 +32044,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         const mailRes = await sendMailWithFallback({
           to: recipients,
           subject: `🔐 Réinitialisation de votre mot de passe administrateur — ${schoolRow?.nom || 'MégafixaEduc Pro'}`,
-          text: `Bonjour ${admin.nom},\n\nVotre mot de passe administrateur pour « ${schoolRow?.nom || ''} » a été réinitialisé par le Super Administrateur.\n\nCode École : ${schoolRow?.code_ecole || 'N/A'}\nIdentifiant : ${admin.email}\nNouveau mot de passe unique : ${newDefaultPassword}\n\nConnexion : ${APP_URL}/login\n\nPour votre sécurité, changez ce mot de passe dès la connexion.`,
+          text: `Bonjour ${admin.nom},\n\nVotre mot de passe administrateur pour « ${schoolRow?.nom || ''} » a été réinitialisé par le Super Administrateur.\n\nCode École : ${schoolRow?.code_ecole || 'N/A'}\nIdentifiant : ${admin.email}\nNouveau mot de passe unique : ${newDefaultPassword}\n\nConnexion : ${getEffectiveAppUrl(req)}/login\n\nPour votre sécurité, changez ce mot de passe dès la connexion.`,
         }).catch((e: any) => ({ success: false, simulated: false, error: e?.message }));
         emailStatus = { sent: Boolean(mailRes?.success && !mailRes?.simulated), simulated: Boolean(mailRes?.simulated), error: mailRes?.error, recipients };
       }
@@ -32375,7 +32643,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
                 <p style="margin:4px 0;font-size:13px;"><strong>Sécurité :</strong> Votre mot de passe unique et sécurisé sera généré automatiquement lors de l'activation.</p>
                 <p style="margin:4px 0;font-size:13px;"><strong>Délai de traitement :</strong> 24h maximum après confirmation du paiement</p>
               </div>
-              <p style="color:#64748b;font-size:12px;">Suivre votre dossier : <a href="${APP_URL}/school-request?ref=${cleanRef}">${APP_URL}/school-request?ref=${cleanRef}</a></p>
+              <p style="color:#64748b;font-size:12px;">Suivre votre dossier : <a href="${getEffectiveAppUrl(req)}/school-request?ref=${cleanRef}">${getEffectiveAppUrl(req)}/school-request?ref=${cleanRef}</a></p>
               <p style="color:#64748b;font-size:12px;">Pour toute question, contactez notre équipe au (+229) 0161107918 ou par WhatsApp.</p>
             </div>`
           });
@@ -32657,7 +32925,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
           planName: plan,
           amount: request.montant_estime || 0,
           licenseKey: subscriptionKey,
-          loginUrl: `${APP_URL}/login?code=${finalCode}&email=${cleanEmail}`,
+          loginUrl: `${getEffectiveAppUrl(req)}/login?code=${finalCode}&email=${cleanEmail}`,
           dateDebut: new Date().toISOString().split('T')[0],
           dateFin: expiryDate
         });
@@ -32667,13 +32935,14 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
 
       // Send email to BOTH school email (if added) and applicant personal email with unique credentials and PDF
       const approveRecipients = getSchoolRequestRecipients(request);
+      const approveBaseUrl = getEffectiveAppUrl(req);
       let approveEmailStatus: any = { sent: false, simulated: false, recipients: approveRecipients };
       if (approveRecipients.length > 0) {
         try {
           const mailRes = await sendMailWithFallback({
             to: approveRecipients,
             subject: `🎉 Bienvenue sur MégafixaEduc Pro ! Votre compte école « ${request.nom_ecole} » est actif`,
-            text: `Bonjour ${request.demandeur_nom},\n\nFélicitations ! Votre demande pour « ${request.nom_ecole} » (Réf: ${request.reference}) a été acceptée et votre compte établissement est désormais actif.\n\nVos identifiants sécurisés :\n- Code École : ${finalCode}\n- Email Admin : ${cleanEmail}\n- Mot de passe unique : ${defaultPassword}\n\nConnectez-vous ici : ${APP_URL}/login?code=${finalCode}&email=${cleanEmail}\n\nPour votre sécurité, il vous sera demandé de modifier ce mot de passe dès votre première connexion.\n\nCordialement,\nL'équipe MégafixaEduc Pro`,
+            text: `Bonjour ${request.demandeur_nom},\n\nFélicitations ! Votre demande pour « ${request.nom_ecole} » (Réf: ${request.reference}) a été acceptée et votre compte établissement est désormais actif.\n\nVos identifiants sécurisés :\n- Code École : ${finalCode}\n- Email Admin : ${cleanEmail}\n- Mot de passe unique : ${defaultPassword}\n\nConnectez-vous ici : ${approveBaseUrl}/login?code=${finalCode}&email=${cleanEmail}\n\nPour votre sécurité, il vous sera demandé de modifier ce mot de passe dès votre première connexion.\n\nCordialement,\nL'équipe MégafixaEduc Pro`,
             html: `<div style="font-family:sans-serif;padding:24px;background:#f8fafc;border-radius:16px;max-width:560px;margin:auto;">
               <h2 style="color:#0f172a;margin-top:0;">Félicitations et bienvenue ! 🎉</h2>
               <p style="color:#334155;font-size:14px;line-height:1.6;">Bonjour <strong>${request.demandeur_nom}</strong>,</p>
@@ -32685,7 +32954,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
                 <p style="margin:6px 0;font-size:13px;"><strong>Mot de passe sécurisé généré :</strong> <code style="background:#f1f5f9;padding:2px 6px;border-radius:4px;">${defaultPassword}</code></p>
               </div>
               <p style="text-align:center;margin-top:20px;">
-                <a href="${APP_URL}/login?code=${finalCode}&email=${cleanEmail}" style="display:inline-block;padding:12px 24px;background:#4f46e5;color:white;text-decoration:none;border-radius:10px;font-weight:bold;">Se connecter</a>
+                <a href="${approveBaseUrl}/login?code=${finalCode}&email=${cleanEmail}" style="display:inline-block;padding:12px 24px;background:#4f46e5;color:white;text-decoration:none;border-radius:10px;font-weight:bold;">Se connecter</a>
               </p>
               <p style="color:#64748b;font-size:11px;margin-top:20px;">Pour votre sécurité, ce mot de passe est unique à votre compte et devra être personnalisé dès votre première connexion.</p>
             </div>`,
@@ -32708,7 +32977,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
 
       // Send WhatsApp
       try {
-        const waMessage = `🎉 Félicitations ${request.demandeur_nom} ! Votre compte école « ${request.nom_ecole} » est prêt.\n\n🔑 Vos accès :\n- Code École : ${finalCode}\n- Email : ${cleanEmail}\n- Mot de passe : ${defaultPassword}\n\n🔗 Connectez-vous ici : ${APP_URL}/login?code=${finalCode}&email=${cleanEmail}\n\n⚠️ Veuillez changer votre mot de passe après connexion.`;
+        const waMessage = `🎉 Félicitations ${request.demandeur_nom} ! Votre compte école « ${request.nom_ecole} » est prêt.\n\n🔑 Vos accès :\n- Code École : ${finalCode}\n- Email : ${cleanEmail}\n- Mot de passe : ${defaultPassword}\n\n🔗 Connectez-vous ici : ${approveBaseUrl}/login?code=${finalCode}&email=${cleanEmail}\n\n⚠️ Veuillez changer votre mot de passe après connexion.`;
         sendWhatsAppSimulation({ to: request.demandeur_whatsapp || request.demandeur_telephone, message: waMessage, reference: request.reference });
       } catch (e) {}
 
@@ -32803,7 +33072,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
               <h2 style="color:#b45309;margin-top:0;">Message concernant votre demande (${request.reference})</h2>
               <p style="color:#334155;font-size:14px;line-height:1.6;">${message.replace(/\n/g, '<br>')}</p>
               <hr style="border:none;border-top:1px solid #e2e8f0;margin:20px 0;" />
-              <p style="color:#64748b;font-size:12px;">Suivre votre dossier : <a href="${APP_URL}/school-request?ref=${request.reference}">${APP_URL}/school-request?ref=${request.reference}</a></p>
+              <p style="color:#64748b;font-size:12px;">Suivre votre dossier : <a href="${getEffectiveAppUrl(req)}/school-request?ref=${request.reference}">${getEffectiveAppUrl(req)}/school-request?ref=${request.reference}</a></p>
             </div>`
           }).catch((e: any) => ({ success: false, simulated: false, error: e?.message }))
         : { success: false, simulated: false, error: "Aucun email valide sur ce dossier." };
@@ -32940,7 +33209,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
               <div style="background:#fff1f2;border:1px solid #fecdd3;color:#be123c;padding:14px;border-radius:10px;font-size:13px;margin:16px 0;">
                 ${finalReason}
               </div>
-              <p style="color:#64748b;font-size:12px;">Vous pouvez déposer une réclamation directement sur : <a href="${APP_URL}/school-request?ref=${request.reference}&action=complaint">${APP_URL}/school-request?ref=${request.reference}&action=complaint</a> ou contacter notre équipe au (+229) 0161107918.</p>
+              <p style="color:#64748b;font-size:12px;">Vous pouvez déposer une réclamation directement sur : <a href="${getEffectiveAppUrl(req)}/school-request?ref=${request.reference}&action=complaint">${getEffectiveAppUrl(req)}/school-request?ref=${request.reference}&action=complaint</a> ou contacter notre équipe au (+229) 0161107918.</p>
             </div>`
           });
           rejectEmailStatus = {
@@ -33221,10 +33490,10 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
 
   app.post("/api/super-admin/test-sms", authenticateToken, requireSuperAdmin, async (req: any, res) => {
     try {
-      const { phone } = req.body;
+      const { phone, overrideConfig } = req.body || {};
       if (!phone) return res.status(400).json({ error: "Numéro de téléphone requis." });
 
-      const globalSms = await getGlobalSmsConfig();
+      const globalSms = await getGlobalSmsConfig(overrideConfig);
       const cleanPhone = String(phone).replace(/[^0-9+]/g, '');
       const formattedPhone = cleanPhone.startsWith('+') ? cleanPhone : `+${cleanPhone}`;
       const testText = "Test de configuration SMS - MégafixaEduc Pro. Si vous recevez ce SMS, votre passerelle est opérationnelle.";
@@ -33232,7 +33501,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       if (globalSms.provider === 'brevo') {
         const brevoKey = (globalSms.apiKey || globalSms.brevoApiKey || process.env.BREVO_API_KEY || '').trim();
         if (!brevoKey) {
-          return res.status(400).json({ success: false, error: "Clé API Brevo manquante pour les SMS globaux." });
+          return res.status(400).json({ success: false, simulated: false, provider: 'brevo', error: "Clé API Brevo manquante pour les SMS globaux." });
         }
         const cleanSender = (globalSms.senderId || 'MEGAFIXA').replace(/[^a-zA-Z0-9]/g, '').slice(0, 11) || 'MEGAFIXA';
         const brevoRes = await fetch('https://api.brevo.com/v3/transactionalSMS/sms', {
@@ -33247,13 +33516,18 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
             recipient: formattedPhone,
             content: testText,
             type: 'transactional'
-          })
+          }),
+          signal: AbortSignal.timeout(15000)
         });
         if (brevoRes.ok) {
           return res.json({ success: true, simulated: false, provider: 'brevo', message: `SMS réel envoyé avec succès à ${formattedPhone} via Brevo !` });
         } else {
           const errData = await brevoRes.json().catch(() => ({}));
-          return res.status(400).json({ success: false, provider: 'brevo', error: errData?.message || 'Erreur API Brevo SMS' });
+          let errMsg = errData?.message || `Erreur API Brevo SMS (HTTP ${brevoRes.status})`;
+          if (brevoRes.status === 401) {
+            errMsg = "Clé API Brevo (xkeysib-...) invalide ou refusée pour les SMS.";
+          }
+          return res.status(400).json({ success: false, simulated: false, provider: 'brevo', error: errMsg });
         }
       }
 
@@ -33274,7 +33548,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
           return res.json({ success: true, simulated: false, provider: 'twilio', message: `SMS réel envoyé avec succès à ${formattedPhone} via Twilio !` });
         } else {
           const errData = await twilioRes.json().catch(() => ({}));
-          return res.status(400).json({ success: false, provider: 'twilio', error: errData?.message || 'Erreur API Twilio SMS' });
+          return res.status(400).json({ success: false, simulated: false, provider: 'twilio', error: errData?.message || 'Erreur API Twilio SMS' });
         }
       }
 
@@ -33288,18 +33562,21 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
 
   app.post("/api/super-admin/test-whatsapp", authenticateToken, requireSuperAdmin, async (req: any, res) => {
     try {
-      const { phone } = req.body;
+      const { phone, overrideConfig } = req.body || {};
       if (!phone) return res.status(400).json({ error: "Numéro WhatsApp requis." });
 
       const result = await sendWhatsAppService({
         to: phone,
+        overrideConfig,
         message: "Test passerelle WhatsApp globale - MégafixaEduc Pro. Vos notifications automatisées WhatsApp sont prêtes."
       });
 
-      res.json({
+      const statusCode = result.success ? 200 : 400;
+      res.status(statusCode).json({
         success: result.success,
         simulated: result.simulated,
         provider: result.provider,
+        error: result.error,
         message: result.simulated
           ? "Envoi WhatsApp simulé dans la console (configurez Brevo WhatsApp, Meta Cloud API ou Twilio ci-dessous)."
           : result.success
@@ -33386,44 +33663,74 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       const globalSms = await getGlobalSmsConfig();
       const globalWa = await getWhatsAppConfig();
 
+      const safeSmtp = smtp ? {
+        ...smtp,
+        has_smtp_pass: Boolean(smtp.smtp_pass && String(smtp.smtp_pass).trim() !== ''),
+        has_brevo_api_key: Boolean(smtp.brevo_api_key && String(smtp.brevo_api_key).trim() !== ''),
+        smtp_pass: smtp.smtp_pass ? '••••••••' : '',
+        brevo_api_key: smtp.brevo_api_key ? '••••••••' : ''
+      } : {
+        school_id: schoolId,
+        custom_smtp_enabled: 0,
+        email_provider: 'smtp',
+        brevo_api_key: '',
+        has_brevo_api_key: false,
+        smtp_host: '',
+        smtp_port: '587',
+        smtp_user: '',
+        smtp_pass: '',
+        has_smtp_pass: false,
+        smtp_secure: 'false',
+        email_from: ''
+      };
+
+      const safeSms = sms ? {
+        ...sms,
+        has_auth_token: Boolean(sms.auth_token && String(sms.auth_token).trim() !== ''),
+        has_api_key: Boolean(sms.api_key && String(sms.api_key).trim() !== ''),
+        auth_token: sms.auth_token ? '••••••••' : '',
+        api_key: sms.api_key ? '••••••••' : ''
+      } : {
+        school_id: schoolId,
+        custom_sms_enabled: 0,
+        provider: 'simulation',
+        account_sid: '',
+        auth_token: '',
+        has_auth_token: false,
+        sender_number_or_name: 'MEGAFIXA',
+        api_url: '',
+        api_key: '',
+        has_api_key: false,
+        credit_balance: 1000,
+        is_active: 1
+      };
+
+      const safeWa = whatsapp ? {
+        ...whatsapp,
+        has_auth_token: Boolean(whatsapp.auth_token && String(whatsapp.auth_token).trim() !== ''),
+        has_api_key: Boolean(whatsapp.api_key && String(whatsapp.api_key).trim() !== ''),
+        auth_token: whatsapp.auth_token ? '••••••••' : '',
+        api_key: whatsapp.api_key ? '••••••••' : ''
+      } : {
+        school_id: schoolId,
+        custom_whatsapp_enabled: 0,
+        provider: 'simulation',
+        is_active: 1,
+        account_sid: '',
+        auth_token: '',
+        has_auth_token: false,
+        phone_number_id: '',
+        sender_number: '',
+        api_url: '',
+        api_key: '',
+        has_api_key: false
+      };
+
       res.json({
         school,
-        smtp: smtp || {
-          school_id: schoolId,
-          custom_smtp_enabled: 0,
-          email_provider: 'smtp',
-          brevo_api_key: '',
-          smtp_host: '',
-          smtp_port: '587',
-          smtp_user: '',
-          smtp_pass: '',
-          smtp_secure: 'false',
-          email_from: ''
-        },
-        sms: sms || {
-          school_id: schoolId,
-          custom_sms_enabled: 0,
-          provider: 'simulation',
-          account_sid: '',
-          auth_token: '',
-          sender_number_or_name: 'MEGAFIXA',
-          api_url: '',
-          api_key: '',
-          credit_balance: 1000,
-          is_active: 1
-        },
-        whatsapp: whatsapp || {
-          school_id: schoolId,
-          custom_whatsapp_enabled: 0,
-          provider: 'simulation',
-          is_active: 1,
-          account_sid: '',
-          auth_token: '',
-          phone_number_id: '',
-          sender_number: '',
-          api_url: '',
-          api_key: ''
-        },
+        smtp: safeSmtp,
+        sms: safeSms,
+        whatsapp: safeWa,
         globalDefaults: {
           smtp: {
             provider: globalSmtp.provider,
@@ -33437,13 +33744,13 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
           sms: {
             provider: globalSms.provider,
             senderId: globalSms.senderId,
-            has_apiKey: Boolean(globalSms.apiKey),
+            has_apiKey: Boolean(globalSms.apiKey || globalSms.brevoApiKey),
             has_authToken: Boolean(globalSms.authToken)
           },
           whatsapp: {
             provider: globalWa.provider,
             senderNumber: globalWa.senderNumber,
-            has_authToken: Boolean(globalWa.authToken || globalWa.apiKey)
+            has_authToken: Boolean(globalWa.authToken || globalWa.apiKey || globalWa.brevoKey)
           }
         }
       });
@@ -33462,14 +33769,19 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
 
       const { smtp, sms, whatsapp } = req.body;
 
+      const isRealSecretInput = (v: any) => {
+        const s = String(v || '').trim();
+        return Boolean(s && !/^[•*]+$/.test(s));
+      };
+
       db.transaction(() => {
         // 1. SMTP / Brevo Email Config
         if (smtp) {
           const existingSmtp = db.prepare("SELECT id, smtp_pass, brevo_api_key FROM school_smtp_configs WHERE school_id = ?").get(schoolId) as any;
-          const finalPass = (smtp.smtp_pass && smtp.smtp_pass.trim() !== '') 
+          const finalPass = isRealSecretInput(smtp.smtp_pass)
             ? smtp.smtp_pass.trim() 
             : (existingSmtp?.smtp_pass || '');
-          const finalBrevoKey = (smtp.brevo_api_key && smtp.brevo_api_key.trim() !== '')
+          const finalBrevoKey = isRealSecretInput(smtp.brevo_api_key)
             ? smtp.brevo_api_key.trim()
             : (existingSmtp?.brevo_api_key || '');
 
@@ -33522,10 +33834,10 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         // 2. SMS Config
         if (sms) {
           const existingSms = db.prepare("SELECT id, auth_token, api_key FROM sms_configs WHERE school_id = ?").get(schoolId) as any;
-          const finalAuthToken = (sms.auth_token && sms.auth_token.trim() !== '')
+          const finalAuthToken = isRealSecretInput(sms.auth_token)
             ? sms.auth_token.trim()
             : (existingSms?.auth_token || '');
-          const finalApiKey = (sms.api_key && sms.api_key.trim() !== '')
+          const finalApiKey = isRealSecretInput(sms.api_key)
             ? sms.api_key.trim()
             : (existingSms?.api_key || '');
 
@@ -33578,10 +33890,10 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         // 3. WhatsApp Config
         if (whatsapp) {
           const existingWa = db.prepare("SELECT id, auth_token, api_key FROM whatsapp_configs WHERE school_id = ?").get(schoolId) as any;
-          const finalWaToken = (whatsapp.auth_token && whatsapp.auth_token.trim() !== '')
+          const finalWaToken = isRealSecretInput(whatsapp.auth_token)
             ? whatsapp.auth_token.trim()
             : (existingWa?.auth_token || '');
-          const finalWaApiKey = (whatsapp.api_key && whatsapp.api_key.trim() !== '')
+          const finalWaApiKey = isRealSecretInput(whatsapp.api_key)
             ? whatsapp.api_key.trim()
             : (existingWa?.api_key || '');
 
@@ -33711,7 +34023,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       const school = db.prepare("SELECT id, nom, telephone FROM school_info WHERE id = ?").get(schoolId) as any;
       if (!school) return res.status(404).json({ error: "Établissement introuvable." });
 
-      const { testPhone } = req.body;
+      const { testPhone, overrideConfig } = req.body || {};
       const target = testPhone || school.telephone;
       if (!target) return res.status(400).json({ error: "Numéro de téléphone requis." });
 
@@ -33721,18 +34033,21 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         target,
         school.nom,
         'administration',
-        `Test passerelle SMS pour ${school.nom}. Vos alertes SMS / WhatsApp sont opérationnelles.`
+        `Test passerelle SMS pour ${school.nom}. Vos alertes SMS / WhatsApp sont opérationnelles.`,
+        overrideConfig
       );
 
-      res.json({
+      const statusCode = result.success ? 200 : 400;
+      res.status(statusCode).json({
         success: result.success,
         status: result.status,
         provider: result.provider,
+        error: result.error,
         message: result.status === 'delivered' 
           ? `SMS délivré avec succès à ${target} via ${result.provider} !`
           : result.status === 'simulated'
           ? `SMS simulé avec succès dans le journal pour ${target} (fournisseur: ${result.provider}).`
-          : `Échec d'envoi du SMS via ${result.provider}.`
+          : `Échec d'envoi du SMS via ${result.provider}${result.error ? ` : ${result.error}` : '.'}`
       });
     } catch (err: any) {
       console.error("School test SMS error:", err);
@@ -33747,27 +34062,30 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       const school = db.prepare("SELECT id, nom, telephone FROM school_info WHERE id = ?").get(schoolId) as any;
       if (!school) return res.status(404).json({ error: "Établissement introuvable." });
 
-      const { testPhone } = req.body;
+      const { testPhone, overrideConfig } = req.body || {};
       const target = testPhone || school.telephone;
       if (!target) return res.status(400).json({ error: "Numéro WhatsApp requis." });
 
       const result = await sendWhatsAppService({
         to: target,
         schoolId,
+        overrideConfig,
         recipientName: school.nom,
         message: `Test passerelle WhatsApp pour ${school.nom}. Vos notifications automatiques WhatsApp sont opérationnelles.`
       });
 
-      res.json({
+      const statusCode = result.success ? 200 : 400;
+      res.status(statusCode).json({
         success: result.success,
         status: result.status,
         provider: result.provider,
         simulated: result.simulated,
+        error: result.error,
         message: result.simulated
           ? `Message WhatsApp simulé avec succès pour ${target} (fournisseur: ${result.provider}).`
           : result.success
           ? `Message WhatsApp envoyé avec succès à ${target} via ${result.provider} !`
-          : `Échec d'envoi WhatsApp via ${result.provider} : ${result.error || ''}`
+          : `Échec d'envoi WhatsApp via ${result.provider} : ${result.error || 'Erreur inconnue'}`
       });
     } catch (err: any) {
       res.status(500).json({ error: "Échec du test WhatsApp : " + err.message });
