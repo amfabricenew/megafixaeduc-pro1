@@ -1,10 +1,9 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Cloud, RefreshCw, RotateCcw, ShieldCheck } from 'lucide-react';
+import { Cloud, RotateCcw } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { apiFetch } from '../utils/api';
 import { useAuth } from '../contexts/AuthContext';
 import { useFirebase } from '../contexts/FirebaseContext';
-import { auth, googleProvider, signInWithPopup } from '../lib/firebase';
 import { firestoreDbService } from '../services/firestoreDbService';
 
 export interface SchoolSettingsExportSnapshot {
@@ -262,7 +261,7 @@ export const SchoolSettingsCloudExporter: React.FC<SchoolSettingsCloudExporterPr
   const [busy, setBusy] = useState(false);
   const [restoring, setRestoring] = useState(false);
   const [canCloudWrite, setCanCloudWrite] = useState(false);
-  const [lastSavedLabel, setLastSavedLabel] = useState<string | null>(null);
+  const [, setLastSavedLabel] = useState<string | null>(null);
 
   const inFlightRef = useRef(false);
   const hasReconciledOnBootRef = useRef(false);
@@ -461,96 +460,45 @@ export const SchoolSettingsCloudExporter: React.FC<SchoolSettingsCloudExporterPr
     }
   };
 
-  const handleLinkGoogleAndExport = async () => {
-    setBusy(true);
-    try {
-      googleProvider.setCustomParameters({ prompt: 'select_account' });
-      await signInWithPopup(auth, googleProvider);
-      await runPeriodicExport({ force: true, notify: true });
-    } catch (err: any) {
-      if (
-        err?.code !== 'auth/popup-closed-by-user' &&
-        err?.code !== 'auth/cancelled-popup-request'
-      ) {
-        toast.error(err?.message || 'Connexion Google annulée.');
-      }
-    } finally {
-      setBusy(false);
-    }
-  };
-
   if (mode === 'headless') {
     return null;
   }
 
   return (
     <div className="bg-indigo-50/70 p-6 rounded-3xl border border-indigo-100 space-y-4">
-      <div className="flex items-start justify-between gap-4">
-        <div className="flex items-center gap-3 text-indigo-900">
-          <div className="w-10 h-10 rounded-xl bg-white text-indigo-600 shadow-xs flex items-center justify-center shrink-0">
-            <Cloud size={22} />
-          </div>
-          <div>
-            <h4 className="font-bold text-lg leading-tight">
-              Exportation Périodique Cloud Firestore
-            </h4>
-            <p className="text-xs text-indigo-700/80 mt-0.5">
-              Sauvegarde automatique des paramètres de l&apos;école toutes les{' '}
-              {Math.max(1, Math.round(intervalMs / 1000))} secondes et à chaque modification.
-            </p>
-          </div>
+      <div className="flex items-start gap-3 text-indigo-900">
+        <div className="w-10 h-10 rounded-xl bg-white text-indigo-600 shadow-xs flex items-center justify-center shrink-0">
+          <Cloud size={22} />
         </div>
-        {lastSavedLabel && (
-          <span className="text-[11px] font-bold px-2.5 py-1 rounded-xl bg-white text-indigo-700 border border-indigo-100 shrink-0">
-            Sauvegardé à {lastSavedLabel}
-          </span>
-        )}
+        <div>
+          <h4 className="font-bold text-lg leading-tight">
+            Sauvegarde Automatique Cloud (SQL & Firestore)
+          </h4>
+          <p className="text-xs text-indigo-700/80 mt-0.5">
+            Réplication automatique et continue par le système sans aucune action manuelle requise.
+          </p>
+        </div>
       </div>
 
       <p className="text-sm text-slate-600 leading-relaxed">
         Les coordonnées, l&apos;identité visuelle, la localisation et les années scolaires de votre
-        établissement sont répliquées dans Cloud Firestore pour préserver vos réglages après un
-        rafraîchissement.
+        établissement sont sauvegardées automatiquement par le système à chaque modification et
+        répliquées dans le Cloud pour garantir qu&apos;aucune donnée ne soit perdue.
       </p>
 
-      <div className="flex flex-wrap gap-3 pt-1">
-        {firebaseUser?.emailVerified && canCloudWrite ? (
-          <>
-            <button
-              type="button"
-              onClick={() => void runPeriodicExport({ force: true, notify: true })}
-              disabled={busy || restoring}
-              className="flex-1 min-w-[200px] px-5 py-3.5 bg-indigo-600 text-white rounded-2xl font-bold hover:bg-indigo-700 transition-all shadow-md shadow-indigo-200 flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
-            >
-              <RefreshCw size={18} className={busy ? 'animate-spin' : ''} />
-              <span>{busy ? 'Exportation en cours...' : 'Exporter maintenant'}</span>
-            </button>
-            {hasServerWriteRole && (
-              <button
-                type="button"
-                onClick={handleManualRestore}
-                disabled={busy || restoring}
-                className="px-5 py-3.5 bg-white text-indigo-700 border border-indigo-200 rounded-2xl font-bold hover:bg-indigo-50 transition-all flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
-              >
-                <RotateCcw size={18} className={restoring ? 'animate-spin' : ''} />
-                <span>{restoring ? 'Restauration...' : 'Restaurer depuis Cloud'}</span>
-              </button>
-            )}
-          </>
-        ) : (
+      {firebaseUser?.emailVerified && canCloudWrite && hasServerWriteRole && (
+        <div className="flex flex-wrap gap-3 pt-1">
           <button
             type="button"
-            onClick={handleLinkGoogleAndExport}
-            disabled={busy}
-            className="w-full px-5 py-3.5 bg-indigo-600 text-white rounded-2xl font-bold hover:bg-indigo-700 transition-all shadow-md shadow-indigo-200 flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
+            onClick={handleManualRestore}
+            disabled={busy || restoring}
+            className="px-5 py-3 bg-white text-indigo-700 border border-indigo-200 rounded-2xl font-bold hover:bg-indigo-50 transition-all flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer text-sm"
           >
-            <ShieldCheck size={18} />
-            <span>
-              {busy ? 'Connexion...' : 'Activer la sauvegarde Cloud Firestore (Google)'}
-            </span>
+            <RotateCcw size={17} className={restoring ? 'animate-spin' : ''} />
+            <span>{restoring ? 'Restauration en cours...' : 'Restaurer les paramètres depuis le Cloud'}</span>
           </button>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
 };

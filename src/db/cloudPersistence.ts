@@ -1,6 +1,6 @@
 import zlib from 'zlib';
 import crypto from 'crypto';
-import { eq } from 'drizzle-orm';
+import { and, desc, eq } from 'drizzle-orm';
 import { pgDb, isCloudSqlConfigured } from './index.ts';
 import {
   cloudCheckpoints,
@@ -476,5 +476,76 @@ export async function saveSchoolBackupToCloudSql(params: {
   } catch (error) {
     console.error('Failed to save school backup snapshot to Cloud SQL:', error);
     throw new Error('Cloud SQL snapshot save failed.', { cause: error });
+  }
+}
+
+export async function loadSchoolBackupFromCloudSql(
+  schoolId: number,
+  checksumSha256?: string | null
+): Promise<{
+  id: number;
+  schoolId: number;
+  label: string | null;
+  backupType: string;
+  format: string;
+  checksumSha256: string | null;
+  sizeBytes: number | null;
+  payload: string;
+  createdAt: Date | null;
+} | null> {
+  if (!isCloudSqlConfigured()) return null;
+  try {
+    if (checksumSha256) {
+      const exact = await pgDb
+        .select()
+        .from(cloudBackupSnapshots)
+        .where(
+          and(
+            eq(cloudBackupSnapshots.schoolId, schoolId),
+            eq(cloudBackupSnapshots.checksumSha256, checksumSha256)
+          )
+        )
+        .orderBy(desc(cloudBackupSnapshots.createdAt))
+        .limit(1);
+      if (exact[0]?.payload) {
+        return exact[0];
+      }
+    }
+
+    const latest = await pgDb
+      .select()
+      .from(cloudBackupSnapshots)
+      .where(eq(cloudBackupSnapshots.schoolId, schoolId))
+      .orderBy(desc(cloudBackupSnapshots.createdAt))
+      .limit(1);
+
+    return latest[0] || null;
+  } catch (error) {
+    console.error('Failed to load school backup snapshot from Cloud SQL:', error);
+    return null;
+  }
+}
+
+export async function listSchoolBackupsFromCloudSql(schoolId: number, limitCount = 20) {
+  if (!isCloudSqlConfigured()) return [];
+  try {
+    return await pgDb
+      .select({
+        id: cloudBackupSnapshots.id,
+        schoolId: cloudBackupSnapshots.schoolId,
+        label: cloudBackupSnapshots.label,
+        backupType: cloudBackupSnapshots.backupType,
+        format: cloudBackupSnapshots.format,
+        checksumSha256: cloudBackupSnapshots.checksumSha256,
+        sizeBytes: cloudBackupSnapshots.sizeBytes,
+        createdAt: cloudBackupSnapshots.createdAt,
+      })
+      .from(cloudBackupSnapshots)
+      .where(eq(cloudBackupSnapshots.schoolId, schoolId))
+      .orderBy(desc(cloudBackupSnapshots.createdAt))
+      .limit(limitCount);
+  } catch (error) {
+    console.error('Failed to list school backups from Cloud SQL:', error);
+    return [];
   }
 }

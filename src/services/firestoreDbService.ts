@@ -177,6 +177,8 @@ export interface FirestoreSchoolRequestInput {
   school_id?: number | null;
 }
 
+const syncedSchoolSnapshotHashes = new Map<number, string>();
+
 /**
  * Cloud Firestore Database Management Service
  * Uses database ID `ai-studio-complexescolaire-58020480-d049-4084-942d-a5a7b046898c`
@@ -632,6 +634,24 @@ export const firestoreDbService = {
     for (const sc of school_info) {
       if (await this.upsertSchoolRecord(sc, { throwOnError: options.throwOnError ?? false })) {
         counts.schools++;
+      }
+      const sid = Number(sc.id);
+      if (Number.isFinite(sid) && sid > 0) {
+        const snapshotPayload = {
+          schemaVersion: 1,
+          exportedAt: nowIso(),
+          school_id: sid,
+          schoolInfo: sc,
+        };
+        const digest = sanitizeSchoolConfigPayload({ schoolInfo: sc });
+        if (syncedSchoolSnapshotHashes.get(sid) !== digest) {
+          const savedCfg = await this.saveSchoolConfigSnapshot(sid, snapshotPayload, {
+            throwOnError: options.throwOnError ?? false,
+          });
+          if (savedCfg) {
+            syncedSchoolSnapshotHashes.set(sid, digest);
+          }
+        }
       }
     }
 

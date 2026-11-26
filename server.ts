@@ -32,8 +32,10 @@ import { GoogleGenAI } from "@google/genai";
 import { isCloudSqlConfigured } from "./src/db/index.ts";
 import {
   getMasterCheckpointMeta,
+  listSchoolBackupsFromCloudSql,
   loadMasterCheckpoint,
   loadNormalizedRelationalState,
+  loadSchoolBackupFromCloudSql,
   saveMasterCheckpointToCloudSql,
   saveSchoolBackupToCloudSql,
 } from "./src/db/cloudPersistence.ts";
@@ -409,6 +411,22 @@ db.exec(`
   );
 `);
 
+function parseDbTimestampUtcMs(value: unknown): number {
+  if (!value) return 0;
+  if (value instanceof Date) {
+    const ms = value.getTime();
+    return Number.isFinite(ms) ? ms : 0;
+  }
+  const raw = String(value).trim();
+  if (!raw) return 0;
+  // SQLite CURRENT_TIMESTAMP emits 'YYYY-MM-DD HH:MM:SS' in UTC without timezone suffix
+  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d+)?$/.test(raw)
+    ? `${raw.replace(' ', 'T')}Z`
+    : raw;
+  const ms = Date.parse(normalized);
+  return Number.isFinite(ms) ? ms : 0;
+}
+
 // Graceful cleanup to ensure WAL pages are flushed and checkpointed
 const flushAndCloseDb = () => {
   try {
@@ -432,8 +450,28 @@ const flushAndCloseDb = () => {
   }
 };
 
-process.on('SIGINT', () => { flushAndCloseDb(); process.exit(0); });
-process.on('SIGTERM', () => { flushAndCloseDb(); process.exit(0); });
+let shutdownStarted = false;
+const gracefulShutdown = async (signal: string) => {
+  if (shutdownStarted) return;
+  shutdownStarted = true;
+  try {
+    if (checkpointTimer) {
+      clearTimeout(checkpointTimer);
+      checkpointTimer = null;
+    }
+    if (db && db.open && typeof saveCheckpoint === 'function') {
+      await Promise.race([
+        saveCheckpoint(`shutdown:${signal}`).catch(() => false),
+        new Promise((resolve) => setTimeout(resolve, 1800)),
+      ]);
+    }
+  } catch {}
+  flushAndCloseDb();
+  process.exit(0);
+};
+
+process.on('SIGINT', () => { void gracefulShutdown('SIGINT'); });
+process.on('SIGTERM', () => { void gracefulShutdown('SIGTERM'); });
 process.on('beforeExit', () => { flushAndCloseDb(); });
 
 // Post-schema migrations and dependent tables run safely inside initializeDatabase() after core tables exist.
@@ -858,7 +896,6 @@ function generateFullSqlDump(): string {
   const sqlChunks: string[] = ["PRAGMA foreign_keys=OFF;\nBEGIN TRANSACTION;\n"];
 
   for (const table of allTables) {
-    if (table === 'backup_snapshots') continue;
     const rows = db.prepare(`SELECT * FROM "${table}"`).all() as any[];
     if (rows.length > 0) {
       for (const row of rows) {
@@ -6612,9 +6649,10 @@ async function startServer() {
     }
   }
 
-  // Database Initialization
+  // Database Initialization & Cloud SQL Hydration
   try {
     await initializeDatabase();
+    await ensureCloudSqlHydrated();
   } catch (e) {
     console.error("Database initialization failed:", e);
   }
@@ -28872,7 +28910,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
     let conf = db.prepare("SELECT * FROM backup_configurations WHERE school_id = ?").get(schoolId) as any;
     if (!conf) {
       db.prepare(`
-        INSERT INTO backup_configurations (
+        INSERT OR IGNORE INTO backup_configurations (
           school_id, auto_backup_enabled, frequency, backup_time, retention_count,
           include_users, include_students, include_grades, include_financials,
           include_documents, include_audit_logs, encryption_enabled, storage_location,
@@ -28883,6 +28921,19 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
     }
     return conf;
   }
+
+  function ensureAllSchoolsBackupConfigs() {
+    try {
+      const schoolsList = db.prepare("SELECT id FROM school_info ORDER BY id ASC").all() as Array<{ id: number }>;
+      for (const s of schoolsList) {
+        ensureSchoolBackupConfig(Number(s.id));
+      }
+    } catch (e) {
+      console.warn('[Backup Scheduler] ensureAllSchoolsBackupConfigs notice:', e);
+    }
+  }
+
+  const automatedBackupLocks = new Map<number, Promise<any>>();
 
   async function performBackupSnapshot({
     schoolId,
@@ -28923,6 +28974,8 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
 
     const counts: Record<string, number> = {};
     let totalRecords = 0;
+    let payloadContent = '';
+    let checksumTarget = '';
 
     if (format === 'json') {
       const exportData: Record<string, any> = {
@@ -28937,6 +28990,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         },
         entities: {}
       };
+      const digestEntities: Record<string, any> = {};
 
       for (const table of tablesToExport) {
         const columnsInfo = db.prepare(`PRAGMA table_info(${table})`).all() as any[];
@@ -28948,16 +29002,17 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         } else if (table === 'school_info') {
           rows = db.prepare(`SELECT * FROM ${table} WHERE id = ?`).all(schoolId);
         } else if (['utilisateurs', 'role_permissions'].includes(table)) {
-          rows = db.prepare(`SELECT * FROM ${table} WHERE school_id = ? OR school_id IS NULL`).all(schoolId);
+          rows = db.prepare(`SELECT * FROM ${table} WHERE school_id = ?`).all(schoolId);
         }
 
         exportData.entities[table] = rows;
+        digestEntities[table] = rows;
         counts[table] = rows.length;
         totalRecords += rows.length;
       }
 
-      const content = JSON.stringify(exportData, null, 2);
-      fs.writeFileSync(filePath, content, 'utf-8');
+      payloadContent = JSON.stringify(exportData, null, 2);
+      checksumTarget = JSON.stringify(digestEntities);
     } else {
       // SQL dump format
       let sqlDump = `-- MégafixaEduc Pro Database Backup\n`;
@@ -28966,6 +29021,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       sqlDump += `-- Backup Type: ${backupType}\n\n`;
       sqlDump += "PRAGMA foreign_keys=OFF;\n";
       sqlDump += "BEGIN TRANSACTION;\n\n";
+      let bodyOnly = '';
 
       for (const table of tablesToExport) {
         const columnsInfo = db.prepare(`PRAGMA table_info(${table})`).all() as any[];
@@ -28977,37 +29033,60 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         } else if (table === 'school_info') {
           rows = db.prepare(`SELECT * FROM ${table} WHERE id = ?`).all(schoolId);
         } else if (['utilisateurs', 'role_permissions'].includes(table)) {
-          rows = db.prepare(`SELECT * FROM ${table} WHERE school_id = ? OR school_id IS NULL`).all(schoolId);
+          rows = db.prepare(`SELECT * FROM ${table} WHERE school_id = ?`).all(schoolId);
         }
 
         counts[table] = rows.length;
         totalRecords += rows.length;
 
         if (rows.length > 0) {
-          sqlDump += `-- Table: ${table} (${rows.length} rows)\n`;
+          let section = `-- Table: ${table} (${rows.length} rows)\n`;
           for (const row of rows) {
             const cols = Object.keys(row);
-            const vals = cols.map(c => {
-              const v = row[c];
-              if (v === null || v === undefined) return "NULL";
-              if (typeof v === 'string') return `'${v.replace(/'/g, "''")}'`;
-              return v;
-            });
-            sqlDump += `INSERT OR REPLACE INTO ${table} (${cols.join(", ")}) VALUES (${vals.join(", ")});\n`;
+            const vals = cols.map(c => serializeSqlValue(row[c]));
+            section += `INSERT OR REPLACE INTO ${table} (${cols.join(", ")}) VALUES (${vals.join(", ")});\n`;
           }
-          sqlDump += "\n";
+          section += "\n";
+          sqlDump += section;
+          bodyOnly += section;
         }
       }
 
       sqlDump += "COMMIT;\n";
       sqlDump += "PRAGMA foreign_keys=ON;\n";
-
-      fs.writeFileSync(filePath, sqlDump, 'utf-8');
+      payloadContent = sqlDump;
+      checksumTarget = bodyOnly;
     }
 
+    const checksum = crypto.createHash('sha256').update(checksumTarget, 'utf8').digest('hex');
+
+    // For automated backups, avoid generating duplicate snapshots when nothing changed recently
+    if (backupType === 'automated') {
+      const latestAuto = db.prepare(`
+        SELECT * FROM backup_snapshots
+        WHERE school_id = ? AND backup_type = 'automated'
+        ORDER BY created_at DESC, id DESC LIMIT 1
+      `).get(schoolId) as any;
+
+      if (latestAuto && latestAuto.checksum_sha256 === checksum) {
+        const ageMs = Date.now() - parseDbTimestampUtcMs(latestAuto.created_at);
+        if (ageMs < 6 * 60 * 60 * 1000) {
+          ensureSchoolBackupConfig(schoolId);
+          db.prepare(`
+            UPDATE backup_configurations SET
+              last_backup_at = CURRENT_TIMESTAMP,
+              last_backup_status = 'success',
+              updated_at = CURRENT_TIMESTAMP
+            WHERE school_id = ?
+          `).run(schoolId);
+          return latestAuto;
+        }
+      }
+    }
+
+    fs.writeFileSync(filePath, payloadContent, 'utf-8');
     const stats = fs.statSync(filePath);
-    const fileBuffer = fs.readFileSync(filePath);
-    const checksum = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+    const fileBuffer = Buffer.from(payloadContent, 'utf-8');
 
     const result = db.prepare(`
       INSERT INTO backup_snapshots (
@@ -29017,7 +29096,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
     `).run(
       schoolId,
       filename,
-      label || `Sauvegarde ${backupType === 'users_only' ? 'Utilisateurs' : backupType === 'full' ? 'Complète' : backupType} (${new Date().toLocaleDateString('fr-FR')})`,
+      label || `Sauvegarde ${backupType === 'automated' ? 'automatique système' : backupType === 'users_only' ? 'Utilisateurs' : backupType === 'full' ? 'Complète' : backupType} (${new Date().toLocaleDateString('fr-FR')})`,
       backupType,
       format,
       stats.size,
@@ -29035,12 +29114,12 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       try {
         const syncedId = await saveSchoolBackupToCloudSql({
           schoolId,
-          label: label || `Sauvegarde`,
+          label: label || `Sauvegarde automatique`,
           backupType,
           format,
           checksumSha256: checksum,
           sizeBytes: stats.size,
-          payload: fileBuffer.toString('utf-8'),
+          payload: payloadContent,
         });
         if (syncedId) {
           console.log(`[Backup] Snapshot ${snapshotId} synced to Cloud SQL PostgreSQL (cloud_id=${syncedId}).`);
@@ -29051,6 +29130,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
     }
 
     // Update config stats
+    ensureSchoolBackupConfig(schoolId);
     const sizeDisplay = stats.size > 1024 * 1024 
       ? `${(stats.size / (1024 * 1024)).toFixed(2)} Mo`
       : `${(stats.size / 1024).toFixed(1)} Ko`;
@@ -29070,7 +29150,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
     const snapshots = db.prepare(`
       SELECT id, storage_path FROM backup_snapshots 
       WHERE school_id = ? AND backup_type = 'automated'
-      ORDER BY created_at DESC
+      ORDER BY created_at DESC, id DESC
     `).all(schoolId) as any[];
 
     if (snapshots.length > retention) {
@@ -29088,8 +29168,108 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
     }
 
     logActivity(createdBy || 1, 'CREATE_BACKUP', 'backup_snapshots', snapshotId, { filename, backupType, format, size: stats.size }, schoolId);
+    scheduleCheckpoint('backup_snapshot', 400);
 
     return db.prepare("SELECT * FROM backup_snapshots WHERE id = ?").get(snapshotId);
+  }
+
+  async function ensureInitialSchoolBackupFromCloudOrCreate(schoolId: number, triggerReason = 'auto') {
+    const existingLock = automatedBackupLocks.get(schoolId);
+    if (existingLock) return existingLock;
+
+    const task = (async () => {
+      try {
+        ensureSchoolBackupConfig(schoolId);
+        const countRow = db.prepare("SELECT COUNT(*) as c FROM backup_snapshots WHERE school_id = ?").get(schoolId) as any;
+        if (Number(countRow?.c || 0) === 0 && isCloudSqlConfigured()) {
+          const cloudList = await listSchoolBackupsFromCloudSql(schoolId, 14).catch(() => []);
+          for (const cs of cloudList) {
+            const stamp = (cs.createdAt ? new Date(cs.createdAt) : new Date()).toISOString().replace(/[:.]/g, '-');
+            const filename = `backup_school_${schoolId}_${cs.backupType || 'automated'}_${stamp}.${cs.format || 'sql'}`;
+            const storagePath = path.join(BACKUPS_DIR, filename);
+            db.prepare(`
+              INSERT INTO backup_snapshots (
+                school_id, filename, label, backup_type, format, size_bytes,
+                entities_count, status, storage_path, checksum_sha256, created_by, created_at, notes
+              ) VALUES (?, ?, ?, ?, ?, ?, '{}', 'completed', ?, ?, NULL, ?, ?)
+            `).run(
+              schoolId,
+              filename,
+              cs.label || 'Sauvegarde automatique système (Cloud SQL)',
+              cs.backupType || 'automated',
+              cs.format || 'sql',
+              Number(cs.sizeBytes || 0),
+              storagePath,
+              cs.checksumSha256 || null,
+              cs.createdAt ? new Date(cs.createdAt).toISOString().replace('T', ' ').substring(0, 19) : new Date().toISOString().replace('T', ' ').substring(0, 19),
+              'Archive synchronisée depuis Cloud SQL PostgreSQL'
+            );
+          }
+        }
+
+        const afterCountRow = db.prepare("SELECT COUNT(*) as c FROM backup_snapshots WHERE school_id = ?").get(schoolId) as any;
+        if (Number(afterCountRow?.c || 0) === 0) {
+          console.log(`[Backup Scheduler] Creating initial automated baseline backup for school ${schoolId} (${triggerReason})...`);
+          await performBackupSnapshot({
+            schoolId,
+            backupType: 'automated',
+            format: 'sql',
+            label: 'Sauvegarde automatique initiale système',
+            createdBy: null,
+            notes: `Sauvegarde automatique initiale créée par le système (${triggerReason})`
+          });
+        }
+      } finally {
+        automatedBackupLocks.delete(schoolId);
+      }
+    })();
+
+    automatedBackupLocks.set(schoolId, task);
+    return task;
+  }
+
+  async function runAutomatedSchoolBackupsCheck(triggerReason = 'scheduler') {
+    try {
+      ensureAllSchoolsBackupConfigs();
+      const configs = db.prepare("SELECT * FROM backup_configurations WHERE auto_backup_enabled = 1").all() as any[];
+      const now = Date.now();
+      for (const conf of configs) {
+        const schoolId = Number(conf.school_id);
+        const snapCountRow = db.prepare("SELECT COUNT(*) as c FROM backup_snapshots WHERE school_id = ?").get(schoolId) as any;
+        if (Number(snapCountRow?.c || 0) === 0) {
+          await ensureInitialSchoolBackupFromCloudOrCreate(schoolId, triggerReason).catch((e) =>
+            console.error(`[Backup Scheduler Error] School ${schoolId}:`, e)
+          );
+          continue;
+        }
+
+        const lastBackupMs = parseDbTimestampUtcMs(conf.last_backup_at);
+        let thresholdMs = 24 * 60 * 60 * 1000;
+        if (conf.frequency === 'hourly') thresholdMs = 60 * 60 * 1000;
+        else if (conf.frequency === 'weekly') thresholdMs = 7 * 24 * 60 * 60 * 1000;
+        else if (conf.frequency === 'monthly') thresholdMs = 30 * 24 * 60 * 60 * 1000;
+
+        if (now - lastBackupMs >= thresholdMs) {
+          if (automatedBackupLocks.has(schoolId)) continue;
+          const p = performBackupSnapshot({
+            schoolId,
+            backupType: 'automated',
+            format: 'sql',
+            label: `Sauvegarde automatique système (${conf.frequency})`,
+            createdBy: null,
+            notes: `Cycle automatique exécuté à ${new Date().toISOString()} (${triggerReason})`
+          }).catch((e) => {
+            console.error(`[Backup Scheduler Error] School ${schoolId}:`, e);
+          }).finally(() => {
+            automatedBackupLocks.delete(schoolId);
+          });
+          automatedBackupLocks.set(schoolId, p);
+          await p;
+        }
+      }
+    } catch (schedErr) {
+      console.error("[Backup Scheduler] Error in background backup check:", schedErr);
+    }
   }
 
   // GET backup config
@@ -29189,18 +29369,20 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
   });
 
   // GET snapshots list
-  app.get("/api/backups/snapshots", authenticateToken, (req: any, res) => {
+  app.get("/api/backups/snapshots", authenticateToken, async (req: any, res) => {
     try {
       if (!isUserAdminOrFonde(req.user?.role)) {
         return res.status(403).json({ error: "Accès réservé exclusivement à l'administrateur (Fondé)" });
       }
       const schoolId = req.schoolId || 1;
+      await ensureInitialSchoolBackupFromCloudOrCreate(schoolId, 'snapshots_view');
+
       const snapshots = db.prepare(`
         SELECT s.*, u.nom as created_by_name
         FROM backup_snapshots s
         LEFT JOIN utilisateurs u ON u.id = s.created_by
         WHERE s.school_id = ?
-        ORDER BY s.created_at DESC
+        ORDER BY s.created_at DESC, s.id DESC
       `).all(schoolId);
 
       const totalSize = (snapshots as any[]).reduce((sum, s) => sum + (s.size_bytes || 0), 0);
@@ -29222,7 +29404,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
     }
   });
 
-  // POST create manual backup
+  // POST create backup
   app.post("/api/backups/create", authenticateToken, async (req: any, res) => {
     try {
       if (!isUserAdminOrFonde(req.user?.role)) {
@@ -29247,8 +29429,8 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
     }
   });
 
-  // GET download backup file
-  app.get("/api/backups/download/:id", authenticateToken, (req: any, res) => {
+  // GET download backup file (auto-recovers from Cloud SQL if local container restarted)
+  app.get("/api/backups/download/:id", authenticateToken, async (req: any, res) => {
     try {
       if (!isUserAdminOrFonde(req.user?.role)) {
         return res.status(403).json({ error: "Accès réservé exclusivement à l'administrateur (Fondé)" });
@@ -29261,7 +29443,17 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
 
       const filePath = snapshot.storage_path || path.join(BACKUPS_DIR, snapshot.filename);
       if (!fs.existsSync(filePath)) {
-        return res.status(404).json({ error: "Le fichier physique est manquant sur le serveur." });
+        const cloudSnap = await loadSchoolBackupFromCloudSql(schoolId, snapshot.checksum_sha256);
+        if (!cloudSnap?.payload) {
+          return res.status(404).json({ error: "Archive introuvable localement et dans Cloud SQL." });
+        }
+        try {
+          fs.mkdirSync(path.dirname(filePath), { recursive: true });
+          fs.writeFileSync(filePath, cloudSnap.payload, 'utf-8');
+        } catch {}
+        res.setHeader('Content-Disposition', `attachment; filename="${snapshot.filename}"`);
+        res.setHeader('Content-Type', snapshot.format === 'json' ? 'application/json' : 'text/plain');
+        return res.send(cloudSnap.payload);
       }
 
       res.setHeader('Content-Disposition', `attachment; filename="${snapshot.filename}"`);
@@ -29563,8 +29755,8 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
     return { applied, skipped };
   }
 
-  // POST restore backup snapshot
-  app.post("/api/backups/restore/:id", authenticateToken, (req: any, res) => {
+  // POST restore backup snapshot (auto-recovers from Cloud SQL if local container restarted)
+  app.post("/api/backups/restore/:id", authenticateToken, async (req: any, res) => {
     try {
       if (!isUserAdminOrFonde(req.user?.role)) {
         return res.status(403).json({ error: "Accès réservé exclusivement à l'administrateur (Fondé)" });
@@ -29576,11 +29768,21 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       }
 
       const filePath = snapshot.storage_path || path.join(BACKUPS_DIR, snapshot.filename);
-      if (!fs.existsSync(filePath)) {
-        return res.status(404).json({ error: "Fichier physique de sauvegarde introuvable sur le disque." });
+      let fileContent = '';
+      if (fs.existsSync(filePath)) {
+        fileContent = fs.readFileSync(filePath, 'utf-8');
+      } else {
+        const cloudSnap = await loadSchoolBackupFromCloudSql(schoolId, snapshot.checksum_sha256);
+        if (!cloudSnap?.payload) {
+          return res.status(404).json({ error: "Archive de sauvegarde introuvable localement et dans Cloud SQL." });
+        }
+        fileContent = cloudSnap.payload;
+        try {
+          fs.mkdirSync(path.dirname(filePath), { recursive: true });
+          fs.writeFileSync(filePath, fileContent, 'utf-8');
+        } catch {}
       }
 
-      const fileContent = fs.readFileSync(filePath, 'utf-8');
       const format = snapshot.format === 'json' ? 'json' : 'sql';
       const result = applyTenantScopedRestorePayload({
         format,
@@ -29745,34 +29947,14 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
     }
   });
 
-  // Automated background backup scheduler (checks every 30 minutes)
-  setInterval(() => {
-    try {
-      const configs = db.prepare("SELECT * FROM backup_configurations WHERE auto_backup_enabled = 1").all() as any[];
-      for (const conf of configs) {
-        const lastBackup = conf.last_backup_at ? new Date(conf.last_backup_at).getTime() : 0;
-        const now = Date.now();
-        let thresholdMs = 24 * 60 * 60 * 1000; // default daily
-        if (conf.frequency === 'hourly') thresholdMs = 60 * 60 * 1000;
-        else if (conf.frequency === 'weekly') thresholdMs = 7 * 24 * 60 * 60 * 1000;
-        else if (conf.frequency === 'monthly') thresholdMs = 30 * 24 * 60 * 60 * 1000;
+  // Automated background backup scheduler: run immediately after boot hydration and every 5 minutes
+  setTimeout(() => {
+    void runAutomatedSchoolBackupsCheck('startup');
+  }, 4000);
 
-        if (now - lastBackup >= thresholdMs) {
-          console.log(`[Backup Scheduler] Triggering automated backup for school ${conf.school_id}...`);
-          performBackupSnapshot({
-            schoolId: conf.school_id,
-            backupType: 'automated',
-            format: 'sql',
-            label: `Sauvegarde automatique système (${conf.frequency})`,
-            createdBy: null,
-            notes: `Cycle automatique périodique exécuté à ${new Date().toISOString()}`
-          }).catch(e => console.error(`[Backup Scheduler Error] School ${conf.school_id}:`, e));
-        }
-      }
-    } catch (schedErr) {
-      console.error("[Backup Scheduler] Error in background backup check:", schedErr);
-    }
-  }, 30 * 60 * 1000);
+  setInterval(() => {
+    void runAutomatedSchoolBackupsCheck('interval_5m');
+  }, 5 * 60 * 1000);
 
 
   // Alertes

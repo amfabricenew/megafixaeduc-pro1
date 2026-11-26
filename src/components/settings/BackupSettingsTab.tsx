@@ -12,27 +12,27 @@ import {
   CheckCircle2,
   AlertTriangle,
   HardDrive,
-  Cloud,
   FileCode,
-  FileText,
   Users,
-  Settings as SettingsIcon,
   Trash2,
-  Play,
   RotateCcw,
-  Sparkles,
   Save,
   Calendar,
-  Lock,
   Copy,
-  Layers,
   ArrowDownToLine,
-  Activity,
   Check,
-  Info
 } from 'lucide-react';
 import { BackupConfig, BackupSnapshot } from '../../types';
 
+function formatBackupDate(value?: string | null): string {
+  if (!value) return 'Automatique en cours';
+  const raw = String(value).trim();
+  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d+)?$/.test(raw)
+    ? `${raw.replace(' ', 'T')}Z`
+    : raw;
+  const d = new Date(normalized);
+  return Number.isNaN(d.getTime()) ? raw : d.toLocaleString('fr-FR');
+}
 
 export default function BackupSettingsTab() {
   const confirm = useConfirm();
@@ -63,19 +63,7 @@ export default function BackupSettingsTab() {
   const [summary, setSummary] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [savingConfig, setSavingConfig] = useState(false);
-  const [creatingBackup, setCreatingBackup] = useState(false);
   const [restoringId, setRestoringId] = useState<number | null>(null);
-  const [testingCloud, setTestingCloud] = useState(false);
-  const [cloudStatus, setCloudStatus] = useState<any>(null);
-
-  // Modals state
-  const [showCreateModal, setShowCreateModal] = useState(false);
-  const [createForm, setCreateForm] = useState({
-    backup_type: 'full',
-    format: 'sql',
-    label: '',
-    notes: ''
-  });
 
   const [showUploadModal, setShowUploadModal] = useState(false);
   const [uploadFileContent, setUploadFileContent] = useState<string>('');
@@ -133,31 +121,6 @@ export default function BackupSettingsTab() {
       toast.error("Erreur réseau: " + err.message);
     } finally {
       setSavingConfig(false);
-    }
-  };
-
-  const handleCreateBackup = async (e: React.FormEvent) => {
-    e.preventDefault();
-    try {
-      setCreatingBackup(true);
-      const res = await apiFetch('/api/backups/create', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(createForm)
-      });
-      if (res.ok) {
-        toast.success("Nouvelle archive de sauvegarde générée avec succès !");
-        setShowCreateModal(false);
-        setCreateForm({ backup_type: 'full', format: 'sql', label: '', notes: '' });
-        fetchData();
-      } else {
-        const err = await res.json();
-        toast.error(err.error || "Échec de la génération de la sauvegarde.");
-      }
-    } catch (err: any) {
-      toast.error("Erreur: " + err.message);
-    } finally {
-      setCreatingBackup(false);
     }
   };
 
@@ -262,25 +225,6 @@ export default function BackupSettingsTab() {
     }
   };
 
-  const handleTestCloud = async () => {
-    try {
-      setTestingCloud(true);
-      setCloudStatus(null);
-      const res = await apiFetch('/api/backups/cloud-sync-test', { method: 'POST' });
-      if (res.ok) {
-        const data = await res.json();
-        setCloudStatus(data);
-        toast.success(data.message || "Passerelle Cloud opérationnelle !");
-      } else {
-        toast.error("Échec de la communication avec la passerelle Cloud.");
-      }
-    } catch (err: any) {
-      toast.error("Erreur Cloud: " + err.message);
-    } finally {
-      setTestingCloud(false);
-    }
-  };
-
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -362,24 +306,24 @@ export default function BackupSettingsTab() {
             <span className="p-2 bg-indigo-500/20 text-indigo-400 rounded-xl border border-indigo-500/30">
               <Database className="w-5 h-5" />
             </span>
-            <h2 className="text-xl font-bold tracking-tight">Sauvegarde & Protection des Données Utilisateurs</h2>
+            <h2 className="text-xl font-bold tracking-tight">Sauvegardes Automatiques Système & Restauration</h2>
           </div>
           <p className="text-xs text-slate-300 max-w-2xl leading-relaxed">
-            Configurez les sauvegardes automatiques de la base de données, sécurisez les comptes utilisateurs, exportez des archives conformes et restaurez vos données en un clic.
+            Vos données (utilisateurs, élèves, notes, paiements et paramètres) sont sauvegardées automatiquement par le système vers Cloud SQL et Cloud Firestore à chaque opération et selon votre cycle planifié.
           </p>
         </div>
 
-        {/* Status Indicators */}
+        {/* Archive Summary */}
         <div className="flex flex-wrap items-center gap-3 shrink-0">
           <div className="bg-white/5 backdrop-blur-md px-4 py-2.5 rounded-xl border border-white/10 text-left">
-            <div className="text-[10px] uppercase font-bold text-slate-400">Dernière Sauvegarde</div>
+            <div className="text-[10px] uppercase font-bold text-slate-400">Dernière Archive</div>
             <div className="text-xs font-bold text-emerald-400 flex items-center gap-1.5 mt-0.5">
               <CheckCircle2 className="w-3.5 h-3.5" />
-              {config.last_backup_at ? new Date(config.last_backup_at).toLocaleString('fr-FR') : 'Aucune'}
+              {formatBackupDate(config.last_backup_at || snapshots[0]?.created_at)}
             </div>
           </div>
           <div className="bg-white/5 backdrop-blur-md px-4 py-2.5 rounded-xl border border-white/10 text-left">
-            <div className="text-[10px] uppercase font-bold text-slate-400">Archives Disponibles</div>
+            <div className="text-[10px] uppercase font-bold text-slate-400">Archives Système</div>
             <div className="text-xs font-bold text-indigo-300 mt-0.5">
               {summary?.count || snapshots.length} ({summary?.total_size_display || '0 Ko'})
             </div>
@@ -390,14 +334,6 @@ export default function BackupSettingsTab() {
       {/* Action Bar */}
       <div className="flex flex-wrap items-center justify-between gap-3 bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
         <div className="flex flex-wrap items-center gap-2.5">
-          <button
-            onClick={() => setShowCreateModal(true)}
-            className="flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-sm transition-all"
-          >
-            <Play className="w-4 h-4 fill-white" />
-            <span>Créer une sauvegarde maintenant</span>
-          </button>
-
           <button
             onClick={handleExportUsersJson}
             className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 text-xs font-bold transition-all"
@@ -442,44 +378,18 @@ export default function BackupSettingsTab() {
             <FileCode className="w-4 h-4 text-purple-600" />
             <span>Télécharger le code source (ZIP &lt; 25 Mo)</span>
           </button>
-
-
         </div>
 
         <div className="flex items-center gap-2">
           <button
-            onClick={handleTestCloud}
-            disabled={testingCloud}
-            className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold transition-all disabled:opacity-50"
-            title="Tester la connectivité de la synchronisation distante"
-          >
-            <Cloud className="w-4 h-4 text-indigo-600" />
-            <span>{testingCloud ? 'Test en cours...' : 'Tester le Cloud'}</span>
-          </button>
-          <button
             onClick={fetchData}
             className="p-2 rounded-xl text-slate-500 hover:text-slate-800 hover:bg-slate-100 transition-colors"
-            title="Actualiser la liste des sauvegardes"
+            title="Actualiser la liste des sauvegardes automatiques"
           >
             <RefreshCw className="w-4 h-4" />
           </button>
         </div>
       </div>
-
-      {cloudStatus && (
-        <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-4 flex items-center justify-between text-xs text-emerald-800">
-          <div className="flex items-center gap-2.5">
-            <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
-            <div>
-              <span className="font-bold">Passerelle de stockage Cloud : </span>
-              {cloudStatus.message} (Latence : {cloudStatus.latency_ms} ms)
-            </div>
-          </div>
-          <button onClick={() => setCloudStatus(null)} className="text-emerald-700 hover:text-emerald-900 font-bold ml-4">
-            Fermer
-          </button>
-        </div>
-      )}
 
       {/* Main Grid: Config Form + Snapshots List */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
@@ -650,16 +560,10 @@ export default function BackupSettingsTab() {
           </div>
 
           {snapshots.length === 0 ? (
-            <div className="py-12 text-center space-y-3 bg-slate-50 rounded-xl border border-dashed border-slate-200">
+            <div className="py-12 text-center space-y-2 bg-slate-50 rounded-xl border border-dashed border-slate-200">
               <Database className="w-10 h-10 text-slate-300 mx-auto" />
-              <p className="text-slate-500 font-medium">Aucune archive de sauvegarde enregistrée pour l'instant.</p>
-              <button
-                onClick={() => setShowCreateModal(true)}
-                className="inline-flex items-center gap-1.5 px-4 py-2 bg-emerald-600 text-white rounded-xl font-bold text-xs hover:bg-emerald-700 transition-colors"
-              >
-                <Play className="w-3.5 h-3.5 fill-white" />
-                Générer la première sauvegarde
-              </button>
+              <p className="text-slate-600 font-medium">Les sauvegardes automatiques du système sont actives.</p>
+              <p className="text-[11px] text-slate-400">Aucune action manuelle requise : l&apos;historique apparaîtra automatiquement après le prochain cycle.</p>
             </div>
           ) : (
             <div className="space-y-3 max-h-[600px] overflow-y-auto pr-1">
@@ -698,7 +602,7 @@ export default function BackupSettingsTab() {
                         <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-500">
                           <span className="flex items-center gap-1">
                             <Calendar className="w-3 h-3 text-slate-400" />
-                            {new Date(snap.created_at).toLocaleString('fr-FR')}
+                            {formatBackupDate(snap.created_at)}
                           </span>
                           <span>•</span>
                           <span>
@@ -784,96 +688,6 @@ export default function BackupSettingsTab() {
           )}
         </div>
       </div>
-
-      {/* Modal: Create Backup */}
-      {showCreateModal && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-200 space-y-5 text-xs animate-in fade-in zoom-in-95 duration-150">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-              <div className="flex items-center gap-2">
-                <Database className="w-5 h-5 text-emerald-600" />
-                <h3 className="font-bold text-slate-800 text-sm">Créer une Sauvegarde Instantanée</h3>
-              </div>
-              <button
-                onClick={() => setShowCreateModal(false)}
-                className="text-slate-400 hover:text-slate-700 text-lg font-bold"
-              >
-                ✕
-              </button>
-            </div>
-
-            <form onSubmit={handleCreateBackup} className="space-y-4">
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Libellé / Titre de la sauvegarde</label>
-                <input
-                  type="text"
-                  value={createForm.label}
-                  onChange={e => setCreateForm({ ...createForm, label: e.target.value })}
-                  placeholder="Ex: Avant clôture 1er trimestre 2026"
-                  className="w-full p-2.5 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Type de périmètre</label>
-                  <select
-                    value={createForm.backup_type}
-                    onChange={e => setCreateForm({ ...createForm, backup_type: e.target.value })}
-                    className="w-full p-2.5 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white font-medium"
-                  >
-                    <option value="full">Base Complète (Recommandé)</option>
-                    <option value="users_only">Utilisateurs & Rôles seuls</option>
-                    <option value="pedagogical">Données Pédagogiques</option>
-                    <option value="financial">Données Financières</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Format de fichier</label>
-                  <select
-                    value={createForm.format}
-                    onChange={e => setCreateForm({ ...createForm, format: e.target.value })}
-                    className="w-full p-2.5 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white font-medium"
-                  >
-                    <option value="sql">SQL Dump (.sql)</option>
-                    <option value="json">JSON Structuré (.json)</option>
-                  </select>
-                </div>
-              </div>
-
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Note explicative (optionnelle)</label>
-                <textarea
-                  rows={2}
-                  value={createForm.notes}
-                  onChange={e => setCreateForm({ ...createForm, notes: e.target.value })}
-                  placeholder="Détails sur l'état de l'école lors de cette sauvegarde..."
-                  className="w-full p-2 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white"
-                />
-              </div>
-
-              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
-                <button
-                  type="button"
-                  onClick={() => setShowCreateModal(false)}
-                  className="px-4 py-2 rounded-xl text-slate-600 hover:bg-slate-100 font-semibold"
-                >
-                  Annuler
-                </button>
-                <button
-                  type="submit"
-                  disabled={creatingBackup}
-                  className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold shadow-sm transition-all disabled:opacity-50"
-                >
-                  <Play className="w-4 h-4 fill-white" />
-                  {creatingBackup ? 'Génération en cours...' : 'Générer la sauvegarde'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
 
       {/* Modal: Upload & Restore Backup */}
       {showUploadModal && (

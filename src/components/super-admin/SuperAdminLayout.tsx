@@ -272,6 +272,31 @@ export default function SuperAdminLayout() {
       }
     });
 
+    const intervalId = window.setInterval(() => {
+      if (!active) return;
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+      runCloudSync();
+    }, 60_000);
+
+    const handleMutationEvent = () => {
+      if (!active) return;
+      window.setTimeout(() => {
+        if (active) runCloudSync();
+      }, 600);
+    };
+    const handleVisibilityOrHide = () => {
+      if (!active) return;
+      if (document.visibilityState === 'hidden') {
+        runCloudSync();
+      }
+    };
+
+    window.addEventListener('app:data-updated', handleMutationEvent);
+    window.addEventListener('schoolInfoChanged', handleMutationEvent);
+    document.addEventListener('visibilitychange', handleVisibilityOrHide);
+    window.addEventListener('pagehide', handleMutationEvent);
+
     const token = localStorage.getItem('token');
     if (token) {
       fetch('/api/super-admin/persistence-status', {
@@ -289,6 +314,11 @@ export default function SuperAdminLayout() {
 
     return () => {
       active = false;
+      window.clearInterval(intervalId);
+      window.removeEventListener('app:data-updated', handleMutationEvent);
+      window.removeEventListener('schoolInfoChanged', handleMutationEvent);
+      document.removeEventListener('visibilitychange', handleVisibilityOrHide);
+      window.removeEventListener('pagehide', handleMutationEvent);
       unsubscribe();
     };
   }, [user?.role, fetchNotifications]);
