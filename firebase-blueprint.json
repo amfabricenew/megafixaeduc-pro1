@@ -41,21 +41,28 @@
     },
     "SchoolRecord": {
       "title": "School Record",
-      "description": "Tenant school entity.",
+      "description": "Tenant school entity persisted in Cloud Firestore.",
       "type": "object",
       "properties": {
         "id": { "type": "integer" },
         "nom": { "type": "string", "minLength": 1, "maxLength": 200 },
         "code_ecole": { "type": "string", "maxLength": 64 },
+        "email": { "type": "string", "maxLength": 254 },
+        "telephone": { "type": "string", "maxLength": 40 },
+        "pays": { "type": "string", "maxLength": 80 },
+        "devise": { "type": "string", "maxLength": 16 },
         "plan_abonnement": { "type": "string", "maxLength": 80 },
         "statut_abonnement": { "type": "string", "maxLength": 40 },
+        "date_fin_abonnement": { "type": "string", "maxLength": 64 },
+        "espace_primaire_actif": { "type": "integer" },
+        "espace_secondaire_actif": { "type": "integer" },
         "updatedAt": { "type": "string", "format": "date-time", "maxLength": 64 }
       },
       "required": ["nom"]
     },
     "UserProfile": {
       "title": "User Profile",
-      "description": "Authenticated user identity and tenant membership.",
+      "description": "Authenticated user identity and tenant role binding.",
       "type": "object",
       "properties": {
         "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
@@ -66,6 +73,56 @@
         "updatedAt": { "type": "string", "format": "date-time", "maxLength": 64 }
       },
       "required": ["email", "role"]
+    },
+    "SuperAdminSetting": {
+      "title": "Super Admin Setting",
+      "description": "Global platform configuration entry stored in Cloud Firestore (restricted to super_admin).",
+      "type": "object",
+      "properties": {
+        "key": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "value": { "type": "string", "maxLength": 200000 },
+        "is_secret": { "type": "boolean" },
+        "updatedAt": { "type": "string", "format": "date-time", "maxLength": 64 }
+      },
+      "required": ["key", "value", "updatedAt"]
+    },
+    "SubscriptionPlan": {
+      "title": "Subscription Plan",
+      "description": "Subscription formula configured by the Super Admin.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "integer" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "price": { "type": "number" },
+        "period": { "type": "string", "maxLength": 40 },
+        "type": { "type": "string", "maxLength": 40 },
+        "color": { "type": "string", "maxLength": 40 },
+        "student_limit": { "type": "integer" },
+        "staff_limit": { "type": "integer" },
+        "is_recommended": { "type": "boolean" },
+        "is_active": { "type": "boolean" },
+        "features": { "type": "array", "description": "Active features assigned to the plan." },
+        "updatedAt": { "type": "string", "format": "date-time", "maxLength": 64 }
+      },
+      "required": ["id", "name", "price", "updatedAt"]
+    },
+    "SchoolRequest": {
+      "title": "School Creation Request",
+      "description": "School onboarding request submitted on the platform (super_admin only).",
+      "type": "object",
+      "properties": {
+        "id": { "type": "integer" },
+        "reference": { "type": "string", "minLength": 3, "maxLength": 64 },
+        "nom_ecole": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "email_ecole": { "type": "string", "maxLength": 254 },
+        "demandeur_nom": { "type": "string", "maxLength": 150 },
+        "demandeur_email": { "type": "string", "maxLength": 254 },
+        "plan_souhaite": { "type": "string", "maxLength": 120 },
+        "statut": { "type": "string", "maxLength": 40 },
+        "school_id": { "type": "integer" },
+        "updatedAt": { "type": "string", "format": "date-time", "maxLength": 64 }
+      },
+      "required": ["reference", "nom_ecole", "statut", "updatedAt"]
     },
     "TenantEntity": {
       "title": "Tenant Scoped Entity",
@@ -107,6 +164,18 @@
     "/users/{userId}": {
       "schema": "UserProfile",
       "description": "Authenticated user profiles with tenant role binding."
+    },
+    "/super_admin_settings/{settingId}": {
+      "schema": "SuperAdminSetting",
+      "description": "Global platform configuration persisted across deployments (super_admin only)."
+    },
+    "/plans/{planId}": {
+      "schema": "SubscriptionPlan",
+      "description": "Configured subscription plans and feature matrices."
+    },
+    "/school_requests/{requestId}": {
+      "schema": "SchoolRequest",
+      "description": "School account creation requests and approval statuses (super_admin only)."
     },
     "/classes/{classId}": {
       "schema": "TenantEntity",

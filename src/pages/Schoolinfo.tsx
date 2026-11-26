@@ -44,6 +44,11 @@ import { useTranslation } from '../contexts/TranslationContext';
 import SchoolCarousel, { SCHOOL_SLIDES } from '../components/SchoolCarousel';
 import { formatAcademicYearLibelle, getDefaultDatesForAcademicYear } from '../utils/academicYear';
 import { APIProvider, Map, AdvancedMarker, useMap, useAdvancedMarkerRef } from '@vis.gl/react-google-maps';
+import { auth } from '../lib/firebase';
+import {
+  SchoolSettingsCloudExporter,
+  exportSchoolSettingsToFirestore,
+} from '../components/SchoolSettingsCloudExporter';
 
 const GOOGLE_MAPS_API_KEY = "AIzaSyB3Q9f0Tyc8b6fMkZ0GfnkpaGsptig2P1Q";
 const MAP_ID = "DEMO_MAP_ID"; // Use a demo map ID or real one if available
@@ -585,6 +590,10 @@ export default function SchoolInfo() {
         body: JSON.stringify(updatedData)
       });
       if (response.ok) {
+        if (auth.currentUser?.emailVerified) {
+          const currentSchoolId = Number(user?.school_id) || 1;
+          void exportSchoolSettingsToFirestore(currentSchoolId, { force: true }).catch(() => {});
+        }
         showToast("Position détectée validée et fixée comme localisation de l'école !");
         window.dispatchEvent(new CustomEvent('schoolInfoChanged'));
         setDetectedLocationModal(null);
@@ -661,6 +670,10 @@ export default function SchoolInfo() {
       });
       
       if (response.ok) {
+        if (auth.currentUser?.emailVerified) {
+          const currentSchoolId = Number(user?.school_id) || 1;
+          void exportSchoolSettingsToFirestore(currentSchoolId, { force: true }).catch(() => {});
+        }
         showToast(t('success_update'));
         window.dispatchEvent(new CustomEvent('schoolInfoChanged'));
       } else {
@@ -1409,6 +1422,10 @@ export default function SchoolInfo() {
                 <p className="text-sm text-slate-500">Gérez les transferts, les transitions et l'historique de vos données académiques.</p>
               </div>
             </div>
+
+            {canWrite && (
+              <SchoolSettingsCloudExporter mode="panel" onRestored={fetchSchoolInfo} />
+            )}
 
             {canWrite && years.some(y => y.est_active_effective) ? (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">

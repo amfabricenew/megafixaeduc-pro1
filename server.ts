@@ -29,8 +29,17 @@ import jwt from "jsonwebtoken";
 import { OAuth2Client } from "google-auth-library";
 import * as fedapay from 'fedapay';
 import { GoogleGenAI } from "@google/genai";
-import { adminDb, isCloudSyncAvailable } from "./src/lib/firebase-admin.ts";
+import { isCloudSqlConfigured } from "./src/db/index.ts";
+import {
+  getMasterCheckpointMeta,
+  loadMasterCheckpoint,
+  loadNormalizedRelationalState,
+  saveMasterCheckpointToCloudSql,
+  saveSchoolBackupToCloudSql,
+} from "./src/db/cloudPersistence.ts";
+import { getOrCreateUser } from "./src/db/users.ts";
 import firebaseConfig from "./firebase-applet-config.json";
+import { FIRESTORE_STORAGE_CONFIG, FIRESTORE_COLLECTIONS } from "./src/lib/firestoreSchema.ts";
 import { 
   STANDARDIZED_SUBJECTS_CATALOG, 
   SUBJECT_CATEGORIES,
@@ -97,11 +106,35 @@ if (FEDAPAY_SK && FedaPay && typeof (FedaPay as any).setApiKey === 'function') {
 const currentFilename = typeof __filename !== 'undefined' ? __filename : '';
 const currentDirname = typeof __dirname !== 'undefined' ? __dirname : (currentFilename ? path.dirname(currentFilename) : process.cwd());
 
-const DATABASE_PATH = process.env.DATABASE_PATH || 'megafixaEduc.db';
-const RESOLVED_DATABASE_PATH = path.resolve(DATABASE_PATH);
-const DATABASE_DIR = path.dirname(RESOLVED_DATABASE_PATH);
-const HAS_CUSTOM_DATA_DIR = DATABASE_DIR !== path.resolve(process.cwd());
-const PERSISTENT_DATA_DIR = HAS_CUSTOM_DATA_DIR ? DATABASE_DIR : process.cwd();
+const FIRESTORE_DB_ID = process.env.FIRESTORE_DATABASE_ID || FIRESTORE_STORAGE_CONFIG.databaseId;
+const PERSISTENT_DATA_DIR = process.env.PERSISTENT_DATA_DIR
+  ? path.resolve(process.env.PERSISTENT_DATA_DIR)
+  : process.cwd();
+const HAS_CUSTOM_DATA_DIR = PERSISTENT_DATA_DIR !== path.resolve(process.cwd());
+const RUNTIME_CACHE_DIR = path.join(PERSISTENT_DATA_DIR, '.runtime_cache');
+if (!fs.existsSync(RUNTIME_CACHE_DIR)) {
+  try {
+    fs.mkdirSync(RUNTIME_CACHE_DIR, { recursive: true });
+  } catch (e) {
+    console.warn(`[Persistence] Could not create RUNTIME_CACHE_DIR (${RUNTIME_CACHE_DIR}):`, e);
+  }
+}
+const LOCAL_RUNTIME_CACHE_FILE = path.join(RUNTIME_CACHE_DIR, 'megafixa_runtime.db');
+const LEGACY_LOCAL_DB_FILE = path.resolve(process.cwd(), 'megafixaEduc.db');
+if (!fs.existsSync(LOCAL_RUNTIME_CACHE_FILE) && fs.existsSync(LEGACY_LOCAL_DB_FILE)) {
+  try {
+    fs.copyFileSync(LEGACY_LOCAL_DB_FILE, LOCAL_RUNTIME_CACHE_FILE);
+    if (fs.existsSync(`${LEGACY_LOCAL_DB_FILE}-wal`)) {
+      fs.copyFileSync(`${LEGACY_LOCAL_DB_FILE}-wal`, `${LOCAL_RUNTIME_CACHE_FILE}-wal`);
+    }
+    if (fs.existsSync(`${LEGACY_LOCAL_DB_FILE}-shm`)) {
+      fs.copyFileSync(`${LEGACY_LOCAL_DB_FILE}-shm`, `${LOCAL_RUNTIME_CACHE_FILE}-shm`);
+    }
+    console.log(`[Persistence] Legacy cache migrated to ${LOCAL_RUNTIME_CACHE_FILE}`);
+  } catch (migrationErr) {
+    console.warn('[Persistence] Could not migrate legacy cache file:', migrationErr);
+  }
+}
 
 const BACKUPS_DIR = process.env.BACKUPS_DIR
   ? path.resolve(process.env.BACKUPS_DIR)
@@ -125,7 +158,7 @@ if (!fs.existsSync(UPLOADS_DIR)) {
   }
 }
 
-const JWT_SECRET = (() => {
+let runtimeJwtSecret = (() => {
   const envSecret = process.env.JWT_SECRET;
   if (envSecret && envSecret.trim().length >= 32 && envSecret !== 'fallback_secret_for_dev_only') {
     return envSecret.trim();
@@ -151,6 +184,10 @@ const JWT_SECRET = (() => {
     return crypto.randomBytes(64).toString('hex');
   }
 })();
+
+function getJwtSecret(): string {
+  return runtimeJwtSecret;
+}
 const OFFLINE_MODE = process.env.OFFLINE_MODE === 'true';
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || (firebaseConfig as any)?.oAuthClientId;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
@@ -322,7 +359,7 @@ function initDatabase(dbPath: string): Database.Database {
   }
 }
 
-const db = initDatabase(DATABASE_PATH);
+const db = initDatabase(LOCAL_RUNTIME_CACHE_FILE);
 
 // Initial Core Tables (for School Creation Flow)
 db.exec(`
@@ -1500,93 +1537,190 @@ function ensureApprovedRequestsHaveSchools(): number {
   return repaired;
 }
 
-async function fetchCloudSchoolVault(): Promise<SchoolAccountsVault | null> {
-  if (OFFLINE_MODE) return null;
-  try {
-    const snap = await adminDb.collection('backups').doc('school_accounts_registry').get();
-    if (!snap.exists) return null;
-    const data = snap.data();
-    let rawJson = '';
-    if (data?.encoding === 'plain-chunked' && Number(data?.chunk_count) > 0) {
-      const chunkCount = Number(data.chunk_count);
-      const parts: string[] = [];
-      for (let i = 0; i < chunkCount; i++) {
-        const chunkSnap = await adminDb.collection('backups').doc(`school_accounts_registry_chunk_${i}`).get();
-        if (!chunkSnap.exists || typeof chunkSnap.data()?.data !== 'string') {
-          throw new Error(`Missing cloud vault chunk ${i}/${chunkCount}`);
-        }
-        parts.push(chunkSnap.data().data);
-      }
-      rawJson = parts.join('');
-    } else if (typeof data?.vault_json === 'string' && data.vault_json.length > 0) {
-      rawJson = data.vault_json;
-    }
-    if (!rawJson) return null;
-    const parsed = JSON.parse(rawJson) as SchoolAccountsVault;
-    if (!parsed || !parsed.tables) return null;
-    return parsed;
-  } catch (err) {
-    console.warn("[Persistence] Cloud school vault read notice:", err);
-    return null;
+let hasCompletedInitialPgHydration = false;
+let pgHydrationPromise: Promise<void> | null = null;
+let lastSyncedPgVersion = 0;
+let lastPgCheckAt = 0;
+
+function syncRuntimeJwtSecretWithDb(writeIfMissing = false): void {
+  if (process.env.JWT_SECRET && process.env.JWT_SECRET.trim().length >= 32 && process.env.JWT_SECRET !== 'fallback_secret_for_dev_only') {
+    return;
   }
+  try {
+    if (!db || !db.open || !tableExists('super_admin_settings')) return;
+    const row = db.prepare("SELECT value FROM super_admin_settings WHERE key = 'system_jwt_secret'").get() as any;
+    if (row?.value && String(row.value).trim().length >= 32) {
+      runtimeJwtSecret = String(row.value).trim();
+    } else if (writeIfMissing && runtimeJwtSecret && runtimeJwtSecret.length >= 32) {
+      db.prepare("INSERT OR REPLACE INTO super_admin_settings (key, value) VALUES ('system_jwt_secret', ?)").run(runtimeJwtSecret);
+    }
+  } catch {}
 }
 
-async function fetchCloudCheckpointSql(): Promise<(SqlDumpStats & { sql: string; lastUpdated?: string }) | null> {
-  if (OFFLINE_MODE) return null;
+function buildNormalizedPgPayload() {
+  const settingsRows = tableExists('super_admin_settings')
+    ? (db.prepare("SELECT key, value FROM super_admin_settings").all() as Array<{ key: string; value: string }>)
+    : [];
+  const planRows = tableExists('plans') ? (db.prepare("SELECT * FROM plans").all() as any[]) : [];
+  const schoolRows = tableExists('school_info') ? (db.prepare("SELECT * FROM school_info").all() as any[]) : [];
+  const requestRows = tableExists('school_creation_requests')
+    ? (db.prepare("SELECT * FROM school_creation_requests").all() as any[])
+    : [];
+  const userRows = tableExists('utilisateurs') ? (db.prepare("SELECT * FROM utilisateurs").all() as any[]) : [];
+  const archiveRows = tableExists('deleted_schools_archive')
+    ? (db.prepare("SELECT * FROM deleted_schools_archive").all() as any[])
+    : [];
+
+  return {
+    settingsRows,
+    planRows,
+    schoolRows,
+    requestRows,
+    userRows,
+    archiveRows,
+  };
+}
+
+function applyNormalizedStateFromPg(
+  norm: Awaited<ReturnType<typeof loadNormalizedRelationalState>>
+): number {
+  if (!norm) return 0;
+  let applied = 0;
   try {
-    const cloudDocSnap = await adminDb.collection('backups').doc('global_checkpoint').get();
-    if (!cloudDocSnap.exists) return null;
-    const data = cloudDocSnap.data();
-    if (!data) return null;
+    if (Array.isArray(norm.settingsRows) && norm.settingsRows.length > 0 && tableExists('super_admin_settings')) {
+      const localMeta = getLocalSuperAdminConfigMeta();
+      const incomingCust = norm.settingsRows.some(
+        (s) => s.key === 'super_admin_config_customized' && String(s.value).toLowerCase() === 'true'
+      );
+      const incomingTsRow = norm.settingsRows.find((s) => s.key === 'super_admin_config_updated_at');
+      const incomingTs = incomingTsRow ? parseIsoMs(incomingTsRow.value) : 0;
+      const shouldReplaceSettings = incomingCust && (!localMeta.customized || incomingTs >= localMeta.updatedAtMs);
 
-    let sql = '';
-    if (data.encoding === 'gzip-base64-chunked' && Number(data.chunk_count) > 0) {
-      const chunkCount = Number(data.chunk_count);
-      const b64Parts: string[] = [];
-      for (let i = 0; i < chunkCount; i++) {
-        const chunkSnap = await adminDb.collection('backups').doc(`global_checkpoint_chunk_${i}`).get();
-        if (!chunkSnap.exists || !chunkSnap.data()?.data) {
-          throw new Error(`Missing cloud checkpoint chunk ${i}/${chunkCount}`);
-        }
-        b64Parts.push(chunkSnap.data().data);
-      }
-      const compressedBuf = Buffer.from(b64Parts.join(''), 'base64');
-      sql = zlib.gunzipSync(compressedBuf).toString('utf8');
-    } else if (typeof data.sql_dump === 'string' && data.sql_dump.length > 0) {
-      sql = data.sql_dump;
-    }
-
-    if (!sql) return null;
-    if (data.checksum) {
-      const actualChecksum = crypto.createHash('sha256').update(sql, 'utf8').digest('hex');
-      if (actualChecksum !== data.checksum) {
-        console.warn('[Persistence] Cloud checkpoint checksum mismatch, skipping corrupted snapshot.');
-        return null;
+      if (shouldReplaceSettings) {
+        const stmtSuper = db.prepare("INSERT OR REPLACE INTO super_admin_settings (key, value) VALUES (?, ?)");
+        const stmtSaas = tableExists('saas_settings')
+          ? db.prepare("INSERT OR REPLACE INTO saas_settings (key, value) VALUES (?, ?)")
+          : null;
+        db.transaction(() => {
+          for (const s of norm.settingsRows) {
+            stmtSuper.run(s.key, s.value);
+            if (stmtSaas) {
+              try { stmtSaas.run(s.key, s.value); } catch {}
+            }
+            applied++;
+          }
+        })();
       }
     }
 
-    const parsedStats = inspectSqlDumpStats(sql);
-    return {
-      ...parsedStats,
-      sql,
-      lastUpdated: data.last_updated,
-      hasRealData: Boolean(data.has_real_data) || parsedStats.hasRealData,
-      schoolCount: Math.max(parsedStats.schoolCount, Number(data.school_count || 0)),
-      nonTestUserCount: Math.max(parsedStats.nonTestUserCount, Number(data.non_test_user_count || 0))
+    const vaultFromPg: SchoolAccountsVault = {
+      version: 2,
+      updated_at: new Date().toISOString(),
+      school_count: norm.schoolRows.length,
+      non_default_school_count: norm.schoolRows.filter(
+        (s) => Number(s.id) > 1 || String(s.nom || '').trim() !== 'École par Défaut'
+      ).length,
+      non_test_user_count: 0,
+      request_count: norm.requestRows.length,
+      tables: {
+        school_info: norm.schoolRows,
+        school_creation_requests: norm.requestRows,
+        plans: norm.planRows,
+        super_admin_settings: norm.settingsRows,
+      },
     };
+    applied += reconcileMissingSchoolAccountsFromVault(vaultFromPg);
   } catch (err) {
-    console.error("[Persistence] Cloud recovery check failed:", err);
-    return null;
+    console.warn('[Cloud SQL] Normalized state reconcile notice:', err);
   }
+  return applied;
+}
+
+async function ensureCloudSqlHydrated(): Promise<void> {
+  if (!isCloudSqlConfigured() || OFFLINE_MODE) return;
+
+  const now = Date.now();
+  if (hasCompletedInitialPgHydration && now - lastPgCheckAt < 2500) {
+    return;
+  }
+
+  if (pgHydrationPromise) {
+    return pgHydrationPromise;
+  }
+
+  pgHydrationPromise = (async () => {
+    try {
+      const remoteMeta = await getMasterCheckpointMeta();
+      lastPgCheckAt = Date.now();
+
+      if (remoteMeta) {
+        const needsHydrate =
+          !hasCompletedInitialPgHydration ||
+          Number(remoteMeta.version || 0) > lastSyncedPgVersion;
+
+        if (needsHydrate) {
+          const [remoteCp, remoteNorm] = await Promise.all([
+            loadMasterCheckpoint(),
+            loadNormalizedRelationalState().catch(() => null),
+          ]);
+
+          if (remoteCp?.sqlDump) {
+            const currentStats = getDatabaseStats();
+            const isFullRestore = !hasCompletedInitialPgHydration && !currentStats.hasRealData;
+            const res = executeResilientSqlRestore(remoteCp.sqlDump, {
+              mergeOnly: !isFullRestore,
+              replaceConfigTables: Boolean(remoteCp.superAdminCustomized),
+            });
+            console.log(
+              `[Cloud SQL] Hydrated from PostgreSQL v${remoteCp.version} (mode=${isFullRestore ? 'full' : 'merge'}, applied=${res.applied}, adapted=${res.adapted}).`
+            );
+          }
+
+          if (remoteNorm) {
+            applyNormalizedStateFromPg(remoteNorm);
+          }
+
+          ensureApprovedRequestsHaveSchools();
+          syncRuntimeJwtSecretWithDb(false);
+          saveLocalCheckpointSync();
+          bumpServerDataVersion();
+          lastSyncedPgVersion = Number(remoteMeta.version || 0);
+        }
+      } else if (!hasCompletedInitialPgHydration) {
+        // First initialization of Cloud SQL: seed PostgreSQL from current database state
+        syncRuntimeJwtSecretWithDb(true);
+        const sqlDump = generateFullSqlDump();
+        const stats = getDatabaseStats();
+        const cfgMeta = getLocalSuperAdminConfigMeta();
+        const pgSave = await saveMasterCheckpointToCloudSql({
+          sqlDump,
+          stats,
+          superAdminCustomized: cfgMeta.customized,
+          superAdminConfigUpdatedAt: cfgMeta.updatedAtIso,
+          buildId: APP_BUILD_ID,
+          allowShrink: true,
+          normalized: buildNormalizedPgPayload(),
+        });
+        if (pgSave.saved) {
+          lastSyncedPgVersion = pgSave.version;
+          console.log(`[Cloud SQL] Initial PostgreSQL state seeded (v${pgSave.version}, schools=${stats.schoolCount}, users=${stats.userCount}).`);
+        }
+      }
+
+      hasCompletedInitialPgHydration = true;
+    } catch (err: any) {
+      console.warn('[Cloud SQL] Hydration notice:', err?.message || err);
+    } finally {
+      pgHydrationPromise = null;
+    }
+  })();
+
+  return pgHydrationPromise;
 }
 
 async function restoreFromCheckpoint() {
   try {
     const stats = getDatabaseStats();
-    const [cloudCandidate, cloudVault] = await Promise.all([
-      fetchCloudCheckpointSql(),
-      fetchCloudSchoolVault()
-    ]);
 
     let localCandidate: (SqlDumpStats & { sql: string }) | null = null;
     if (fs.existsSync(AUTO_BACKUP_PATH)) {
@@ -1607,10 +1741,8 @@ async function restoreFromCheckpoint() {
     }
 
     const candidates: Array<SqlDumpStats & { source: string; sql: string }> = [];
-    if (cloudCandidate) candidates.push({ source: 'cloud', ...cloudCandidate });
     if (localCandidate) candidates.push({ source: 'local', ...localCandidate });
 
-    // Also inspect local safety backups (pre_*.sql) in case an earlier snapshot holds missing schools/requests
     try {
       const backupFiles = fs.readdirSync(BACKUPS_DIR)
         .filter(f => f.startsWith('pre_') && f.endsWith('.sql'))
@@ -1625,12 +1757,10 @@ async function restoreFromCheckpoint() {
       }
     } catch {}
 
-    // Sort: real data first, then more non-default schools, then highest score; on tie prefer cloud
     candidates.sort((a, b) => {
       if (a.hasRealData !== b.hasRealData) return a.hasRealData ? -1 : 1;
       if (a.nonDefaultSchoolCount !== b.nonDefaultSchoolCount) return b.nonDefaultSchoolCount - a.nonDefaultSchoolCount;
-      if (a.score !== b.score) return b.score - a.score;
-      return a.source === 'cloud' ? -1 : 1;
+      return b.score - a.score;
     });
 
     if (!stats.hasRealData) {
@@ -1662,7 +1792,6 @@ async function restoreFromCheckpoint() {
 
       if (backupHasMissingSchoolsOrRequests || backupHasNewerSuperAdminConfig) {
         createSafetyBackup('pre_auto_merge');
-        console.log(`[Persistence] Richer ${best.source} backup detected (backup schools=${best.schoolCount}/users=${best.nonTestUserCount}/requests=${best.requestCount}/cfg=${best.superAdminCustomized} vs local schools=${stats.schoolCount}/users=${stats.nonTestUserCount}/requests=${stats.requestCount}/cfg=${localConfigMeta.customized}). Merging losslessly...`);
         const mergeResult = executeResilientSqlRestore(best.sql, {
           mergeOnly: true,
           replaceConfigTables: backupHasNewerSuperAdminConfig
@@ -1671,14 +1800,12 @@ async function restoreFromCheckpoint() {
       }
     }
 
-    // Always reconcile missing school accounts & requests from Cloud & Local school vaults (never overwrites existing records)
     let reconciled = 0;
-    if (cloudVault) reconciled += reconcileMissingSchoolAccountsFromVault(cloudVault);
     if (localVault) reconciled += reconcileMissingSchoolAccountsFromVault(localVault);
     reconciled += ensureApprovedRequestsHaveSchools();
     if (reconciled > 0) {
       saveLocalCheckpointSync();
-      console.log(`[Persistence] School Accounts Vault restored ${reconciled} missing account/request/tenant record(s) without modifying existing data.`);
+      console.log(`[Persistence] School Accounts Vault restored ${reconciled} missing account/request/tenant record(s).`);
     }
   } catch (err) {
     console.warn("[Persistence] Checkpoint recovery notice:", err);
@@ -1709,7 +1836,7 @@ function saveLocalCheckpointSync(): boolean {
         const existingSql = fs.readFileSync(AUTO_BACKUP_PATH, 'utf8');
         const existingStats = inspectSqlDumpStats(existingSql);
         if (wouldShrinkExistingStats(stats, existingStats)) {
-          console.warn(`[Persistence] Refusing to shrink local checkpoint (existing schools=${existingStats.schoolCount}, users=${existingStats.nonTestUserCount}, requests=${existingStats.requestCount} vs current schools=${stats.schoolCount}, users=${stats.nonTestUserCount}, requests=${stats.requestCount}).`);
+          console.warn(`[Persistence] Refusing to shrink local checkpoint.`);
           return false;
         }
       } catch {}
@@ -1719,7 +1846,6 @@ function saveLocalCheckpointSync(): boolean {
     fs.writeFileSync(tmpPath, sqlDump, 'utf8');
     fs.renameSync(tmpPath, AUTO_BACKUP_PATH);
 
-    // Keep local school accounts vault in sync (with same anti-shrink guard)
     const vault = buildSchoolAccountsVault();
     let writeVault = true;
     if (fs.existsSync(SCHOOL_VAULT_PATH)) {
@@ -1750,176 +1876,92 @@ function saveLocalCheckpointSync(): boolean {
   }
 }
 
-async function saveCheckpoint(reason = 'manual') {
+let activeCheckpointPromise: Promise<boolean> | null = null;
+
+async function saveCheckpoint(reason = 'manual'): Promise<boolean> {
+  if (isSavingCheckpoint && activeCheckpointPromise) {
+    try {
+      await activeCheckpointPromise;
+    } catch {}
+  }
   if (isSavingCheckpoint) {
     pendingCheckpointAfterCurrent = true;
-    return;
+    return false;
   }
   isSavingCheckpoint = true;
-  try {
-    if (!db || !db.open || !tableExists('school_info')) return;
-    try { db.pragma('wal_checkpoint(PASSIVE)'); } catch {}
-    const stats = getDatabaseStats();
-    const allowShrink = isWithinExplicitDeletionWindow();
+  const runPromise = (async () => {
+    try {
+      if (!db || !db.open || !tableExists('school_info')) return false;
+      try { db.pragma('wal_checkpoint(PASSIVE)'); } catch {}
+      syncRuntimeJwtSecretWithDb(true);
+      const stats = getDatabaseStats();
+      const allowShrink = isWithinExplicitDeletionWindow();
 
-    // Prevent overwriting an existing richer local checkpoint unless explicit deletion occurred
-    if (fs.existsSync(AUTO_BACKUP_PATH)) {
-      try {
-        const existingLocalSql = fs.readFileSync(AUTO_BACKUP_PATH, 'utf8');
-        const existingLocalStats = inspectSqlDumpStats(existingLocalSql);
-        if (wouldShrinkExistingStats(stats, existingLocalStats)) {
-          console.warn(`[Persistence] (${reason}) Blocked downward local checkpoint overwrite: existing backup holds more school accounts/users.`);
-          return;
-        }
-      } catch {}
-    }
-
-    const sqlDump = generateFullSqlDump();
-    const checksum = crypto.createHash('sha256').update(sqlDump, 'utf8').digest('hex');
-
-    // 1. Atomic local checkpoint write + local vault write
-    const tmpPath = `${AUTO_BACKUP_PATH}.tmp`;
-    fs.writeFileSync(tmpPath, sqlDump, 'utf8');
-    fs.renameSync(tmpPath, AUTO_BACKUP_PATH);
-
-    const vault = buildSchoolAccountsVault();
-    const vaultJson = JSON.stringify(vault);
-    const vaultTmp = `${SCHOOL_VAULT_PATH}.tmp`;
-    fs.writeFileSync(vaultTmp, vaultJson, 'utf8');
-    fs.renameSync(vaultTmp, SCHOOL_VAULT_PATH);
-
-    // 2. Cloud Persistence (Firestore) with gzip+chunking & strict anti-regression lock
-    if (!OFFLINE_MODE && isCloudSyncAvailable()) {
-      try {
-        const existingCloud = await adminDb.collection('backups').doc('global_checkpoint').get().catch(() => null);
-        if (!isCloudSyncAvailable()) return;
-        if (existingCloud?.exists) {
-          const cData = existingCloud.data();
-          const cParsedStats = typeof cData?.sql_dump === 'string' && cData.sql_dump.length > 0
-            ? inspectSqlDumpStats(cData.sql_dump)
-            : null;
-          const cStats = {
-            schoolCount: Math.max(Number(cData?.school_count || 0), cParsedStats?.schoolCount || 0),
-            nonDefaultSchoolCount: Math.max(Number(cData?.non_default_school_count || 0), cParsedStats?.nonDefaultSchoolCount || 0),
-            nonTestUserCount: Math.max(Number(cData?.non_test_user_count || 0), cParsedStats?.nonTestUserCount || 0),
-            studentCount: Math.max(Number(cData?.student_count || 0), cParsedStats?.studentCount || 0),
-            requestCount: Math.max(Number(cData?.request_count || 0), cParsedStats?.requestCount || 0),
-            hasRealData: Boolean(cData?.has_real_data) || Boolean(cParsedStats?.hasRealData)
-          };
-
-          if (wouldShrinkExistingStats(stats, cStats)) {
-            console.warn(`[Persistence] (${reason}) Protected Cloud checkpoint against downward overwrite (cloud schools=${cStats.schoolCount}/users=${cStats.nonTestUserCount}/requests=${cStats.requestCount} vs local schools=${stats.schoolCount}/users=${stats.nonTestUserCount}/requests=${stats.requestCount}).`);
-            return;
+      if (fs.existsSync(AUTO_BACKUP_PATH)) {
+        try {
+          const existingLocalSql = fs.readFileSync(AUTO_BACKUP_PATH, 'utf8');
+          const existingLocalStats = inspectSqlDumpStats(existingLocalSql);
+          if (wouldShrinkExistingStats(stats, existingLocalStats)) {
+            console.warn(`[Persistence] (${reason}) Blocked downward local checkpoint overwrite.`);
+            return false;
           }
+        } catch {}
+      }
 
-          // When an explicit deletion legitimately reduced records, archive the previous plain checkpoint before updating
-          if (allowShrink && cData?.encoding === 'plain' && typeof cData?.sql_dump === 'string' && cData.sql_dump.length > 0) {
-            await adminDb.collection('backups').doc('global_checkpoint_previous').set({
-              ...cData,
-              archived_at: new Date().toISOString(),
-              archive_reason: reason
-            }).catch(() => {});
-          }
-        }
+      const sqlDump = generateFullSqlDump();
 
-        const byteLen = Buffer.byteLength(sqlDump, 'utf8');
-        const commonMeta = {
-          last_updated: new Date().toISOString(),
-          version: 3,
-          build_id: APP_BUILD_ID,
-          has_real_data: stats.hasRealData,
-          school_count: stats.schoolCount,
-          non_default_school_count: stats.nonDefaultSchoolCount,
-          user_count: stats.userCount,
-          non_test_user_count: stats.nonTestUserCount,
-          student_count: stats.studentCount,
-          request_count: stats.requestCount,
-          checksum
-        };
+      // 1. Atomic local runtime mirror
+      const tmpPath = `${AUTO_BACKUP_PATH}.tmp`;
+      fs.writeFileSync(tmpPath, sqlDump, 'utf8');
+      fs.renameSync(tmpPath, AUTO_BACKUP_PATH);
 
-        let cloudWritten = false;
-        if (byteLen <= FIRESTORE_PLAIN_LIMIT) {
-          cloudWritten = await adminDb.collection('backups').doc('global_checkpoint').set({
-            ...commonMeta,
-            encoding: 'plain',
-            chunk_count: 0,
-            sql_dump: sqlDump
-          });
+      const vault = buildSchoolAccountsVault();
+      const vaultJson = JSON.stringify(vault);
+      const vaultTmp = `${SCHOOL_VAULT_PATH}.tmp`;
+      fs.writeFileSync(vaultTmp, vaultJson, 'utf8');
+      fs.renameSync(vaultTmp, SCHOOL_VAULT_PATH);
+
+      // 2. Authoritative Cloud SQL (PostgreSQL) Persistence
+      if (!OFFLINE_MODE && isCloudSqlConfigured()) {
+        const cfgMeta = getLocalSuperAdminConfigMeta();
+        const pgResult = await saveMasterCheckpointToCloudSql({
+          sqlDump,
+          stats,
+          superAdminCustomized: cfgMeta.customized,
+          superAdminConfigUpdatedAt: cfgMeta.updatedAtIso,
+          buildId: APP_BUILD_ID,
+          allowShrink,
+          normalized: buildNormalizedPgPayload(),
+        });
+        if (pgResult.saved) {
+          lastSyncedPgVersion = pgResult.version;
+          lastPgCheckAt = Date.now();
+          hasCompletedInitialPgHydration = true;
+          console.log(`[Cloud SQL] Checkpoint saved (${reason}, v${pgResult.version}, schools=${stats.schoolCount}, users=${stats.userCount}, students=${stats.studentCount}).`);
+          return true;
         } else {
-          const compressedB64 = zlib.gzipSync(Buffer.from(sqlDump, 'utf8')).toString('base64');
-          const chunks: string[] = [];
-          for (let offset = 0; offset < compressedB64.length; offset += FIRESTORE_CHUNK_SIZE) {
-            chunks.push(compressedB64.slice(offset, offset + FIRESTORE_CHUNK_SIZE));
-          }
-          for (let i = 0; i < chunks.length; i++) {
-            const okChunk = await adminDb.collection('backups').doc(`global_checkpoint_chunk_${i}`).set({
-              index: i,
-              total: chunks.length,
-              checksum,
-              data: chunks[i],
-              last_updated: commonMeta.last_updated
-            });
-            if (!okChunk) break;
-          }
-          if (isCloudSyncAvailable()) {
-            cloudWritten = await adminDb.collection('backups').doc('global_checkpoint').set({
-              ...commonMeta,
-              encoding: 'gzip-base64-chunked',
-              chunk_count: chunks.length,
-              sql_dump: ''
-            });
-          }
+          console.warn(`[Cloud SQL] Checkpoint skipped (${reason}): ${pgResult.skippedReason || 'unknown'}`);
+          return false;
         }
-
-        // Also update the lightweight dedicated School Accounts Registry in Cloud
-        if (cloudWritten && isCloudSyncAvailable() && Buffer.byteLength(vaultJson, 'utf8') <= FIRESTORE_PLAIN_LIMIT) {
-          const existingVaultSnap = await adminDb.collection('backups').doc('school_accounts_registry').get().catch(() => null);
-          let allowVaultWrite = true;
-          if (existingVaultSnap?.exists) {
-            const vData = existingVaultSnap.data();
-            const vStats = {
-              schoolCount: Number(vData?.school_count || 0),
-              nonDefaultSchoolCount: Number(vData?.non_default_school_count || 0),
-              nonTestUserCount: Number(vData?.non_test_user_count || 0),
-              requestCount: Number(vData?.request_count || 0),
-              hasRealData: Boolean(vData?.non_default_school_count > 0 || vData?.non_test_user_count > 0 || vData?.request_count > 0)
-            };
-            if (wouldShrinkExistingStats(stats, vStats)) {
-              allowVaultWrite = false;
-            }
-          }
-          if (allowVaultWrite && isCloudSyncAvailable()) {
-            await adminDb.collection('backups').doc('school_accounts_registry').set({
-              last_updated: commonMeta.last_updated,
-              build_id: APP_BUILD_ID,
-              school_count: stats.schoolCount,
-              non_default_school_count: stats.nonDefaultSchoolCount,
-              non_test_user_count: stats.nonTestUserCount,
-              request_count: stats.requestCount,
-              vault_json: vaultJson
-            });
-          }
-        }
-
-        if (cloudWritten) {
-          console.log(`[Persistence] Cloud checkpoint saved (${reason}, schools=${stats.schoolCount}, users=${stats.userCount}, students=${stats.studentCount}).`);
-        }
-      } catch (error: any) {
-        console.warn("[Persistence] Cloud checkpoint notice (local persistence is active):", error?.message || error);
+      }
+      return true;
+    } catch (err: any) {
+      console.warn("[Persistence] Notice saving checkpoint:", err?.message || err);
+      return false;
+    } finally {
+      isSavingCheckpoint = false;
+      activeCheckpointPromise = null;
+      if (pendingCheckpointAfterCurrent) {
+        pendingCheckpointAfterCurrent = false;
+        setTimeout(() => { saveCheckpoint('coalesced').catch(() => {}); }, 300);
       }
     }
-  } catch (err: any) {
-    console.warn("[Persistence] Notice saving checkpoint:", err?.message || err);
-  } finally {
-    isSavingCheckpoint = false;
-    if (pendingCheckpointAfterCurrent) {
-      pendingCheckpointAfterCurrent = false;
-      setTimeout(() => { saveCheckpoint('coalesced').catch(() => {}); }, 500);
-    }
-  }
+  })();
+  activeCheckpointPromise = runPromise;
+  return runPromise;
 }
 
-function scheduleCheckpoint(reason = 'mutation', delayMs = 2000) {
+function scheduleCheckpoint(reason = 'mutation', delayMs = 300) {
   if (checkpointTimer) clearTimeout(checkpointTimer);
   checkpointTimer = setTimeout(() => {
     checkpointTimer = null;
@@ -5310,7 +5352,7 @@ try {
 }
 
   console.log("Database initialization completed.");
-  scheduleCheckpoint('startup', 3000);
+  saveLocalCheckpointSync();
 }
 
 function parsePlanLimitValue(val: any, fallback: number): number {
@@ -6603,9 +6645,10 @@ async function startServer() {
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-  // Auto-persist mutations & propagate build/data version headers to all connected levels
-  app.use('/api', (req: any, res: any, next: any) => {
+  // Lazy Cloud SQL hydration + auto-persist mutations + propagate build/data version headers
+  app.use('/api', async (req: any, res: any, next: any) => {
     capturePublicOriginFromReq(req);
+    await ensureCloudSqlHydrated();
     res.setHeader('X-App-Build-Version', APP_BUILD_ID);
     res.setHeader('X-App-Data-Version', String(serverDataVersion));
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
@@ -6617,13 +6660,9 @@ async function startServer() {
         res.on('finish', () => {
           if (res.statusCode >= 200 && res.statusCode < 400) {
             bumpServerDataVersion();
-            const isCritical =
-              url.includes('/schools') ||
-              url.includes('/school-requests') ||
-              url.includes('/super-admin/') ||
-              url.includes('/utilisateurs') ||
-              url.includes('/backups/restore');
-            scheduleCheckpoint(`api:${req.method}:${url.split('?')[0]}`, isCritical ? 400 : 2500);
+            if (!req._checkpointSaved) {
+              saveCheckpoint(`api:${req.method}:${url.split('?')[0]}`).catch(() => {});
+            }
           }
         });
       }
@@ -6691,7 +6730,7 @@ const authenticateToken = (req: any, res: any, next: any) => {
     return res.status(401).json({ error: "Accès refusé. Veuillez vous connecter avec vos identifiants." });
   }
 
-  jwt.verify(token, JWT_SECRET, (err: any, user: any) => {
+  jwt.verify(token, getJwtSecret(), (err: any, user: any) => {
     if (err || !user) {
       return res.status(401).json({ error: "Session expirée ou invalide. Veuillez vous reconnecter." });
     }
@@ -6737,7 +6776,7 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
     
     if (token) {
       try {
-        const decoded = jwt.verify(token, JWT_SECRET) as any;
+        const decoded = jwt.verify(token, getJwtSecret()) as any;
         if (decoded && decoded.id) {
           const dbUser = db.prepare("SELECT id, email, role, school_id, approuve FROM utilisateurs WHERE id = ?").get(decoded.id) as any;
           if (dbUser && dbUser.approuve !== 0) {
@@ -6851,20 +6890,23 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
   }
 
   // API Routes
-  // Strict Offline Security Headers Middleware: neutralizes and blocks any external network leak
   app.use((req, res, next) => {
-    res.setHeader("X-App-Mode", "100%-Offline-Strict");
-    res.setHeader("X-Internet-Access", "Blocked");
+    res.setHeader("X-App-Mode", isCloudSqlConfigured() ? "Cloud-SQL-Persistent" : "Local-Autonomous");
     next();
   });
 
   app.get("/api/offline/status", (req, res) => {
+    const usingCloudSql = isCloudSqlConfigured();
     res.json({
-      strict_offline: true,
-      internet_forbidden: true,
-      database: "SQLite Locale (megafixaEduc.db)",
-      mode: "100% Hors-ligne autonome",
-      message: "L'accès à Internet est formellement interdit et neutralisé. L'application fonctionne exclusivement en mode local autonome."
+      strict_offline: !usingCloudSql,
+      internet_forbidden: !usingCloudSql,
+      database: usingCloudSql ? "Cloud Firestore & Cloud SQL (PostgreSQL)" : "Cloud Firestore & Cache local",
+      firestoreDatabaseId: FIRESTORE_DB_ID,
+      firestoreCollections: FIRESTORE_COLLECTIONS,
+      mode: usingCloudSql ? "Cloud Persistant (Firestore + Cloud SQL)" : "Synchronisation Cloud Firestore",
+      message: usingCloudSql
+        ? "Base de données Cloud Firestore et Cloud SQL (PostgreSQL) active et persistante."
+        : "Les paramètres et comptes sont synchronisés via Cloud Firestore."
     });
   });
 
@@ -6883,7 +6925,10 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
     res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
     res.json({
       status: "ok",
-      offline_strict: true,
+      database: isCloudSqlConfigured() ? "cloud_firestore_and_cloudsql" : "cloud_firestore_and_cache",
+      firestoreDatabaseId: FIRESTORE_DB_ID,
+      firestoreCollections: FIRESTORE_COLLECTIONS,
+      cloudSqlVersion: lastSyncedPgVersion,
       buildId: APP_BUILD_ID,
       dataVersion: String(serverDataVersion),
       timestamp: new Date().toISOString()
@@ -8617,8 +8662,8 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
       const quickCheckRow = db.pragma('quick_check') as any[];
       const journalModeRow = db.pragma('journal_mode') as any[];
       const fkRow = db.pragma('foreign_keys') as any[];
-      const dbBytes = fs.existsSync(RESOLVED_DATABASE_PATH) ? fs.statSync(RESOLVED_DATABASE_PATH).size : 0;
-      const walBytes = fs.existsSync(`${RESOLVED_DATABASE_PATH}-wal`) ? fs.statSync(`${RESOLVED_DATABASE_PATH}-wal`).size : 0;
+      const dbBytes = fs.existsSync(LOCAL_RUNTIME_CACHE_FILE) ? fs.statSync(LOCAL_RUNTIME_CACHE_FILE).size : 0;
+      const walBytes = fs.existsSync(`${LOCAL_RUNTIME_CACHE_FILE}-wal`) ? fs.statSync(`${LOCAL_RUNTIME_CACHE_FILE}-wal`).size : 0;
       const totalBytes = dbBytes + walBytes;
       const sizeDisplay = totalBytes > 1024 * 1024
         ? `${(totalBytes / (1024 * 1024)).toFixed(2)} Mo`
@@ -8638,7 +8683,16 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
         notes: (db.prepare("SELECT COUNT(*) as count FROM notes WHERE school_id = ?").get(schoolId) as any)?.count || 0,
         paiements: (db.prepare("SELECT COUNT(*) as count FROM paiements WHERE school_id = ?").get(schoolId) as any)?.count || 0
       };
-      res.json({ status: stats.integrity === 'ok' ? "healthy" : "degraded", stats });
+      res.json({
+        status: stats.integrity === 'ok' ? "healthy" : "degraded",
+        stats,
+        cloudStorage: {
+          provider: FIRESTORE_STORAGE_CONFIG.storageProvider,
+          firestoreProjectId: FIRESTORE_STORAGE_CONFIG.projectId,
+          firestoreDatabaseId: FIRESTORE_DB_ID,
+          collections: FIRESTORE_COLLECTIONS
+        }
+      });
     } catch (error: any) {
       res.status(500).json({ status: "error", message: error.message });
     }
@@ -22108,6 +22162,14 @@ function executeYearTransition(
         }
       }
 
+      getOrCreateUser(cleanUid, cleanEmail, {
+        nom: user.nom || cleanNom,
+        role: user.role,
+        schoolId: user.school_id,
+      }).catch((err) => {
+        console.warn("[Cloud SQL] Failed to sync Google user record:", err?.message || err);
+      });
+
       logActivity(user.id, 'LOGIN_GOOGLE', 'USER', user.id, { email: user.email }, user.school_id);
 
       // Check if teacher
@@ -22137,7 +22199,7 @@ function executeYearTransition(
           google_id: user.google_id,
           lastSeen: new Date().toISOString() 
         },
-        JWT_SECRET,
+        getJwtSecret(),
         { expiresIn: '24h' }
       );
 
@@ -22402,7 +22464,7 @@ function executeYearTransition(
           eleve_id: user.eleve_id,
           lastSeen: new Date().toISOString() 
         },
-        JWT_SECRET,
+        getJwtSecret(),
         { expiresIn: '24h' }
       );
 
@@ -22666,7 +22728,7 @@ function executeYearTransition(
         cycle: cycle,
         lastSeen: new Date().toISOString() 
       },
-      JWT_SECRET,
+      getJwtSecret(),
       { expiresIn: '24h' }
     );
 
@@ -23921,7 +23983,8 @@ function executeYearTransition(
       }
 
       saveLocalCheckpointSync();
-      saveCheckpoint('payment_provision_school').catch(() => {});
+      (req as any)._checkpointSaved = true;
+      await saveCheckpoint('payment_provision_school');
 
       // Get plan features
       const features = getPlanFeaturesList(tx.plan_name);
@@ -24537,7 +24600,8 @@ L'équipe MégafixaEduc Pro vous souhaite une excellente réussite académique !
       activateTx();
 
       saveLocalCheckpointSync();
-      saveCheckpoint('activate_license_key').catch(() => {});
+      (req as any)._checkpointSaved = true;
+      await saveCheckpoint('activate_license_key');
 
       // Log activity
       logActivity(req.userId || 1, 'LICENSE_KEY_ACTIVATED', 'SCHOOL', targetSchoolId, {
@@ -25134,7 +25198,8 @@ Cette clé servira lors du premier accès de votre établissement au système po
         .run(nom, email, hashedPassword, schoolId);
       
       saveLocalCheckpointSync();
-      saveCheckpoint('signup_school').catch(() => {});
+      (req as any)._checkpointSaved = true;
+      await saveCheckpoint('signup_school');
       logActivity(info.lastInsertRowid as number, 'SIGNUP_ADMIN', 'USER', info.lastInsertRowid as number, { email, schoolId }, schoolId as number);
       
       const reqProto = req.headers['x-forwarded-proto'] || 'https';
@@ -28965,29 +29030,23 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
 
     const snapshotId = Number(result.lastInsertRowid);
 
-    // Reinforce: Sync metadata to Firebase if available
-    if (adminDb && isCloudSyncAvailable()) {
+    // Reinforce: Sync backup snapshot to Cloud SQL (PostgreSQL) if configured
+    if (isCloudSqlConfigured()) {
       try {
-        const nowIso = new Date().toISOString();
-        const synced = await adminDb.collection('backups').doc(`school_${schoolId}_${snapshotId}`).set({
-          school_id: schoolId,
-          snapshot_id: snapshotId,
-          filename,
+        const syncedId = await saveSchoolBackupToCloudSql({
+          schoolId,
           label: label || `Sauvegarde`,
-          backup_type: backupType,
+          backupType,
           format,
-          size_bytes: stats.size,
-          checksum_sha256: checksum,
-          created_at: nowIso,
-          last_updated: nowIso,
-          status: 'completed',
-          storage_location: 'local_server'
+          checksumSha256: checksum,
+          sizeBytes: stats.size,
+          payload: fileBuffer.toString('utf-8'),
         });
-        if (synced) {
-          console.log(`[Backup] Snapshot ${snapshotId} synced to Cloud Firestore.`);
+        if (syncedId) {
+          console.log(`[Backup] Snapshot ${snapshotId} synced to Cloud SQL PostgreSQL (cloud_id=${syncedId}).`);
         }
       } catch (cloudErr) {
-        console.warn("[Backup] Cloud sync notice:", cloudErr);
+        console.warn("[Backup] Cloud SQL sync notice:", cloudErr);
       }
     }
 
@@ -29621,19 +29680,33 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       if (!isUserAdminOrFonde(req.user?.role)) {
         return res.status(403).json({ error: "Accès réservé exclusivement à l'administrateur (Fondé)" });
       }
-      const schoolId = req.schoolId || 1;
-      const config = ensureSchoolBackupConfig(schoolId);
 
-      // Verify cloud sync connectivity by performing an actual save
-      await saveCheckpoint();
+      if (!isCloudSqlConfigured()) {
+        return res.status(503).json({
+          success: false,
+          status: 'offline',
+          error: "La base de données Cloud SQL (PostgreSQL) n'est pas configurée sur cet environnement."
+        });
+      }
 
-      const latencyMs = Math.floor(Math.random() * 40) + 15;
+      const startedAt = Date.now();
+      const ok = await saveCheckpoint('cloud_sync_test');
+      if (!ok) {
+        return res.status(503).json({
+          success: false,
+          status: 'error',
+          error: "Échec de la vérification d'écriture vers Cloud SQL (PostgreSQL)."
+        });
+      }
+
+      const latencyMs = Math.max(1, Date.now() - startedAt);
       res.json({
         success: true,
-        provider: config.cloud_provider || 'firestore_snapshot',
+        provider: 'cloudsql_postgresql',
         status: 'online',
         latency_ms: latencyMs,
-        message: `Connexion Cloud réussie via la passerelle de sauvegarde (${config.cloud_provider || 'Firestore Cloud Snapshot'}).`
+        cloudSqlVersion: lastSyncedPgVersion,
+        message: `Connexion Cloud SQL (PostgreSQL) opérationnelle (checkpoint v${lastSyncedPgVersion}).`
       });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -31451,7 +31524,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
     }
   });
 
-  app.post("/api/super-admin/plans", authenticateToken, requireSuperAdmin, (req, res) => {
+  app.post("/api/super-admin/plans", authenticateToken, requireSuperAdmin, async (req, res) => {
     try {
       const { name, price, period, features, featureIds, color, is_recommended, type, is_active, student_limit, staff_limit, description } = req.body;
       const featuresArr = Array.isArray(features) ? features : [];
@@ -31476,14 +31549,15 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       db.prepare("INSERT OR REPLACE INTO saas_settings (key, value) VALUES ('plans_initial_seeded', 'true')").run();
       markSuperAdminConfigCustomized();
       saveLocalCheckpointSync();
-      scheduleCheckpoint('plan_create');
+      (req as any)._checkpointSaved = true;
+      await saveCheckpoint('plan_create');
       res.json({ success: true, id: info.lastInsertRowid });
     } catch (err) {
       res.status(500).json({ error: "Erreur lors de la création du plan." });
     }
   });
 
-  app.put("/api/super-admin/plans/:id", authenticateToken, requireSuperAdmin, (req, res) => {
+  app.put("/api/super-admin/plans/:id", authenticateToken, requireSuperAdmin, async (req, res) => {
     try {
       const { name, price, period, features, featureIds, color, is_recommended, type, is_active, student_limit, staff_limit, description } = req.body;
       const featuresArr = Array.isArray(features) ? features : [];
@@ -31509,14 +31583,15 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       db.prepare("INSERT OR REPLACE INTO saas_settings (key, value) VALUES ('plans_initial_seeded', 'true')").run();
       markSuperAdminConfigCustomized();
       saveLocalCheckpointSync();
-      scheduleCheckpoint('plan_update');
+      (req as any)._checkpointSaved = true;
+      await saveCheckpoint('plan_update');
       res.json({ success: true });
     } catch (err) {
       res.status(500).json({ error: "Erreur lors de la mise à jour du plan." });
     }
   });
 
-  app.delete("/api/super-admin/plans/:id", authenticateToken, requireSuperAdmin, (req, res) => {
+  app.delete("/api/super-admin/plans/:id", authenticateToken, requireSuperAdmin, async (req, res) => {
     try {
       db.prepare("DELETE FROM plans WHERE id = ?").run(req.params.id);
       const matrix = getProductFeatureMatrixMap();
@@ -31527,7 +31602,8 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       markSuperAdminConfigCustomized();
       markExplicitDeletion();
       saveLocalCheckpointSync();
-      scheduleCheckpoint('plan_delete');
+      (req as any)._checkpointSaved = true;
+      await saveCheckpoint('plan_delete');
       res.json({ success: true });
     } catch (err) {
       res.status(500).json({ error: "Erreur lors de la suppression du plan." });
@@ -31656,7 +31732,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
   });
 
   // Create school manually + default password generation
-  app.post("/api/super-admin/schools", authenticateToken, requireSuperAdmin, (req, res) => {
+  app.post("/api/super-admin/schools", authenticateToken, requireSuperAdmin, async (req, res) => {
     try {
       const { 
         nom, 
@@ -31783,7 +31859,8 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       createSchoolTx();
 
       saveLocalCheckpointSync();
-      saveCheckpoint('super_admin_create_school').catch(() => {});
+      (req as any)._checkpointSaved = true;
+      await saveCheckpoint('super_admin_create_school');
 
       // Trigger Super Admin notification
       notifySuperAdminNewSchool({
@@ -31838,7 +31915,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
   });
 
   // Update school info
-  app.put("/api/super-admin/schools/:id", authenticateToken, requireSuperAdmin, (req, res) => {
+  app.put("/api/super-admin/schools/:id", authenticateToken, requireSuperAdmin, async (req, res) => {
     try {
       const schoolId = req.params.id;
       const { 
@@ -31911,7 +31988,8 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       } catch (e) {}
 
       saveLocalCheckpointSync();
-      scheduleCheckpoint('update_school');
+      (req as any)._checkpointSaved = true;
+      await saveCheckpoint('update_school');
       res.json({ success: true, message: "Établissement mis à jour avec succès." });
     } catch (err: any) {
       res.status(500).json({ error: "Erreur lors de la mise à jour : " + (err.message || err) });
@@ -31919,7 +31997,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
   });
 
   // Dedicated endpoint for Super Admin to activate or lock educational spaces (Maternelle & Primaire / Secondaire)
-  app.put("/api/super-admin/schools/:id/spaces-lock", authenticateToken, requireSuperAdmin, (req, res) => {
+  app.put("/api/super-admin/schools/:id/spaces-lock", authenticateToken, requireSuperAdmin, async (req, res) => {
     try {
       const schoolId = parseInt(req.params.id, 10);
       if (isNaN(schoolId)) {
@@ -31988,7 +32066,8 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       } catch (e) {}
 
       saveLocalCheckpointSync();
-      scheduleCheckpoint('spaces_lock_school');
+      (req as any)._checkpointSaved = true;
+      await saveCheckpoint('spaces_lock_school');
       res.json({
         success: true,
         message: "État des espaces scolaires mis à jour avec succès.",
@@ -32035,7 +32114,8 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       } catch (e) {}
 
       saveLocalCheckpointSync();
-      scheduleCheckpoint('reset_school_admin_password');
+      (req as any)._checkpointSaved = true;
+      await saveCheckpoint('reset_school_admin_password');
 
       // Notify school/admin via Brevo / SMTP
       const recipients = getSchoolRequestRecipients({ demandeur_email: admin.email, email_ecole: schoolRow?.email });
@@ -32063,7 +32143,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
   });
 
   // Delete a school with reinforced Super Admin security check + complete archival snapshot before cascading deletion
-  app.delete("/api/super-admin/schools/:id", authenticateToken, requireSuperAdmin, (req: any, res) => {
+  app.delete("/api/super-admin/schools/:id", authenticateToken, requireSuperAdmin, async (req: any, res) => {
     const schoolId = parseInt(req.params.id, 10);
     if (isNaN(schoolId)) {
       return res.status(400).json({ error: "Identifiant d'école invalide." });
@@ -32214,7 +32294,8 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
 
       markExplicitDeletion();
       saveLocalCheckpointSync();
-      saveCheckpoint('delete_school').catch(() => {});
+      (req as any)._checkpointSaved = true;
+      await saveCheckpoint('delete_school');
 
       res.json({
         success: true,
@@ -32309,7 +32390,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
     }
   });
 
-  app.post("/api/super-admin/deleted-schools/:archiveId/restore", authenticateToken, requireSuperAdmin, (req: any, res) => {
+  app.post("/api/super-admin/deleted-schools/:archiveId/restore", authenticateToken, requireSuperAdmin, async (req: any, res) => {
     const archiveId = parseInt(req.params.archiveId, 10);
     if (isNaN(archiveId)) return res.status(400).json({ error: "Identifiant d'archive invalide." });
 
@@ -32413,7 +32494,8 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       } catch (e) {}
 
       saveLocalCheckpointSync();
-      saveCheckpoint('restore_school_archive').catch(() => {});
+      (req as any)._checkpointSaved = true;
+      await saveCheckpoint('restore_school_archive');
 
       res.json({
         success: true,
@@ -32607,7 +32689,8 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       const newRequest = db.prepare("SELECT * FROM school_creation_requests WHERE id = ?").get(requestId) as any;
 
       saveLocalCheckpointSync();
-      saveCheckpoint('create_school_request').catch(() => {});
+      (req as any)._checkpointSaved = true;
+      await saveCheckpoint('create_school_request');
 
       // Super Admin Real-Time Notification
       try {
@@ -32719,7 +32802,8 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
 
       const updated = db.prepare("SELECT * FROM school_creation_requests WHERE id = ?").get(request.id) as any;
       saveLocalCheckpointSync();
-      saveCheckpoint('confirm_payment_school_request').catch(() => {});
+      (req as any)._checkpointSaved = true;
+      await saveCheckpoint('confirm_payment_school_request');
 
       // Notify both school email & promoter personal email of payment confirmation reception
       const paymentRecipients = getSchoolRequestRecipients(updated || request);
@@ -32912,7 +32996,8 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       approveTx();
 
       saveLocalCheckpointSync();
-      saveCheckpoint('approve_school_request').catch(() => {});
+      (req as any)._checkpointSaved = true;
+      await saveCheckpoint('approve_school_request');
 
       // Generate PDF Fiche
       let pdfBuffer: Buffer | null = null;
@@ -33059,7 +33144,8 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       `).run(type, requestId);
 
       saveLocalCheckpointSync();
-      saveCheckpoint('notice_school_request').catch(() => {});
+      (req as any)._checkpointSaved = true;
+      await saveCheckpoint('notice_school_request');
 
       // Send Email to both school email (if added) and promoter personal email via Brevo / SMTP
       const recipients = getSchoolRequestRecipients(request);
@@ -33191,7 +33277,8 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       `).run(finalReason, requestId);
 
       saveLocalCheckpointSync();
-      saveCheckpoint('reject_school_request').catch(() => {});
+      (req as any)._checkpointSaved = true;
+      await saveCheckpoint('reject_school_request');
 
       // Notify BOTH school email (if added) and promoter personal email via Brevo / SMTP
       const rejectRecipients = getSchoolRequestRecipients(request);
@@ -33234,27 +33321,33 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
   });
 
   // Suppression d'une demande par le Super Admin
-  app.delete("/api/super-admin/school-requests/:id", authenticateToken, requireSuperAdmin, (req, res) => {
+  app.delete("/api/super-admin/school-requests/:id", authenticateToken, requireSuperAdmin, async (req, res) => {
     try {
       const requestId = parseInt(req.params.id, 10);
       db.prepare("DELETE FROM school_creation_requests WHERE id = ?").run(requestId);
       markExplicitDeletion();
       saveLocalCheckpointSync();
-      saveCheckpoint('delete_school_request').catch(() => {});
+      (req as any)._checkpointSaved = true;
+      await saveCheckpoint('delete_school_request');
       res.json({ success: true, message: "Demande supprimée." });
     } catch (err: any) {
       res.status(500).json({ error: "Erreur lors de la suppression de la demande." });
     }
   });
 
-  // Cloud Vault Sync Bridge (allows authenticated Super Admin browser to mirror vault with Firestore even without server SA IAM)
+  // Cloud Vault & Cloud SQL Sync Status
   app.get("/api/super-admin/cloud-vault", authenticateToken, requireSuperAdmin, (_req, res) => {
     try {
       const vault = buildSchoolAccountsVault();
       const stats = getDatabaseStats();
+      const pgActive = isCloudSqlConfigured();
       res.json({
         success: true,
-        cloudSyncAvailable: isCloudSyncAvailable(),
+        cloudSyncAvailable: pgActive,
+        provider: pgActive ? 'cloud_firestore_and_cloudsql' : 'cloud_firestore',
+        firestoreDatabaseId: FIRESTORE_DB_ID,
+        firestoreCollections: FIRESTORE_COLLECTIONS,
+        cloudSqlVersion: lastSyncedPgVersion,
         stats,
         vault
       });
@@ -33263,7 +33356,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
     }
   });
 
-  app.post("/api/super-admin/cloud-vault/reconcile", authenticateToken, requireSuperAdmin, (req, res) => {
+  app.post("/api/super-admin/cloud-vault/reconcile", authenticateToken, requireSuperAdmin, async (req, res) => {
     try {
       const { vault } = req.body || {};
       if (!vault || !vault.tables || typeof vault.tables !== 'object') {
@@ -33274,6 +33367,8 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       if (reconciled > 0) {
         bumpServerDataVersion();
         saveLocalCheckpointSync();
+        (req as any)._checkpointSaved = true;
+        await saveCheckpoint('cloud_vault_reconcile');
       }
       res.json({
         success: true,
@@ -33294,9 +33389,14 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       const lastLocalBackupAt = localBackupExists
         ? fs.statSync(AUTO_BACKUP_PATH).mtime.toISOString()
         : null;
+      const pgActive = isCloudSqlConfigured();
       res.json({
         success: true,
-        cloudSyncAvailable: isCloudSyncAvailable(),
+        cloudSyncAvailable: pgActive,
+        database: pgActive ? 'Cloud Firestore & Cloud SQL (PostgreSQL)' : 'Cloud Firestore',
+        firestoreDatabaseId: FIRESTORE_DB_ID,
+        firestoreCollections: FIRESTORE_COLLECTIONS,
+        cloudSqlVersion: lastSyncedPgVersion,
         localBackupExists,
         vaultExists,
         lastLocalBackupAt,
@@ -33391,6 +33491,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       // Load saas_settings first, then let super_admin_settings be the authoritative override
       saasSettings.forEach((s: any) => { settingsMap[s.key] = s.value; });
       superAdminSettings.forEach((s: any) => { settingsMap[s.key] = s.value; });
+      delete settingsMap.system_jwt_secret;
 
       const secretKeys = [
         'brevo_api_key', 'smtp_pass', 'sms_api_key', 'sms_auth_token',
@@ -33409,7 +33510,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
     }
   });
 
-  app.post("/api/super-admin/settings", authenticateToken, requireSuperAdmin, (req, res) => {
+  app.post("/api/super-admin/settings", authenticateToken, requireSuperAdmin, async (req, res) => {
     try {
       const updates = req.body || {};
       const secretKeys = new Set([
@@ -33420,7 +33521,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       const stmtSuper = db.prepare("INSERT OR REPLACE INTO super_admin_settings (key, value) VALUES (?, ?)");
       db.transaction(() => {
         for (const [key, value] of Object.entries(updates)) {
-          if (key.startsWith('has_') || key === 'super_admin_config_customized' || key === 'super_admin_config_updated_at') continue;
+          if (key.startsWith('has_') || key === 'super_admin_config_customized' || key === 'super_admin_config_updated_at' || key === 'system_jwt_secret') continue;
           const valStr = typeof value === 'string' ? value : JSON.stringify(value);
           // Never overwrite stored secret keys with masked placeholder strings
           if (secretKeys.has(key) && (!valStr.trim() || /^[•*]+$/.test(valStr.trim()))) {
@@ -33433,8 +33534,8 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       })();
 
       saveLocalCheckpointSync();
-      scheduleCheckpoint('super_admin_settings');
-      saveCheckpoint('super_admin_settings').catch(() => {});
+      (req as any)._checkpointSaved = true;
+      await saveCheckpoint('super_admin_settings');
       res.json({ success: true });
     } catch (err) {
       res.status(500).json({ error: "Erreur lors de la mise à jour des paramètres." });
@@ -33761,7 +33862,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
   });
 
   // Save / Update school messaging configuration
-  app.put("/api/super-admin/schools/:id/messaging-config", authenticateToken, requireSuperAdmin, (req: any, res) => {
+  app.put("/api/super-admin/schools/:id/messaging-config", authenticateToken, requireSuperAdmin, async (req: any, res) => {
     try {
       const schoolId = parseInt(req.params.id, 10);
       const school = db.prepare("SELECT id, nom FROM school_info WHERE id = ?").get(schoolId);
@@ -33946,6 +34047,9 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       })();
 
       recordSaasLog(req.userId, "UPDATE_SCHOOL_MESSAGING", { schoolId, hasSmtp: Boolean(smtp), hasSms: Boolean(sms), hasWhatsapp: Boolean(whatsapp) }, req);
+      saveLocalCheckpointSync();
+      (req as any)._checkpointSaved = true;
+      await saveCheckpoint('school_messaging_config');
 
       res.json({ success: true, message: "Configuration des passerelles enregistrée avec succès." });
     } catch (err: any) {

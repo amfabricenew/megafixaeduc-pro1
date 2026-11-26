@@ -60,7 +60,7 @@ Si vous préférez créer manuellement le Web Service sur Render :
    - `NODE_ENV` = `production`
    - `PORT` = `10000` *(Render écoute automatiquement sur ce port)*
    - `JWT_SECRET` = *(une chaîne secrète aléatoire de 32 caractères)*
-   - `DATABASE_PATH` = `megafixaEduc.db`
+   - `FIRESTORE_DATABASE_ID` = `ai-studio-complexescolaire-58020480-d049-4084-942d-a5a7b046898c`
    - `OFFLINE_MODE` = `false`
    - `SMTP_USER` = *(votre adresse Gmail / SMTP pour l'envoi d'emails)*
    - `SMTP_PASS` = *(mot de passe d'application Google de 16 caractères)*
@@ -69,11 +69,11 @@ Si vous préférez créer manuellement le Web Service sur Render :
 
 ---
 
-## Persistance des Données SQLite sur Render
+## Persistance Cloud Firestore & Cloud SQL sur Render
 
 - **Plan Gratuit (Free Web Service) :**
-  L'application dispose d'un système de synchronisation et de checkpoint local. Le serveur recrée automatiquement la structure complète de la base de données SQLite au démarrage.
-- **Plan Payant avec Disque Persistant (Recommandé pour Production) :**
+  Les paramètres, comptes utilisateurs, établissements et plans d'abonnement sont répliqués dans **Cloud Firestore** (`ai-studio-complexescolaire-58020480-d049-4084-942d-a5a7b046898c`) et **Cloud SQL (PostgreSQL)**. Le serveur reconstruit automatiquement son cache local d'exécution au démarrage sans perte de données.
+- **Plan Payant avec Disque Persistant (Optionnel) :**
   Render permet d'ajouter un disque persistant (**Disks**) monté par exemple sur `/var/data` :
-  - Définissez la variable `DATABASE_PATH` = `/var/data/megafixaEduc.db`.
+  - Définissez la variable `PERSISTENT_DATA_DIR` = `/var/data` pour y conserver les sauvegardes, pièces jointes et le cache d'exécution.
   - Le serveur crée automatiquement le dossier parent s'il n'existe pas encore.

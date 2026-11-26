@@ -3,6 +3,7 @@ import {createRoot} from 'react-dom/client';
 import App from './App.tsx';
 import './index.css';
 import { AuthProvider } from './contexts/AuthContext.tsx';
+import { FirebaseProvider } from './contexts/FirebaseContext.tsx';
 import ErrorBoundary from './components/ErrorBoundary.tsx';
 import { registerSW } from 'virtual:pwa-register';
 import { initAutoUpdateMonitor } from './utils/appUpdater.ts';
@@ -109,9 +110,11 @@ initAutoUpdateMonitor();
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <ErrorBoundary>
-      <AuthProvider>
-        <App />
-      </AuthProvider>
+      <FirebaseProvider>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </FirebaseProvider>
     </ErrorBoundary>
   </StrictMode>,
 );

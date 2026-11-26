@@ -31,6 +31,7 @@ import PasswordStrengthMeter, { evaluatePassword } from '../components/PasswordS
 import { LanguageSelector } from '../components/LanguageSelector';
 import { useTranslation } from '../contexts/TranslationContext';
 import { auth, googleProvider, signInWithPopup } from '../lib/firebase';
+import { firestoreDbService } from '../services/firestoreDbService';
 import SchoolCreationRequestModal from '../components/SchoolCreationRequestModal';
 
 export default function Login() {
@@ -204,6 +205,20 @@ export default function Login() {
         return;
       }
       if (data.success && data.token) {
+        if (auth.currentUser?.uid && auth.currentUser?.emailVerified) {
+          void firestoreDbService
+            .upsertUserProfile(
+              auth.currentUser.uid,
+              {
+                email: data.user.email,
+                role: data.user.role,
+                school_id: data.user.school_id,
+                nom: data.user.nom,
+              },
+              { throwOnError: false }
+            )
+            .catch(() => {});
+        }
         toast.success(`Bienvenue, ${data.user.nom} !`);
         login(data.token, data.user);
         if (data.user.role === 'super_admin') {

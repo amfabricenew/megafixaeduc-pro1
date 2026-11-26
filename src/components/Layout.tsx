@@ -73,6 +73,7 @@ import SubscriptionGatedView from './SubscriptionGatedView';
 import { PWAInstallButton } from './PWAInstallButton';
 import { useOnlineStatus } from '../hooks/useOnlineStatus';
 import { LanguageSelector } from './LanguageSelector';
+import { SchoolSettingsCloudExporter } from './SchoolSettingsCloudExporter';
 
 
 function cn(...inputs: ClassValue[]) {
@@ -959,7 +960,7 @@ export default function Layout() {
         </div>
       )}
 
-
+      <SchoolSettingsCloudExporter mode="headless" />
     </div>
   );
 }

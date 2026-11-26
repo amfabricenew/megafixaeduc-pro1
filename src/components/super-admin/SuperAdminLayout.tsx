@@ -248,6 +248,7 @@ export default function SuperAdminLayout() {
   React.useEffect(() => {
     if (user?.role !== 'super_admin') return;
     let active = true;
+    let serverCloudActive = false;
 
     const runCloudSync = () => {
       syncCloudVaultWithFirestore()
@@ -263,9 +264,11 @@ export default function SuperAdminLayout() {
 
     const unsubscribe = onAuthStateChanged(auth, (fbUser) => {
       if (!active) return;
-      setCloudSyncLinked(Boolean(fbUser?.emailVerified));
       if (fbUser?.emailVerified) {
+        setCloudSyncLinked(true);
         runCloudSync();
+      } else if (!serverCloudActive) {
+        setCloudSyncLinked(false);
       }
     });
 
@@ -277,6 +280,7 @@ export default function SuperAdminLayout() {
         .then(r => (r.ok ? r.json() : null))
         .then(st => {
           if (active && st?.cloudSyncAvailable) {
+            serverCloudActive = true;
             setCloudSyncLinked(true);
           }
         })

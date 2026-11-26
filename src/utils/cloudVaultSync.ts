@@ -1,4 +1,5 @@
 import { auth, db, doc, getDocFromServer, setDoc, handleFirestoreError, OperationType } from '../lib/firebase';
+import { firestoreDbService } from '../services/firestoreDbService';
 
 const SUPER_ADMIN_CLOUD_EMAILS = ['ayedeguef@gmail.com', 'amfabricenew@gmail.com'];
 const VAULT_DOC_PATH = 'backups/school_accounts_registry';
@@ -174,6 +175,9 @@ export async function syncCloudVaultWithFirestore(options: {
             vault_json: ''
           });
         }
+        await firestoreDbService
+          .syncNormalizedEntitiesFromVault(latestVault, { throwOnError: false })
+          .catch(() => {});
         return { reconciled, pushed: true };
       } catch (writeErr: any) {
         if (options.throwOnError) {

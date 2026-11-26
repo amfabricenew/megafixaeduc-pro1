@@ -58,12 +58,15 @@ service cloud.firestore {
     function isSameSchool(schoolId) {
       return hasUserProfile()
         && userProfile().school_id != null
-        && string(userProfile().school_id) == string(schoolId);
+        && (
+          string(userProfile().school_id) == string(schoolId)
+          || ('school_' + string(userProfile().school_id)) == string(schoolId)
+        );
     }
 
     function isSchoolAdmin(schoolId) {
       return isSameSchool(schoolId)
-        && userProfile().role in ['admin', 'fonde', 'direction'];
+        && userProfile().role in ['admin', 'fonde', 'direction', 'directeur', 'fondateur'];
     }
 
     function hasSchoolField(docData) {
@@ -114,12 +117,23 @@ service cloud.firestore {
     function isValidSchoolDoc(data) {
       return data is map
         && data.keys().hasAll(['nom'])
-        && data.keys().hasOnly(['id', 'nom', 'code_ecole', 'plan_abonnement', 'statut_abonnement', 'updatedAt'])
+        && data.keys().hasOnly([
+          'id', 'nom', 'code_ecole', 'email', 'telephone', 'pays', 'devise',
+          'plan_abonnement', 'statut_abonnement', 'date_fin_abonnement',
+          'espace_primaire_actif', 'espace_secondaire_actif', 'updatedAt'
+        ])
         && data.nom is string && data.nom.size() > 0 && data.nom.size() <= 200
         && (!('id' in data) || data.id is int)
         && (!('code_ecole' in data) || (data.code_ecole is string && data.code_ecole.size() <= 64))
+        && (!('email' in data) || (data.email is string && data.email.size() <= 254))
+        && (!('telephone' in data) || (data.telephone is string && data.telephone.size() <= 40))
+        && (!('pays' in data) || (data.pays is string && data.pays.size() <= 80))
+        && (!('devise' in data) || (data.devise is string && data.devise.size() <= 16))
         && (!('plan_abonnement' in data) || (data.plan_abonnement is string && data.plan_abonnement.size() <= 80))
         && (!('statut_abonnement' in data) || (data.statut_abonnement is string && data.statut_abonnement.size() <= 40))
+        && (!('date_fin_abonnement' in data) || (data.date_fin_abonnement is string && data.date_fin_abonnement.size() <= 64))
+        && (!('espace_primaire_actif' in data) || data.espace_primaire_actif is int)
+        && (!('espace_secondaire_actif' in data) || data.espace_secondaire_actif is int)
         && (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 64));
     }
 
@@ -133,6 +147,62 @@ service cloud.firestore {
         && (!('school_id' in data) || data.school_id is int)
         && (!('nom' in data) || (data.nom is string && data.nom.size() <= 150))
         && (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 64));
+    }
+
+    function isValidSuperAdminSettingDoc(data) {
+      return data is map
+        && data.keys().hasAll(['key', 'value', 'updatedAt'])
+        && data.keys().hasOnly(['key', 'value', 'is_secret', 'updatedAt'])
+        && data.key is string && data.key.size() >= 1 && data.key.size() <= 100
+        && data.value is string && data.value.size() <= 200000
+        && (!('is_secret' in data) || data.is_secret is bool)
+        && data.updatedAt is string && data.updatedAt.size() > 0 && data.updatedAt.size() <= 64;
+    }
+
+    function isValidPlanDoc(data) {
+      return data is map
+        && data.keys().hasAll(['id', 'name', 'price', 'updatedAt'])
+        && data.keys().hasOnly([
+          'id', 'name', 'price', 'period', 'type', 'color',
+          'student_limit', 'staff_limit', 'is_recommended', 'is_active',
+          'features', 'updatedAt'
+        ])
+        && data.id is int
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 120
+        && (data.price is int || data.price is float)
+        && (!('period' in data) || (data.period is string && data.period.size() <= 40))
+        && (!('type' in data) || (data.type is string && data.type.size() <= 40))
+        && (!('color' in data) || (data.color is string && data.color.size() <= 40))
+        && (!('student_limit' in data) || data.student_limit is int)
+        && (!('staff_limit' in data) || data.staff_limit is int)
+        && (!('is_recommended' in data) || data.is_recommended is bool)
+        && (!('is_active' in data) || data.is_active is bool)
+        && (!('features' in data) || (
+          data.features is list
+          && data.features.size() <= 60
+          && (data.features.size() == 0 || (data.features[0] is string && data.features[0].size() <= 120))
+        ))
+        && data.updatedAt is string && data.updatedAt.size() > 0 && data.updatedAt.size() <= 64;
+    }
+
+    function isValidSchoolRequestDoc(data) {
+      return data is map
+        && data.keys().hasAll(['reference', 'nom_ecole', 'statut', 'updatedAt'])
+        && data.keys().hasOnly([
+          'id', 'reference', 'nom_ecole', 'email_ecole',
+          'demandeur_nom', 'demandeur_email', 'plan_souhaite',
+          'statut', 'school_id', 'updatedAt'
+        ])
+        && data.reference is string && data.reference.size() >= 3 && data.reference.size() <= 64
+        && data.nom_ecole is string && data.nom_ecole.size() >= 1 && data.nom_ecole.size() <= 200
+        && data.statut is string && data.statut.size() >= 2 && data.statut.size() <= 40
+        && (!('id' in data) || data.id is int)
+        && (!('email_ecole' in data) || (data.email_ecole is string && data.email_ecole.size() <= 254))
+        && (!('demandeur_nom' in data) || (data.demandeur_nom is string && data.demandeur_nom.size() <= 150))
+        && (!('demandeur_email' in data) || (data.demandeur_email is string && data.demandeur_email.size() <= 254))
+        && (!('plan_souhaite' in data) || (data.plan_souhaite is string && data.plan_souhaite.size() <= 120))
+        && (!('school_id' in data) || data.school_id is int)
+        && data.updatedAt is string && data.updatedAt.size() > 0 && data.updatedAt.size() <= 64;
     }
 
     function isValidScopedDoc(data) {
@@ -173,17 +243,45 @@ service cloud.firestore {
     }
 
     // =========================================================================
+    // Super Admin Platform Settings & Requests (Strictly Super-Admin Only)
+    // =========================================================================
+    match /super_admin_settings/{settingId} {
+      allow get: if isSignedIn() && isValidId(settingId) && isSuperAdmin();
+      allow list: if false;
+      allow create: if isSignedIn() && isValidId(settingId) && isValidSuperAdminSettingDoc(incoming()) && isSuperAdmin();
+      allow update: if isSignedIn() && isValidId(settingId) && isValidSuperAdminSettingDoc(incoming()) && resource != null && isSuperAdmin();
+      allow delete: if isSignedIn() && isValidId(settingId) && resource != null && isSuperAdmin();
+    }
+
+    match /plans/{planId} {
+      allow get: if isSignedIn() && isValidId(planId);
+      allow list: if false;
+      allow create: if isSignedIn() && isValidId(planId) && isValidPlanDoc(incoming()) && isSuperAdmin();
+      allow update: if isSignedIn() && isValidId(planId) && isValidPlanDoc(incoming()) && resource != null && isSuperAdmin();
+      allow delete: if isSignedIn() && isValidId(planId) && resource != null && isSuperAdmin();
+    }
+
+    match /school_requests/{requestId} {
+      allow get: if isSignedIn() && isValidId(requestId) && isSuperAdmin();
+      allow list: if false;
+      allow create: if isSignedIn() && isValidId(requestId) && isValidSchoolRequestDoc(incoming()) && isSuperAdmin();
+      allow update: if isSignedIn() && isValidId(requestId) && isValidSchoolRequestDoc(incoming()) && resource != null && isSuperAdmin();
+      allow delete: if isSignedIn() && isValidId(requestId) && resource != null && isSuperAdmin();
+    }
+
+    // =========================================================================
     // Multi-Tenant Schools Registry
     // =========================================================================
     match /schools/{schoolId} {
       allow get: if isSignedIn() && isValidId(schoolId) && (isSuperAdmin() || isSameSchool(schoolId));
       allow list: if false;
       allow create: if isSignedIn() && isValidId(schoolId) && isValidSchoolDoc(incoming()) && isSuperAdmin();
-      allow update: if isSignedIn() && isValidId(schoolId) && isValidSchoolDoc(incoming()) && (
+      allow update: if isSignedIn() && isValidId(schoolId) && isValidSchoolDoc(incoming()) && resource != null && (
         isSuperAdmin() ||
         (
           isSchoolAdmin(schoolId)
-          && incoming().diff(existing()).affectedKeys().hasOnly(['nom', 'updatedAt'])
+          && (!('id' in existing()) || incoming().id == existing().id)
+          && incoming().diff(existing()).affectedKeys().hasOnly(['nom', 'email', 'telephone', 'pays', 'devise', 'updatedAt'])
         )
       );
       allow delete: if isSignedIn() && isValidId(schoolId) && resource != null && isSuperAdmin();
@@ -199,13 +297,23 @@ service cloud.firestore {
         (resource != null && hasSchoolField(existing()) && isSchoolAdmin(existing().school_id))
       );
       allow list: if false;
-      allow create: if isSignedIn() && isValidId(userId) && isValidUserDoc(incoming()) && isSuperAdmin();
-      allow update: if isSignedIn() && isValidId(userId) && isValidUserDoc(incoming()) && (
+      allow create: if isSignedIn() && isValidId(userId) && isValidUserDoc(incoming()) && (
+        isSuperAdmin() ||
+        (
+          request.auth.uid == userId
+          && (!('uid' in incoming()) || incoming().uid == request.auth.uid)
+          && incoming().email == request.auth.token.email
+          && incoming().role == 'user'
+        )
+      );
+      allow update: if isSignedIn() && isValidId(userId) && isValidUserDoc(incoming()) && resource != null && (
         isSuperAdmin() ||
         (
           request.auth.uid == userId
           && incoming().role == existing().role
-          && unchangedSchoolId()
+          && (!('uid' in incoming()) || incoming().uid == existing().uid)
+          && incoming().email == existing().email
+          && (!hasSchoolField(existing()) || unchangedSchoolId())
           && incoming().diff(existing()).affectedKeys().hasOnly(['nom', 'updatedAt'])
         )
       );
@@ -260,7 +368,8 @@ service cloud.firestore {
     match /settings/{settingId} {
       allow get: if isSignedIn() && isValidId(settingId) && (
         isSuperAdmin() ||
-        (resource != null && hasSchoolField(existing()) && isSameSchool(existing().school_id))
+        (resource != null && hasSchoolField(existing()) && isSameSchool(existing().school_id)) ||
+        (resource == null && hasUserProfile() && userProfile().school_id != null && settingId == ('school_' + string(userProfile().school_id) + '_config'))
       );
       allow list: if false;
       allow create: if isSignedIn() && isValidId(settingId) && isValidScopedDoc(incoming()) && (isSuperAdmin() || isSchoolAdmin(incoming().school_id));
