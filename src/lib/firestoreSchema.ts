@@ -9,7 +9,8 @@ import firebaseConfig from '../../firebase-applet-config.json';
 export const FIRESTORE_STORAGE_CONFIG = {
   projectId: firebaseConfig.projectId,
   databaseId: firebaseConfig.firestoreDatabaseId,
-  storageProvider: 'cloud_firestore_and_cloudsql' as const,
+  storageProvider: 'cloud_firestore_primary' as const,
+  fallbackProvider: 'cloudsql_and_local_cache' as const,
 } as const;
 
 export const FIRESTORE_COLLECTIONS = {
@@ -60,6 +61,18 @@ export function buildSchoolRequestDocId(requestIdOrRef: number | string): string
 }
 
 export function buildSchoolSettingDocId(schoolId: number | string, scope = 'config'): string {
+  return sanitizeFirestoreDocId(`${schoolId}_${scope}`, 'school');
+}
+
+export function buildClassDocId(schoolId: number | string, scope = 'classes'): string {
+  return sanitizeFirestoreDocId(`${schoolId}_${scope}`, 'school');
+}
+
+export function buildStudentDocId(schoolId: number | string, scope = 'students'): string {
+  return sanitizeFirestoreDocId(`${schoolId}_${scope}`, 'school');
+}
+
+export function buildGradeDocId(schoolId: number | string, scope = 'grades'): string {
   return sanitizeFirestoreDocId(`${schoolId}_${scope}`, 'school');
 }
 

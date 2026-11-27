@@ -218,9 +218,18 @@ export async function saveMasterCheckpointToCloudSql(
     const nextVersion = existingMeta ? Number(existingMeta.version || 0) + 1 : 1;
     const now = new Date();
 
+    const statsShrank = Boolean(
+      existingMeta &&
+        (existingMeta.nonDefaultSchoolCount > input.stats.nonDefaultSchoolCount ||
+          existingMeta.schoolCount > input.stats.schoolCount ||
+          existingMeta.nonTestUserCount > input.stats.nonTestUserCount ||
+          existingMeta.requestCount > input.stats.requestCount ||
+          existingMeta.studentCount > input.stats.studentCount)
+    );
+
     await pgDb.transaction(async (tx) => {
-      // Preserve a rolling previous checkpoint whenever data shrinks explicitly (deletion)
-      if (existingMeta && input.allowShrink) {
+      // Preserve a rolling previous checkpoint whenever data shrinks or during explicit replacement
+      if (existingMeta && (input.allowShrink || statsShrank)) {
         const prevRows = await tx
           .select()
           .from(cloudCheckpoints)
@@ -411,32 +420,28 @@ export async function saveMasterCheckpointToCloudSql(
             });
         }
 
-        // Sync user directory into PostgreSQL users table
-        for (const u of input.normalized.userRows) {
-          if (!u.email) continue;
-          const uid = u.google_id
-            ? String(u.google_id)
-            : `local_${u.id ?? crypto.createHash('md5').update(String(u.email)).digest('hex')}`;
-          await tx
-            .insert(users)
-            .values({
+        // Authoritatively reconcile user directory into PostgreSQL users table (handles edits, Google UID linking, and deletions)
+        if (input.normalized.userRows.length > 0 || input.allowShrink) {
+          await tx.delete(users);
+          const seenUids = new Set<string>();
+          for (const u of input.normalized.userRows) {
+            if (!u.email) continue;
+            let uid = u.google_id
+              ? String(u.google_id)
+              : `local_${u.id ?? crypto.createHash('md5').update(String(u.email)).digest('hex')}`;
+            if (seenUids.has(uid)) {
+              uid = `local_${u.id ?? crypto.createHash('md5').update(`${u.email}:${seenUids.size}`).digest('hex')}`;
+            }
+            seenUids.add(uid);
+            await tx.insert(users).values({
               uid,
               email: String(u.email),
               nom: u.nom ? String(u.nom) : null,
               role: u.role ? String(u.role) : 'user',
               schoolId: u.school_id != null ? Number(u.school_id) : null,
               updatedAt: now,
-            })
-            .onConflictDoUpdate({
-              target: users.uid,
-              set: {
-                email: String(u.email),
-                nom: u.nom ? String(u.nom) : null,
-                role: u.role ? String(u.role) : 'user',
-                schoolId: u.school_id != null ? Number(u.school_id) : null,
-                updatedAt: now,
-              },
             });
+          }
         }
       }
     });

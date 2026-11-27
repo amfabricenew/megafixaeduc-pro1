@@ -250,8 +250,8 @@ export default function SuperAdminLayout() {
     let active = true;
     let serverCloudActive = false;
 
-    const runCloudSync = () => {
-      syncCloudVaultWithFirestore()
+    const runCloudSync = (prioritizeRemote = false) => {
+      syncCloudVaultWithFirestore({ prioritizeRemote })
         .then((res) => {
           if (!active || !res) return;
           if (res.reconciled > 0) {
@@ -266,7 +266,7 @@ export default function SuperAdminLayout() {
       if (!active) return;
       if (fbUser?.emailVerified) {
         setCloudSyncLinked(true);
-        runCloudSync();
+        runCloudSync(true);
       } else if (!serverCloudActive) {
         setCloudSyncLinked(false);
       }
@@ -276,19 +276,19 @@ export default function SuperAdminLayout() {
       if (!active) return;
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
       if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
-      runCloudSync();
+      runCloudSync(false);
     }, 60_000);
 
     const handleMutationEvent = () => {
       if (!active) return;
       window.setTimeout(() => {
-        if (active) runCloudSync();
+        if (active) runCloudSync(false);
       }, 600);
     };
     const handleVisibilityOrHide = () => {
       if (!active) return;
       if (document.visibilityState === 'hidden') {
-        runCloudSync();
+        runCloudSync(false);
       }
     };
 
@@ -328,7 +328,7 @@ export default function SuperAdminLayout() {
     setCloudSyncBusy(true);
     try {
       await signInWithPopup(auth, googleProvider);
-      const res = await syncCloudVaultWithFirestore({ throwOnError: true });
+      const res = await syncCloudVaultWithFirestore({ prioritizeRemote: true, throwOnError: true });
       if (!res) {
         setCloudSyncLinked(false);
         toast.error('Utilisez un compte Google Super Admin vérifié pour lier le Cloud Vault.');

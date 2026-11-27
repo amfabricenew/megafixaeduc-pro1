@@ -273,7 +273,11 @@ service cloud.firestore {
     // Multi-Tenant Schools Registry
     // =========================================================================
     match /schools/{schoolId} {
-      allow get: if isSignedIn() && isValidId(schoolId) && (isSuperAdmin() || isSameSchool(schoolId));
+      allow get: if isSignedIn() && isValidId(schoolId) && (
+        isSuperAdmin() ||
+        isSameSchool(schoolId) ||
+        (resource == null && hasUserProfile() && userProfile().school_id != null && schoolId == ('school_' + string(userProfile().school_id)))
+      );
       allow list: if false;
       allow create: if isSignedIn() && isValidId(schoolId) && isValidSchoolDoc(incoming()) && isSuperAdmin();
       allow update: if isSignedIn() && isValidId(schoolId) && isValidSchoolDoc(incoming()) && resource != null && (
@@ -326,7 +330,8 @@ service cloud.firestore {
     match /classes/{classId} {
       allow get: if isSignedIn() && isValidId(classId) && (
         isSuperAdmin() ||
-        (resource != null && hasSchoolField(existing()) && isSameSchool(existing().school_id))
+        (resource != null && hasSchoolField(existing()) && isSameSchool(existing().school_id)) ||
+        (resource == null && hasUserProfile() && userProfile().school_id != null && classId == ('school_' + string(userProfile().school_id) + '_classes'))
       );
       allow list: if false;
       allow create: if isSignedIn() && isValidId(classId) && isValidScopedDoc(incoming()) && (isSuperAdmin() || isSchoolAdmin(incoming().school_id));
@@ -340,7 +345,8 @@ service cloud.firestore {
     match /students/{studentId} {
       allow get: if isSignedIn() && isValidId(studentId) && (
         isSuperAdmin() ||
-        (resource != null && hasSchoolField(existing()) && isSameSchool(existing().school_id))
+        (resource != null && hasSchoolField(existing()) && isSameSchool(existing().school_id)) ||
+        (resource == null && hasUserProfile() && userProfile().school_id != null && studentId == ('school_' + string(userProfile().school_id) + '_students'))
       );
       allow list: if false;
       allow create: if isSignedIn() && isValidId(studentId) && isValidScopedDoc(incoming()) && (isSuperAdmin() || isSchoolAdmin(incoming().school_id));
@@ -354,7 +360,8 @@ service cloud.firestore {
     match /grades/{gradeId} {
       allow get: if isSignedIn() && isValidId(gradeId) && (
         isSuperAdmin() ||
-        (resource != null && hasSchoolField(existing()) && isSameSchool(existing().school_id))
+        (resource != null && hasSchoolField(existing()) && isSameSchool(existing().school_id)) ||
+        (resource == null && hasUserProfile() && userProfile().school_id != null && gradeId == ('school_' + string(userProfile().school_id) + '_grades'))
       );
       allow list: if false;
       allow create: if isSignedIn() && isValidId(gradeId) && isValidScopedDoc(incoming()) && (isSuperAdmin() || isSchoolAdmin(incoming().school_id));
@@ -383,7 +390,8 @@ service cloud.firestore {
     match /app_data/{docId} {
       allow get: if isSignedIn() && isValidId(docId) && (
         isSuperAdmin() ||
-        (resource != null && hasSchoolField(existing()) && isSameSchool(existing().school_id))
+        (resource != null && hasSchoolField(existing()) && isSameSchool(existing().school_id)) ||
+        (resource == null && hasUserProfile() && userProfile().school_id != null && docId == ('appdata_' + string(userProfile().school_id) + '_operational'))
       );
       allow list: if false;
       allow create: if isSignedIn() && isValidId(docId) && isValidAppDataDoc(incoming()) && (isSuperAdmin() || isSchoolAdmin(incoming().school_id));

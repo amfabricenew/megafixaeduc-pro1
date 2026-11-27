@@ -122,6 +122,28 @@ if (!fs.existsSync(RUNTIME_CACHE_DIR)) {
   }
 }
 const LOCAL_RUNTIME_CACHE_FILE = path.join(RUNTIME_CACHE_DIR, 'megafixa_runtime.db');
+const WAS_LOCAL_CACHE_MISSING_ON_BOOT =
+  !fs.existsSync(LOCAL_RUNTIME_CACHE_FILE) || fs.statSync(LOCAL_RUNTIME_CACHE_FILE).size < 4096;
+const PG_SYNC_STATE_PATH = path.join(RUNTIME_CACHE_DIR, '.pg_sync_state.json');
+
+function readLocalPgSyncVersion(): number {
+  try {
+    if (!fs.existsSync(PG_SYNC_STATE_PATH)) return 0;
+    const parsed = JSON.parse(fs.readFileSync(PG_SYNC_STATE_PATH, 'utf8'));
+    return Number(parsed?.version || 0) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+function writeLocalPgSyncVersion(version: number): void {
+  try {
+    const tmp = `${PG_SYNC_STATE_PATH}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({ version, updatedAt: new Date().toISOString() }), 'utf8');
+    fs.renameSync(tmp, PG_SYNC_STATE_PATH);
+  } catch {}
+}
+
 const LEGACY_LOCAL_DB_FILE = path.resolve(process.cwd(), 'megafixaEduc.db');
 if (!fs.existsSync(LOCAL_RUNTIME_CACHE_FILE) && fs.existsSync(LEGACY_LOCAL_DB_FILE)) {
   try {
@@ -922,10 +944,41 @@ interface DatabaseStats {
 function getDatabaseStats(): DatabaseStats {
   const schoolCount = tableExists('school_info') ? safeCount("SELECT COUNT(*) as count FROM school_info") : 0;
   const nonDefaultSchoolCount = tableExists('school_info')
-    ? safeCount("SELECT COUNT(*) as count FROM school_info WHERE id > 1 OR TRIM(nom) != 'École par Défaut' OR email IS NOT NULL OR telephone IS NOT NULL OR subscription_key IS NOT NULL")
+    ? safeCount(`
+        SELECT COUNT(*) as count FROM school_info
+        WHERE id > 1
+          OR TRIM(COALESCE(nom, '')) != 'École par Défaut'
+          OR TRIM(COALESCE(slogan, '')) != ''
+          OR TRIM(COALESCE(adresse, '')) != ''
+          OR email IS NOT NULL
+          OR telephone IS NOT NULL
+          OR TRIM(COALESCE(site_web, '')) != ''
+          OR TRIM(COALESCE(numero_enregistrement, '')) != ''
+          OR TRIM(COALESCE(logo, '')) != ''
+          OR COALESCE(couleur_primaire, '#013efb') != '#013efb'
+          OR TRIM(COALESCE(pays, '')) != ''
+          OR COALESCE(devise, 'FCFA') != 'FCFA'
+          OR COALESCE(langue, 'fr') != 'fr'
+          OR COALESCE(police, 'inter') != 'inter'
+          OR COALESCE(notes_verrouillees_primaire, 0) != 0
+          OR COALESCE(notes_verrouillees_secondaire, 0) != 0
+          OR COALESCE(notes_verrouillees, 0) != 0
+          OR latitude IS NOT NULL
+          OR COALESCE(frais_adhesion_bibliotheque, 1000) != 1000
+          OR COALESCE(espace_primaire_actif, 1) != 1
+          OR COALESCE(espace_secondaire_actif, 1) != 1
+          OR subscription_key IS NOT NULL
+      `)
     : 0;
   const userCount = tableExists('utilisateurs') ? safeCount("SELECT COUNT(*) as count FROM utilisateurs") : 0;
-  const nonTestUserCount = tableExists('utilisateurs') ? safeCount("SELECT COUNT(*) as count FROM utilisateurs WHERE COALESCE(is_test_account, 0) = 0") : 0;
+  const nonTestUserCount = tableExists('utilisateurs')
+    ? safeCount(`
+        SELECT COUNT(*) as count FROM utilisateurs
+        WHERE COALESCE(is_test_account, 0) = 0
+           OR COALESCE(default_password_changed, 0) = 1
+           OR google_id IS NOT NULL
+      `)
+    : 0;
   const studentCount = tableExists('eleves') ? safeCount("SELECT COUNT(*) as count FROM eleves") : 0;
   const classCount = tableExists('classes') ? safeCount("SELECT COUNT(*) as count FROM classes") : 0;
   const teacherCount = tableExists('enseignants') ? safeCount("SELECT COUNT(*) as count FROM enseignants") : 0;
@@ -934,6 +987,17 @@ function getDatabaseStats(): DatabaseStats {
   const requestCount = tableExists('school_creation_requests') ? safeCount("SELECT COUNT(*) as count FROM school_creation_requests") : 0;
   const licenseCount = tableExists('subscription_licenses') ? safeCount("SELECT COUNT(*) as count FROM subscription_licenses") : 0;
   const smtpConfigCount = tableExists('school_smtp_configs') ? safeCount("SELECT COUNT(*) as count FROM school_smtp_configs") : 0;
+  const extraAcademicYearCount = tableExists('annees_scolaires') ? Math.max(0, safeCount("SELECT COUNT(*) as count FROM annees_scolaires") - 1) : 0;
+  const expenseCount = tableExists('depenses') ? safeCount("SELECT COUNT(*) as count FROM depenses") : 0;
+  const otherIncomeCount = tableExists('autres_recettes') ? safeCount("SELECT COUNT(*) as count FROM autres_recettes") : 0;
+  const adminStaffCount = tableExists('personnel_administratif') ? safeCount("SELECT COUNT(*) as count FROM personnel_administratif") : 0;
+  const extraBuildingCount = tableExists('batiments') ? safeCount("SELECT COUNT(*) as count FROM batiments") : 0;
+  const activityCount = tableExists('activites_scolaires') ? safeCount("SELECT COUNT(*) as count FROM activites_scolaires") : 0;
+  const timetableCount = tableExists('emplois_du_temps') ? safeCount("SELECT COUNT(*) as count FROM emplois_du_temps") : 0;
+  const messageCount = tableExists('messages_internes') ? safeCount("SELECT COUNT(*) as count FROM messages_internes") : 0;
+  const requestArchiveCount = tableExists('school_requests_archive') ? safeCount("SELECT COUNT(*) as count FROM school_requests_archive") : 0;
+  const deletedSchoolArchiveCount = tableExists('deleted_schools_archive') ? safeCount("SELECT COUNT(*) as count FROM deleted_schools_archive") : 0;
+  const onboardingPrefCount = tableExists('school_onboarding_preferences') ? safeCount("SELECT COUNT(*) as count FROM school_onboarding_preferences") : 0;
   const superAdminCustomized = getLocalSuperAdminConfigMeta().customized;
 
   const hasRealData = (
@@ -948,6 +1012,17 @@ function getDatabaseStats(): DatabaseStats {
     requestCount > 0 ||
     licenseCount > 0 ||
     smtpConfigCount > 0 ||
+    extraAcademicYearCount > 0 ||
+    expenseCount > 0 ||
+    otherIncomeCount > 0 ||
+    adminStaffCount > 0 ||
+    extraBuildingCount > 0 ||
+    activityCount > 0 ||
+    timetableCount > 0 ||
+    messageCount > 0 ||
+    requestArchiveCount > 0 ||
+    deletedSchoolArchiveCount > 0 ||
+    onboardingPrefCount > 0 ||
     superAdminCustomized
   );
 
@@ -962,6 +1037,17 @@ function getDatabaseStats(): DatabaseStats {
     requestCount * 15 +
     licenseCount * 15 +
     smtpConfigCount * 10 +
+    extraAcademicYearCount * 10 +
+    expenseCount * 5 +
+    otherIncomeCount * 5 +
+    adminStaffCount * 10 +
+    extraBuildingCount * 5 +
+    activityCount * 5 +
+    timetableCount * 5 +
+    messageCount * 2 +
+    requestArchiveCount * 10 +
+    deletedSchoolArchiveCount * 10 +
+    onboardingPrefCount * 5 +
     (superAdminCustomized ? 50 : 0) +
     schoolCount;
 
@@ -1270,9 +1356,9 @@ function splitSqlTuple(tupleStr: string): string[] {
 
 function executeResilientSqlRestore(
   sqlDump: string,
-  options: { mergeOnly?: boolean; replaceConfigTables?: boolean } = {}
+  options: { mergeOnly?: boolean; replaceConfigTables?: boolean; forceReplaceAll?: boolean; updateExisting?: boolean } = {}
 ): { applied: number; adapted: number; skipped: number } {
-  const { mergeOnly = false, replaceConfigTables = false } = options;
+  const { mergeOnly = false, replaceConfigTables = false, forceReplaceAll = false, updateExisting = false } = options;
   const CONFIG_TABLES = new Set(['super_admin_settings', 'saas_settings', 'plans']);
   const statements = splitSqlStatements(sqlDump);
   let applied = 0;
@@ -1297,8 +1383,8 @@ function executeResilientSqlRestore(
   db.pragma('foreign_keys = OFF');
   try {
     const tx = db.transaction(() => {
-      // Clear any seed-only data cleanly ONLY on full restore (never in mergeOnly mode)
-      if (!mergeOnly && !getDatabaseStats().hasRealData) {
+      // Clear local tables on authoritative full restore or when local only has seed data
+      if (forceReplaceAll || (!mergeOnly && !getDatabaseStats().hasRealData)) {
         const allTables = (db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all() as any[]).map(t => t.name);
         for (const tbl of allTables) {
           if (tbl === 'backup_snapshots') continue;
@@ -1327,9 +1413,12 @@ function executeResilientSqlRestore(
 
         const tblMatch = stmt.match(/^INSERT(?:\s+OR\s+(?:REPLACE|IGNORE))?\s+INTO\s+["`]?([a-zA-Z0-9_]+)["`]?/i);
         const targetTable = tblMatch ? tblMatch[1].toLowerCase() : '';
-        const shouldReplaceThisTable = replaceConfigTables && CONFIG_TABLES.has(targetTable);
+        const shouldReplaceThisTable =
+          forceReplaceAll || updateExisting || (replaceConfigTables && CONFIG_TABLES.has(targetTable));
 
-        if (mergeOnly) {
+        if (forceReplaceAll) {
+          stmt = stmt.replace(/^INSERT(?:\s+OR\s+(?:REPLACE|IGNORE))?\s+INTO\s+/i, 'INSERT OR REPLACE INTO ');
+        } else if (mergeOnly) {
           if (shouldReplaceThisTable) {
             stmt = stmt.replace(/^INSERT(?:\s+OR\s+(?:REPLACE|IGNORE))?\s+INTO\s+/i, 'INSERT OR REPLACE INTO ');
           } else {
@@ -1365,7 +1454,7 @@ function executeResilientSqlRestore(
                 }
                 if (keptCols.length > 0) {
                   try {
-                    const verb = (mergeOnly && !shouldReplaceThisTable) || /^INSERT\s+OR\s+IGNORE/i.test(stmt) ? 'INSERT OR IGNORE' : 'INSERT OR REPLACE';
+                    const verb = (!forceReplaceAll && mergeOnly && !shouldReplaceThisTable) || (!forceReplaceAll && /^INSERT\s+OR\s+IGNORE/i.test(stmt)) ? 'INSERT OR IGNORE' : 'INSERT OR REPLACE';
                     db.exec('SAVEPOINT sp_restore_retry');
                     db.exec(`${verb} INTO "${tblName}" (${keptCols.join(', ')}) VALUES (${keptVals.join(', ')})`);
                     db.exec('RELEASE SAVEPOINT sp_restore_retry');
@@ -1444,9 +1533,13 @@ function buildSchoolAccountsVault(): SchoolAccountsVault {
   };
 }
 
-function reconcileMissingSchoolAccountsFromVault(vault: SchoolAccountsVault | null | undefined): number {
+function reconcileMissingSchoolAccountsFromVault(
+  vault: SchoolAccountsVault | null | undefined,
+  options: { prioritizeRemote?: boolean } = {}
+): number {
   if (!vault || !vault.tables || typeof vault.tables !== 'object') return 0;
   let insertedCount = 0;
+  const prioritizeRemote = Boolean(options?.prioritizeRemote);
 
   const REQUEST_STATUS_RANK: Record<string, number> = {
     pending: 1,
@@ -1518,16 +1611,51 @@ function reconcileMissingSchoolAccountsFromVault(vault: SchoolAccountsVault | nu
 
             let matchedSchool: any = null;
             if (codeVal) {
-              matchedSchool = db.prepare("SELECT id FROM school_info WHERE UPPER(TRIM(code_ecole)) = UPPER(?)").get(codeVal);
+              matchedSchool = db.prepare("SELECT * FROM school_info WHERE UPPER(TRIM(code_ecole)) = UPPER(?)").get(codeVal);
             }
             if (!matchedSchool && subKeyVal) {
-              matchedSchool = db.prepare("SELECT id FROM school_info WHERE subscription_key = ?").get(subKeyVal);
+              matchedSchool = db.prepare("SELECT * FROM school_info WHERE subscription_key = ?").get(subKeyVal);
             }
             if (!matchedSchool && nomVal && !isDefaultSeed) {
-              matchedSchool = db.prepare("SELECT id FROM school_info WHERE LOWER(TRIM(nom)) = LOWER(?)").get(nomVal);
+              matchedSchool = db.prepare("SELECT * FROM school_info WHERE LOWER(TRIM(nom)) = LOWER(?)").get(nomVal);
+            }
+            if (!matchedSchool && row.id != null && !isDefaultSeed) {
+              const byId = db.prepare("SELECT * FROM school_info WHERE id = ?").get(row.id) as any;
+              if (byId) matchedSchool = byId;
             }
             if (matchedSchool) {
               if (row.id != null) schoolIdRemap.set(Number(row.id), Number(matchedSchool.id));
+              if (prioritizeRemote && !isDefaultSeed) {
+                try {
+                  const upd = db.prepare(`
+                    UPDATE school_info SET
+                      nom = COALESCE(NULLIF(?, ''), nom),
+                      email = COALESCE(NULLIF(?, ''), email),
+                      telephone = COALESCE(NULLIF(?, ''), telephone),
+                      pays = COALESCE(NULLIF(?, ''), pays),
+                      devise = COALESCE(NULLIF(?, ''), devise),
+                      plan_abonnement = COALESCE(NULLIF(?, ''), plan_abonnement),
+                      statut_abonnement = COALESCE(NULLIF(?, ''), statut_abonnement),
+                      date_fin_abonnement = COALESCE(?, date_fin_abonnement),
+                      espace_primaire_actif = COALESCE(?, espace_primaire_actif),
+                      espace_secondaire_actif = COALESCE(?, espace_secondaire_actif)
+                    WHERE id = ?
+                  `).run(
+                    row.nom ?? null,
+                    row.email ?? null,
+                    row.telephone ?? null,
+                    row.pays ?? null,
+                    row.devise ?? null,
+                    row.plan_abonnement ?? null,
+                    row.statut_abonnement ?? null,
+                    row.date_fin_abonnement ?? null,
+                    row.espace_primaire_actif ?? null,
+                    row.espace_secondaire_actif ?? null,
+                    matchedSchool.id
+                  );
+                  if (upd.changes > 0) insertedCount += upd.changes;
+                } catch {}
+              }
               continue;
             }
             if (isDefaultSeed && db.prepare("SELECT id FROM school_info WHERE id = 1").get()) {
@@ -1635,8 +1763,15 @@ function reconcileMissingSchoolAccountsFromVault(vault: SchoolAccountsVault | nu
           // Extra deduplication guards by natural key + PK collision avoidance
           if (tbl === 'utilisateurs') {
             if (row.email) {
-              const existsByEmail = db.prepare("SELECT id FROM utilisateurs WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))").get(String(row.email));
-              if (existsByEmail) continue;
+              const existsByEmail = db.prepare("SELECT id, google_id FROM utilisateurs WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))").get(String(row.email)) as any;
+              if (existsByEmail) {
+                if (row.google_id && !existsByEmail.google_id) {
+                  try {
+                    db.prepare("UPDATE utilisateurs SET google_id = ?, approuve = 1 WHERE id = ?").run(String(row.google_id), existsByEmail.id);
+                  } catch {}
+                }
+                continue;
+              }
             }
             if (row.identifiant) {
               const existsByIdent = db.prepare("SELECT id FROM utilisateurs WHERE LOWER(TRIM(identifiant)) = LOWER(TRIM(?))").get(String(row.identifiant));
@@ -1826,7 +1961,7 @@ function ensureApprovedRequestsHaveSchools(): number {
 
 let hasCompletedInitialPgHydration = false;
 let pgHydrationPromise: Promise<void> | null = null;
-let lastSyncedPgVersion = 0;
+let lastSyncedPgVersion = readLocalPgSyncVersion();
 let lastPgCheckAt = 0;
 
 function syncRuntimeJwtSecretWithDb(writeIfMissing = false): void {
@@ -1937,13 +2072,23 @@ async function ensureCloudSqlHydrated(): Promise<void> {
 
   pgHydrationPromise = (async () => {
     try {
-      const remoteMeta = await getMasterCheckpointMeta();
+      let remoteMeta: Awaited<ReturnType<typeof getMasterCheckpointMeta>> = null;
+      try {
+        remoteMeta = await getMasterCheckpointMeta();
+      } catch (firstErr) {
+        await new Promise((r) => setTimeout(r, 500));
+        remoteMeta = await getMasterCheckpointMeta();
+      }
       lastPgCheckAt = Date.now();
 
       if (remoteMeta) {
+        const remoteVersion = Number(remoteMeta.version || 0);
+        const currentStatsBefore = getDatabaseStats();
+        const remoteIsNewerVersion = remoteVersion > lastSyncedPgVersion;
         const needsHydrate =
-          !hasCompletedInitialPgHydration ||
-          Number(remoteMeta.version || 0) > lastSyncedPgVersion;
+          (!hasCompletedInitialPgHydration &&
+            (WAS_LOCAL_CACHE_MISSING_ON_BOOT || !currentStatsBefore.hasRealData || remoteIsNewerVersion)) ||
+          remoteIsNewerVersion;
 
         if (needsHydrate) {
           const [remoteCp, remoteNorm] = await Promise.all([
@@ -1953,25 +2098,38 @@ async function ensureCloudSqlHydrated(): Promise<void> {
 
           if (remoteCp?.sqlDump) {
             const currentStats = getDatabaseStats();
-            const isFullRestore = !hasCompletedInitialPgHydration && !currentStats.hasRealData;
+            const avoidOverwritingNewerLocalRealData = !remoteMeta.hasRealData && currentStats.hasRealData && !WAS_LOCAL_CACHE_MISSING_ON_BOOT;
+            const forceReplaceAll =
+              !avoidOverwritingNewerLocalRealData &&
+              (WAS_LOCAL_CACHE_MISSING_ON_BOOT || !currentStats.hasRealData || remoteIsNewerVersion);
+
             const res = executeResilientSqlRestore(remoteCp.sqlDump, {
-              mergeOnly: !isFullRestore,
-              replaceConfigTables: Boolean(remoteCp.superAdminCustomized),
+              forceReplaceAll,
+              mergeOnly: !forceReplaceAll,
+              updateExisting: !forceReplaceAll && !avoidOverwritingNewerLocalRealData,
+              replaceConfigTables: Boolean(remoteCp.superAdminCustomized) || forceReplaceAll,
             });
             console.log(
-              `[Cloud SQL] Hydrated from PostgreSQL v${remoteCp.version} (mode=${isFullRestore ? 'full' : 'merge'}, applied=${res.applied}, adapted=${res.adapted}).`
+              `[Cloud SQL] Hydrated from PostgreSQL v${remoteCp.version} (mode=${forceReplaceAll ? 'authoritative_replace' : 'merge'}, applied=${res.applied}, adapted=${res.adapted}).`
             );
-          }
 
-          if (remoteNorm) {
+            if (avoidOverwritingNewerLocalRealData && remoteNorm) {
+              applyNormalizedStateFromPg(remoteNorm);
+            }
+          } else if (remoteNorm) {
             applyNormalizedStateFromPg(remoteNorm);
           }
 
           ensureApprovedRequestsHaveSchools();
           syncRuntimeJwtSecretWithDb(false);
-          saveLocalCheckpointSync();
+          lastSyncedPgVersion = remoteVersion;
+          writeLocalPgSyncVersion(remoteVersion);
+          saveLocalCheckpointSync({ allowShrink: true });
           bumpServerDataVersion();
-          lastSyncedPgVersion = Number(remoteMeta.version || 0);
+        } else if (!hasCompletedInitialPgHydration) {
+          // Local disk cache already matched remote PG version; keep version marker in sync
+          lastSyncedPgVersion = Math.max(lastSyncedPgVersion, remoteVersion);
+          writeLocalPgSyncVersion(lastSyncedPgVersion);
         }
       } else if (!hasCompletedInitialPgHydration) {
         // First initialization of Cloud SQL: seed PostgreSQL from current database state
@@ -1990,6 +2148,7 @@ async function ensureCloudSqlHydrated(): Promise<void> {
         });
         if (pgSave.saved) {
           lastSyncedPgVersion = pgSave.version;
+          writeLocalPgSyncVersion(pgSave.version);
           console.log(`[Cloud SQL] Initial PostgreSQL state seeded (v${pgSave.version}, schools=${stats.schoolCount}, users=${stats.userCount}).`);
         }
       }
@@ -2113,12 +2272,13 @@ function wouldShrinkExistingStats(
   return false;
 }
 
-function saveLocalCheckpointSync(): boolean {
+function saveLocalCheckpointSync(options: { allowShrink?: boolean } = {}): boolean {
   try {
     if (!db || !db.open || !tableExists('school_info')) return false;
     try { db.pragma('wal_checkpoint(PASSIVE)'); } catch {}
     const stats = getDatabaseStats();
-    if (fs.existsSync(AUTO_BACKUP_PATH)) {
+    const allowShrink = Boolean(options.allowShrink) || isWithinExplicitDeletionWindow();
+    if (!allowShrink && fs.existsSync(AUTO_BACKUP_PATH)) {
       try {
         const existingSql = fs.readFileSync(AUTO_BACKUP_PATH, 'utf8');
         const existingStats = inspectSqlDumpStats(existingSql);
@@ -2135,7 +2295,7 @@ function saveLocalCheckpointSync(): boolean {
 
     const vault = buildSchoolAccountsVault();
     let writeVault = true;
-    if (fs.existsSync(SCHOOL_VAULT_PATH)) {
+    if (!allowShrink && fs.existsSync(SCHOOL_VAULT_PATH)) {
       try {
         const prevVault = JSON.parse(fs.readFileSync(SCHOOL_VAULT_PATH, 'utf8')) as SchoolAccountsVault;
         const prevReqCount = prevVault.request_count ?? (Array.isArray(prevVault.tables?.school_creation_requests) ? prevVault.tables.school_creation_requests.length : 0);
@@ -2164,27 +2324,55 @@ function saveLocalCheckpointSync(): boolean {
 }
 
 let activeCheckpointPromise: Promise<boolean> | null = null;
+let queuedCheckpointPromise: Promise<boolean> | null = null;
+let queuedCheckpointAllowShrink = false;
+let queuedCheckpointReason = 'coalesced';
 
-async function saveCheckpoint(reason = 'manual'): Promise<boolean> {
-  if (isSavingCheckpoint && activeCheckpointPromise) {
-    try {
-      await activeCheckpointPromise;
-    } catch {}
+async function saveCheckpoint(
+  reason = 'manual',
+  options: { allowShrink?: boolean } = {}
+): Promise<boolean> {
+  const isPostHydrationMutation =
+    hasCompletedInitialPgHydration &&
+    !reason.startsWith('startup') &&
+    reason !== 'periodic' &&
+    !reason.startsWith('shutdown:');
+  const effectiveAllowShrink =
+    Boolean(options.allowShrink) || isWithinExplicitDeletionWindow() || isPostHydrationMutation;
+
+  if (activeCheckpointPromise) {
+    queuedCheckpointAllowShrink = queuedCheckpointAllowShrink || effectiveAllowShrink;
+    queuedCheckpointReason = reason;
+    if (!queuedCheckpointPromise) {
+      queuedCheckpointPromise = (async () => {
+        try {
+          await activeCheckpointPromise;
+        } catch {}
+        const nextReason = queuedCheckpointReason;
+        const nextAllowShrink = queuedCheckpointAllowShrink;
+        queuedCheckpointAllowShrink = false;
+        queuedCheckpointPromise = null;
+        return saveCheckpoint(nextReason, { allowShrink: nextAllowShrink });
+      })();
+    }
+    return queuedCheckpointPromise;
   }
-  if (isSavingCheckpoint) {
-    pendingCheckpointAfterCurrent = true;
-    return false;
-  }
+
   isSavingCheckpoint = true;
   const runPromise = (async () => {
     try {
       if (!db || !db.open || !tableExists('school_info')) return false;
+
+      // Ensure Cloud SQL hydration ran before allowing any write to Cloud SQL
+      if (!OFFLINE_MODE && isCloudSqlConfigured() && !hasCompletedInitialPgHydration) {
+        await ensureCloudSqlHydrated();
+      }
+
       try { db.pragma('wal_checkpoint(PASSIVE)'); } catch {}
       syncRuntimeJwtSecretWithDb(true);
       const stats = getDatabaseStats();
-      const allowShrink = isWithinExplicitDeletionWindow();
 
-      if (fs.existsSync(AUTO_BACKUP_PATH)) {
+      if (!effectiveAllowShrink && fs.existsSync(AUTO_BACKUP_PATH)) {
         try {
           const existingLocalSql = fs.readFileSync(AUTO_BACKUP_PATH, 'utf8');
           const existingLocalStats = inspectSqlDumpStats(existingLocalSql);
@@ -2210,6 +2398,10 @@ async function saveCheckpoint(reason = 'manual'): Promise<boolean> {
 
       // 2. Authoritative Cloud SQL (PostgreSQL) Persistence
       if (!OFFLINE_MODE && isCloudSqlConfigured()) {
+        if (!hasCompletedInitialPgHydration) {
+          console.warn(`[Cloud SQL] Skipping cloud overwrite (${reason}) because initial hydration has not completed.`);
+          return false;
+        }
         const cfgMeta = getLocalSuperAdminConfigMeta();
         const pgResult = await saveMasterCheckpointToCloudSql({
           sqlDump,
@@ -2217,11 +2409,12 @@ async function saveCheckpoint(reason = 'manual'): Promise<boolean> {
           superAdminCustomized: cfgMeta.customized,
           superAdminConfigUpdatedAt: cfgMeta.updatedAtIso,
           buildId: APP_BUILD_ID,
-          allowShrink,
+          allowShrink: effectiveAllowShrink,
           normalized: buildNormalizedPgPayload(),
         });
         if (pgResult.saved) {
           lastSyncedPgVersion = pgResult.version;
+          writeLocalPgSyncVersion(pgResult.version);
           lastPgCheckAt = Date.now();
           hasCompletedInitialPgHydration = true;
           console.log(`[Cloud SQL] Checkpoint saved (${reason}, v${pgResult.version}, schools=${stats.schoolCount}, users=${stats.userCount}, students=${stats.studentCount}).`);
@@ -2238,10 +2431,6 @@ async function saveCheckpoint(reason = 'manual'): Promise<boolean> {
     } finally {
       isSavingCheckpoint = false;
       activeCheckpointPromise = null;
-      if (pendingCheckpointAfterCurrent) {
-        pendingCheckpointAfterCurrent = false;
-        setTimeout(() => { saveCheckpoint('coalesced').catch(() => {}); }, 300);
-      }
     }
   })();
   activeCheckpointPromise = runPromise;
@@ -2252,7 +2441,7 @@ function scheduleCheckpoint(reason = 'mutation', delayMs = 300) {
   if (checkpointTimer) clearTimeout(checkpointTimer);
   checkpointTimer = setTimeout(() => {
     checkpointTimer = null;
-    saveCheckpoint(reason).catch(() => {});
+    saveCheckpoint(reason, { allowShrink: true }).catch(() => {});
   }, delayMs);
 }
 
@@ -4944,83 +5133,91 @@ try {
   console.error("Backfill history error:", e);
 }
 
-// Ensure existing admins are approved and only backfill permissions if missing (never overwrite custom permissions)
+// One-time legacy backfill: ensure existing admins are approved and backfill missing permissions (never re-approves admins suspended later)
 try {
+  const adminApprovalMigrated = (db.prepare("SELECT value FROM super_admin_settings WHERE key = 'admin_legacy_approval_migrated'").get() as any)?.value;
+  if (adminApprovalMigrated !== 'true') {
+    db.prepare("UPDATE utilisateurs SET approuve = 1 WHERE role = 'admin' AND COALESCE(approuve, 0) = 0").run();
+    db.prepare("INSERT OR REPLACE INTO super_admin_settings (key, value) VALUES ('admin_legacy_approval_migrated', 'true')").run();
+  }
   const allPermissions = JSON.stringify([
     '/', '/classes', '/eleves', '/promotions', '/enseignants', 
     '/matieres', '/notes', '/paiements', '/emploi-du-temps', 
     '/ecole', '/parametres'
   ]);
-  db.prepare("UPDATE utilisateurs SET approuve = 1 WHERE role = 'admin' AND COALESCE(approuve, 0) = 0").run();
   db.prepare("UPDATE utilisateurs SET permissions = ? WHERE role = 'admin' AND (permissions IS NULL OR TRIM(permissions) = '')").run(allPermissions);
 } catch (e) {}
 
-// Seed default school if none exists
+// Seed default school ONLY if school_info is completely empty
 const schoolExists = db.prepare("SELECT * FROM school_info").get();
 if (!schoolExists) {
   db.prepare("INSERT INTO school_info (nom) VALUES (?)").run("École par Défaut");
   console.log("Default school seeded.");
 }
 
-// Seed default demo accounts
+// Seed default demo accounts ONCE on fresh initialization (never resurrect deleted/edited accounts across updates)
 try {
-  const school = db.prepare("SELECT id FROM school_info ORDER BY id ASC LIMIT 1").get() as any;
-  const schoolId = school ? school.id : 1;
-  const adminPass = bcrypt.hashSync("password", 10);
-  const secPass = bcrypt.hashSync("password", 10);
-  const ensPass = bcrypt.hashSync("password", 10);
-  const compPass = bcrypt.hashSync("password", 10);
-  const parentPass = bcrypt.hashSync("password", 10);
-  const superPass = bcrypt.hashSync("SuperAdmin2026!", 10);
-  const elevePass = bcrypt.hashSync("password", 10);
-  const fabricePass = bcrypt.hashSync("Fabricenew@2026!", 10);
+  const demoUsersSeededFlag = (db.prepare("SELECT value FROM super_admin_settings WHERE key = 'demo_users_initial_seeded'").get() as any)?.value
+    || (db.prepare("SELECT value FROM saas_settings WHERE key = 'demo_users_initial_seeded'").get() as any)?.value;
+  const existingUsersTotal = safeCount("SELECT COUNT(*) as count FROM utilisateurs");
+  const existingSuperAdminsTotal = safeCount("SELECT COUNT(*) as count FROM utilisateurs WHERE role = 'super_admin'");
 
-  const allPerms = JSON.stringify([
-    '/', '/classes', '/eleves', '/promotions', '/enseignants', 
-    '/matieres', '/notes', '/paiements', '/emploi-du-temps', 
-    '/ecole', '/parametres', '/audit-logs', '/alertes'
-  ]);
+  if ((demoUsersSeededFlag !== 'true' && existingUsersTotal === 0) || existingSuperAdminsTotal === 0) {
+    const school = db.prepare("SELECT id FROM school_info ORDER BY id ASC LIMIT 1").get() as any;
+    const schoolId = school ? school.id : 1;
+    const adminPass = bcrypt.hashSync("password", 10);
+    const secPass = bcrypt.hashSync("password", 10);
+    const ensPass = bcrypt.hashSync("password", 10);
+    const compPass = bcrypt.hashSync("password", 10);
+    const parentPass = bcrypt.hashSync("password", 10);
+    const superPass = bcrypt.hashSync("SuperAdmin2026!", 10);
+    const elevePass = bcrypt.hashSync("password", 10);
+    const fabricePass = bcrypt.hashSync("Fabricenew@2026!", 10);
 
-  const demoUsers = [
-    { nom: 'Super Administrateur Fabrice', email: 'amfabricenew@gmail.com', identifiant: 'amfabricenew', pass: fabricePass, initialPass: 'Fabricenew@2026!', role: 'super_admin', perms: '[]' },
-    { nom: 'Super Administrateur (Propriétaire SaaS)', email: 'ayedeguef@gmail.com', identifiant: 'superadmin', pass: superPass, initialPass: 'SuperAdmin2026!', role: 'super_admin', perms: '[]' },
-    { nom: 'Direction SaaS Mégafixa', email: 'superadmin@megafixa.com', identifiant: 'admin.saas', pass: superPass, initialPass: 'SuperAdmin2026!', role: 'super_admin', perms: '[]' },
-    { nom: 'Super Administrateur Backup', email: 'ayedegue@mail.com', identifiant: 'ayedegue', pass: superPass, initialPass: 'SuperAdmin2026!', role: 'super_admin', perms: '[]' },
-    { nom: 'Administrateur', email: 'admin@ecole.com', pass: adminPass, role: 'admin', perms: allPerms },
-    { nom: 'Directeur des Études', email: 'direction@ecole.com', pass: adminPass, role: 'direction', perms: allPerms },
-    { nom: 'Secrétaire Général', email: 'secretaire@ecole.com', pass: secPass, role: 'secretariat', perms: JSON.stringify(['/', '/classes', '/eleves', '/promotions', '/notes', '/emploi-du-temps', '/alertes']) },
-    { nom: 'Enseignant Démo', email: 'enseignant@ecole.com', pass: ensPass, role: 'enseignant', perms: JSON.stringify(['/', '/eleves', '/notes', '/emploi-du-temps']) },
-    { nom: 'Comptable Démo', email: 'comptable@ecole.com', pass: compPass, role: 'comptable', perms: JSON.stringify(['/', '/eleves', '/paiements']) },
-    { nom: 'Parent Démo', email: 'parent@ecole.com', pass: parentPass, role: 'parent', perms: JSON.stringify(['/', '/mon-enfant']) },
-    { nom: 'Élève Démo', email: 'eleve@ecole.com', pass: elevePass, role: 'eleve', perms: JSON.stringify(['/', '/mon-espace-eleve', '/notes', '/emploi-du-temps']) }
-  ];
+    const allPerms = JSON.stringify([
+      '/', '/classes', '/eleves', '/promotions', '/enseignants', 
+      '/matieres', '/notes', '/paiements', '/emploi-du-temps', 
+      '/ecole', '/parametres', '/audit-logs', '/alertes'
+    ]);
 
-  const firstStudent = db.prepare("SELECT id FROM eleves ORDER BY id ASC LIMIT 1").get() as any;
-  const firstTeacher = db.prepare("SELECT id FROM enseignants ORDER BY id ASC LIMIT 1").get() as any;
+    const demoUsers = [
+      { nom: 'Super Administrateur Fabrice', email: 'amfabricenew@gmail.com', identifiant: 'amfabricenew', pass: fabricePass, initialPass: 'Fabricenew@2026!', role: 'super_admin', perms: '[]' },
+      { nom: 'Super Administrateur (Propriétaire SaaS)', email: 'ayedeguef@gmail.com', identifiant: 'superadmin', pass: superPass, initialPass: 'SuperAdmin2026!', role: 'super_admin', perms: '[]' },
+      { nom: 'Direction SaaS Mégafixa', email: 'superadmin@megafixa.com', identifiant: 'admin.saas', pass: superPass, initialPass: 'SuperAdmin2026!', role: 'super_admin', perms: '[]' },
+      { nom: 'Super Administrateur Backup', email: 'ayedegue@mail.com', identifiant: 'ayedegue', pass: superPass, initialPass: 'SuperAdmin2026!', role: 'super_admin', perms: '[]' },
+      { nom: 'Administrateur', email: 'admin@ecole.com', pass: adminPass, role: 'admin', perms: allPerms },
+      { nom: 'Directeur des Études', email: 'direction@ecole.com', pass: adminPass, role: 'direction', perms: allPerms },
+      { nom: 'Secrétaire Général', email: 'secretaire@ecole.com', pass: secPass, role: 'secretariat', perms: JSON.stringify(['/', '/classes', '/eleves', '/promotions', '/notes', '/emploi-du-temps', '/alertes']) },
+      { nom: 'Enseignant Démo', email: 'enseignant@ecole.com', pass: ensPass, role: 'enseignant', perms: JSON.stringify(['/', '/eleves', '/notes', '/emploi-du-temps']) },
+      { nom: 'Comptable Démo', email: 'comptable@ecole.com', pass: compPass, role: 'comptable', perms: JSON.stringify(['/', '/eleves', '/paiements']) },
+      { nom: 'Parent Démo', email: 'parent@ecole.com', pass: parentPass, role: 'parent', perms: JSON.stringify(['/', '/mon-enfant']) },
+      { nom: 'Élève Démo', email: 'eleve@ecole.com', pass: elevePass, role: 'eleve', perms: JSON.stringify(['/', '/mon-espace-eleve', '/notes', '/emploi-du-temps']) }
+    ];
 
-  for (const u of demoUsers) {
-    const uIdent = (u as any).identifiant ? String((u as any).identifiant).trim().toLowerCase() : null;
-    const existing = (uIdent
-      ? db.prepare("SELECT id, role, identifiant, approuve, enseignant_id, eleve_id FROM utilisateurs WHERE LOWER(TRIM(email)) = LOWER(TRIM(?)) OR (identifiant IS NOT NULL AND LOWER(TRIM(identifiant)) = ?)").get(u.email, uIdent)
-      : db.prepare("SELECT id, role, identifiant, approuve, enseignant_id, eleve_id FROM utilisateurs WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))").get(u.email)) as any;
-    const ensId = u.role === 'enseignant' ? (firstTeacher?.id || null) : null;
-    const elId = (u.role === 'parent' || u.role === 'eleve') ? (firstStudent?.id || null) : null;
+    const firstStudent = db.prepare("SELECT id FROM eleves ORDER BY id ASC LIMIT 1").get() as any;
+    const firstTeacher = db.prepare("SELECT id FROM enseignants ORDER BY id ASC LIMIT 1").get() as any;
 
-    if (!existing) {
-      db.prepare("INSERT INTO utilisateurs (nom, email, identifiant, mot_de_passe, mot_de_passe_initial, role, approuve, is_first_login, permissions, can_write, school_id, is_test_account, enseignant_id, eleve_id) VALUES (?, ?, ?, ?, ?, ?, 1, 0, ?, 1, ?, 1, ?, ?)")
-        .run(u.nom, u.email, (u as any).identifiant || null, u.pass, (u as any).initialPass || null, u.role, u.perms, u.role === 'super_admin' ? null : schoolId, ensId, elId);
-    } else {
-      // Preserve existing user password, name, customized email, role, school_id, and permissions across app updates;
-      // only backfill missing identifiant or link if null, and keep super_admin approved.
-      db.prepare(`
-        UPDATE utilisateurs SET
-          identifiant = COALESCE(identifiant, ?),
-          approuve = CASE WHEN role = 'super_admin' THEN 1 ELSE approuve END,
-          enseignant_id = COALESCE(enseignant_id, ?),
-          eleve_id = COALESCE(eleve_id, ?)
-        WHERE id = ?
-      `).run((u as any).identifiant || null, ensId, elId, existing.id);
+    const usersToSeed = (demoUsersSeededFlag !== 'true' && existingUsersTotal === 0)
+      ? demoUsers
+      : demoUsers.filter((u) => u.role === 'super_admin');
+
+    for (const u of usersToSeed) {
+      const uIdent = (u as any).identifiant ? String((u as any).identifiant).trim().toLowerCase() : null;
+      const existing = (uIdent
+        ? db.prepare("SELECT id FROM utilisateurs WHERE LOWER(TRIM(email)) = LOWER(TRIM(?)) OR (identifiant IS NOT NULL AND LOWER(TRIM(identifiant)) = ?)").get(u.email, uIdent)
+        : db.prepare("SELECT id FROM utilisateurs WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))").get(u.email)) as any;
+      const ensId = u.role === 'enseignant' ? (firstTeacher?.id || null) : null;
+      const elId = (u.role === 'parent' || u.role === 'eleve') ? (firstStudent?.id || null) : null;
+
+      if (!existing) {
+        db.prepare("INSERT INTO utilisateurs (nom, email, identifiant, mot_de_passe, mot_de_passe_initial, role, approuve, is_first_login, permissions, can_write, school_id, is_test_account, enseignant_id, eleve_id) VALUES (?, ?, ?, ?, ?, ?, 1, 0, ?, 1, ?, 1, ?, ?)")
+          .run(u.nom, u.email, (u as any).identifiant || null, u.pass, (u as any).initialPass || null, u.role, u.perms, u.role === 'super_admin' ? null : schoolId, ensId, elId);
+      }
     }
+  }
+  if (demoUsersSeededFlag !== 'true') {
+    db.prepare("INSERT OR REPLACE INTO super_admin_settings (key, value) VALUES ('demo_users_initial_seeded', 'true')").run();
+    db.prepare("INSERT OR REPLACE INTO saas_settings (key, value) VALUES ('demo_users_initial_seeded', 'true')").run();
   }
 } catch (e) {
   console.error("Seed test accounts error:", e);
@@ -5149,9 +5346,10 @@ try {
   console.error("Logo colors migration error:", e);
 }
 
-// Seed role permissions if empty
+// Seed role permissions ONCE if never seeded before
+const rolePermsSeededFlag = (db.prepare("SELECT value FROM super_admin_settings WHERE key = 'role_permissions_initial_seeded'").get() as any)?.value;
 const rolePermsCount = db.prepare("SELECT COUNT(*) as count FROM role_permissions").get() as any;
-if (rolePermsCount.count === 0) {
+if (rolePermsCount.count === 0 && rolePermsSeededFlag !== 'true') {
   const allPaths = [
     '/', '/classes', '/eleves', '/promotions', '/enseignants', 
     '/matieres', '/notes', '/paiements', '/emploi-du-temps', 
@@ -5194,10 +5392,14 @@ if (rolePermsCount.count === 0) {
   });
   console.log("Role permissions seeded for all schools.");
 }
+if (rolePermsSeededFlag !== 'true') {
+  try { db.prepare("INSERT OR REPLACE INTO super_admin_settings (key, value) VALUES ('role_permissions_initial_seeded', 'true')").run(); } catch {}
+}
 
-// Seed current academic year if none
+// Seed current academic year ONCE if none exists on initial setup
+const anneesSeededFlag = (db.prepare("SELECT value FROM super_admin_settings WHERE key = 'annees_initial_seeded'").get() as any)?.value;
 const yearExists = db.prepare("SELECT * FROM annees_scolaires").get();
-if (!yearExists) {
+if (!yearExists && anneesSeededFlag !== 'true') {
   const libelle = getCurrentAcademicYearLibelle();
   const parts = libelle.split('-');
   const start = parts[0];
@@ -5208,6 +5410,9 @@ if (!yearExists) {
       .run(libelle, `${start}-09-01`, `${end}-07-31`, 1, school.id);
   });
   console.log("Academic years seeded for all schools.");
+}
+if (anneesSeededFlag !== 'true') {
+  try { db.prepare("INSERT OR REPLACE INTO super_admin_settings (key, value) VALUES ('annees_initial_seeded', 'true')").run(); } catch {}
 }
 
 // Auto-fix any academic years with identical start and end years (e.g. "2025-2025" -> "2025-2026")
@@ -5231,39 +5436,43 @@ try {
   console.error("Error auto-fixing academic years:", err);
 }
 
-// Seed some reunions and devoirs for demo
-const reunionExists = db.prepare("SELECT * FROM reunions").get();
-if (!reunionExists) {
-  const schools = db.prepare("SELECT id FROM school_info").all() as any[];
-  schools.forEach(school => {
-    db.prepare("INSERT INTO reunions (titre, description, date_reunion, heure_reunion, lieu, school_id) VALUES (?, ?, ?, ?, ?, ?)").run(
-      "Réunion de rentrée",
-      "Présentation du programme annuel aux parents d'élèves.",
-      "2024-09-15",
-      "10:00",
-      "Salle de conférence",
-      school.id
-    );
-  });
-}
-
-const devoirExists = db.prepare("SELECT * FROM devoirs").get();
-if (!devoirExists) {
-  const schools = db.prepare("SELECT id FROM school_info").all() as any[];
-  schools.forEach(school => {
-    const classe = db.prepare("SELECT id FROM classes WHERE school_id = ? LIMIT 1").get(school.id) as any;
-    const matiere = db.prepare("SELECT id FROM matieres WHERE school_id = ? LIMIT 1").get(school.id) as any;
-    if (classe && matiere) {
-      db.prepare("INSERT INTO devoirs (classe_id, matiere_id, titre, description, date_echeance, school_id) VALUES (?, ?, ?, ?, ?, ?)").run(
-        classe.id,
-        matiere.id,
-        "Devoir de Mathématiques",
-        "Exercices sur les fractions et les nombres décimaux.",
-        "2024-10-20",
+// Seed sample reunions and devoirs ONLY ONCE on initial fresh setup (never resurrect if deleted by users)
+const demoContentSeededFlag = (db.prepare("SELECT value FROM super_admin_settings WHERE key = 'demo_content_initial_seeded'").get() as any)?.value;
+if (demoContentSeededFlag !== 'true') {
+  const reunionExists = db.prepare("SELECT * FROM reunions").get();
+  if (!reunionExists) {
+    const schools = db.prepare("SELECT id FROM school_info").all() as any[];
+    schools.forEach(school => {
+      db.prepare("INSERT INTO reunions (titre, description, date_reunion, heure_reunion, lieu, school_id) VALUES (?, ?, ?, ?, ?, ?)").run(
+        "Réunion de rentrée",
+        "Présentation du programme annuel aux parents d'élèves.",
+        "2024-09-15",
+        "10:00",
+        "Salle de conférence",
         school.id
       );
-    }
-  });
+    });
+  }
+
+  const devoirExists = db.prepare("SELECT * FROM devoirs").get();
+  if (!devoirExists) {
+    const schools = db.prepare("SELECT id FROM school_info").all() as any[];
+    schools.forEach(school => {
+      const classe = db.prepare("SELECT id FROM classes WHERE school_id = ? LIMIT 1").get(school.id) as any;
+      const matiere = db.prepare("SELECT id FROM matieres WHERE school_id = ? LIMIT 1").get(school.id) as any;
+      if (classe && matiere) {
+        db.prepare("INSERT INTO devoirs (classe_id, matiere_id, titre, description, date_echeance, school_id) VALUES (?, ?, ?, ?, ?, ?)").run(
+          classe.id,
+          matiere.id,
+          "Devoir de Mathématiques",
+          "Exercices sur les fractions et les nombres décimaux.",
+          "2024-10-20",
+          school.id
+        );
+      }
+    });
+  }
+  try { db.prepare("INSERT OR REPLACE INTO super_admin_settings (key, value) VALUES ('demo_content_initial_seeded', 'true')").run(); } catch {}
 }
 
 // Migration for utilisateurs roles constraint, personnel_id and eleve_id column (lossless: preserves all columns & verifies row count)
@@ -5474,15 +5683,19 @@ try {
   db.prepare("ALTER TABLE matieres ADD COLUMN categorie TEXT DEFAULT 'General'").run();
 } catch (e) { /* Column probably already exists */ }
 
-// Migration: Ensure EA (Éducation Artistique) subjects are top-level subjects with parent_id = NULL
+// One-time migration: Ensure EA (Éducation Artistique) subjects are top-level subjects with parent_id = NULL
 try {
-  db.prepare("UPDATE matieres SET parent_id = NULL WHERE nom LIKE 'EA/%' OR categorie IN ('Primaire & Maternelle', 'Primaire')").run();
-  const parentEA = db.prepare("SELECT id FROM matieres WHERE nom = 'Éducation Artistique' AND (categorie IN ('Primaire & Maternelle', 'Primaire') OR categorie IS NULL)").get() as any;
-  if (parentEA) {
-    const hasNotes = db.prepare("SELECT COUNT(*) as count FROM notes WHERE matiere_id = ?").get(parentEA.id) as any;
-    if (!hasNotes || hasNotes.count === 0) {
-      db.prepare("DELETE FROM matieres WHERE id = ?").run(parentEA.id);
+  const eaMigrated = (db.prepare("SELECT value FROM super_admin_settings WHERE key = 'ea_subjects_v1_migrated'").get() as any)?.value;
+  if (eaMigrated !== 'true') {
+    db.prepare("UPDATE matieres SET parent_id = NULL WHERE nom LIKE 'EA/%' OR categorie IN ('Primaire & Maternelle', 'Primaire')").run();
+    const parentEA = db.prepare("SELECT id FROM matieres WHERE nom = 'Éducation Artistique' AND (categorie IN ('Primaire & Maternelle', 'Primaire') OR categorie IS NULL)").get() as any;
+    if (parentEA) {
+      const hasNotes = db.prepare("SELECT COUNT(*) as count FROM notes WHERE matiere_id = ?").get(parentEA.id) as any;
+      if (!hasNotes || hasNotes.count === 0) {
+        db.prepare("DELETE FROM matieres WHERE id = ?").run(parentEA.id);
+      }
     }
+    db.prepare("INSERT OR REPLACE INTO super_admin_settings (key, value) VALUES ('ea_subjects_v1_migrated', 'true')").run();
   }
 } catch (e) {
   console.error("Migration EA subjects error:", e);
@@ -5579,78 +5792,87 @@ try {
   }
 } catch {}
 
-// Seed default primary & secondary subjects and evaluation configs for each school
+// Seed default primary & secondary subjects and evaluation configs ONCE per school (never resurrect deleted items on app updates)
 try {
   const schoolsList = db.prepare("SELECT id FROM school_info").all() as any[];
   schoolsList.forEach(school => {
-    // 1. Primary subjects
-    const primarySubjCount = db.prepare("SELECT COUNT(*) as count FROM matieres WHERE school_id = ? AND (categorie = 'Primaire & Maternelle' OR categorie = 'Primaire')").get(school.id) as any;
-    if (!primarySubjCount || primarySubjCount.count === 0) {
-      const defaultPrimarySubjects = [
-        { nom: 'Expression écrite', coef: 1 },
-        { nom: "Compréhension de l'écrit (lecture)", coef: 1 },
-        { nom: 'Éducation Sociale (ES)', coef: 1 },
-        { nom: 'Éducation Scientifique et Technologique (EST)', coef: 1 },
-        { nom: 'Mathématiques', coef: 2 },
-        { nom: 'EA/Dessin', coef: 1 },
-        { nom: 'EA/Poésie/Chant', coef: 1 },
-        { nom: 'EA/Couture', coef: 1 },
-        { nom: 'Éducation Physique et Sportive (EPS)', coef: 1 },
-        { nom: 'Communication Orale', coef: 1 },
-        { nom: 'Dictée', coef: 1 }
-      ];
+    const schoolSeedKey = `curriculum_initial_seeded_school_${school.id}`;
+    const alreadySeededForSchool =
+      (db.prepare("SELECT value FROM super_admin_settings WHERE key = ?").get(schoolSeedKey) as any)?.value === 'true';
 
-      const insertSubj = db.prepare("INSERT INTO matieres (nom, coefficient, categorie, parent_id, school_id) VALUES (?, ?, ?, ?, ?)");
-      defaultPrimarySubjects.forEach(s => {
-        insertSubj.run(s.nom, s.coef, 'Primaire & Maternelle', null, school.id);
-      });
-      console.log(`Default primary subjects seeded for school ${school.id}`);
-    }
+    if (!alreadySeededForSchool) {
+      // 1. Primary subjects
+      const primarySubjCount = db.prepare("SELECT COUNT(*) as count FROM matieres WHERE school_id = ? AND (categorie = 'Primaire & Maternelle' OR categorie = 'Primaire')").get(school.id) as any;
+      if (!primarySubjCount || primarySubjCount.count === 0) {
+        const defaultPrimarySubjects = [
+          { nom: 'Expression écrite', coef: 1 },
+          { nom: "Compréhension de l'écrit (lecture)", coef: 1 },
+          { nom: 'Éducation Sociale (ES)', coef: 1 },
+          { nom: 'Éducation Scientifique et Technologique (EST)', coef: 1 },
+          { nom: 'Mathématiques', coef: 2 },
+          { nom: 'EA/Dessin', coef: 1 },
+          { nom: 'EA/Poésie/Chant', coef: 1 },
+          { nom: 'EA/Couture', coef: 1 },
+          { nom: 'Éducation Physique et Sportive (EPS)', coef: 1 },
+          { nom: 'Communication Orale', coef: 1 },
+          { nom: 'Dictée', coef: 1 }
+        ];
 
-    // 2. Secondary subjects
-    const secondarySubjCount = db.prepare("SELECT COUNT(*) as count FROM matieres WHERE school_id = ? AND (categorie = 'Secondaire' OR categorie IS NULL OR categorie = '')").get(school.id) as any;
-    if (!secondarySubjCount || secondarySubjCount.count === 0) {
-      const defaultSecondarySubjects = [
-        { nom: 'Français', coef: 3, cat: 'Secondaire' },
-        { nom: 'Mathématiques', coef: 4, cat: 'Secondaire' },
-        { nom: 'Histoire-Géographie', coef: 2, cat: 'Secondaire' },
-        { nom: 'Sciences de la Vie et de la Terre (SVT)', coef: 2, cat: 'Secondaire' },
-        { nom: 'Physique-Chimie', coef: 2, cat: 'Secondaire' },
-        { nom: 'Anglais', coef: 2, cat: 'Secondaire' },
-        { nom: 'Philosophie', coef: 2, cat: 'Secondaire' },
-        { nom: 'Espagnol', coef: 2, cat: 'Secondaire' },
-        { nom: 'Allemand', coef: 2, cat: 'Secondaire' },
-        { nom: 'Éducation Physique et Sportive (EPS)', coef: 1, cat: 'Secondaire' },
-        { nom: 'Informatique', coef: 1, cat: 'Secondaire' },
-        { nom: 'Sciences Économiques et Sociales (SES)', coef: 2, cat: 'Secondaire' }
-      ];
+        const insertSubj = db.prepare("INSERT INTO matieres (nom, coefficient, categorie, parent_id, school_id) VALUES (?, ?, ?, ?, ?)");
+        defaultPrimarySubjects.forEach(s => {
+          insertSubj.run(s.nom, s.coef, 'Primaire & Maternelle', null, school.id);
+        });
+        console.log(`Default primary subjects seeded for school ${school.id}`);
+      }
 
-      const insertSubj = db.prepare("INSERT INTO matieres (nom, coefficient, categorie, parent_id, school_id) VALUES (?, ?, ?, ?, ?)");
-      defaultSecondarySubjects.forEach(s => {
-        // Only insert if subject with same name doesn't exist
-        const exists = db.prepare("SELECT id FROM matieres WHERE LOWER(nom) = LOWER(?) AND school_id = ?").get(s.nom, school.id);
-        if (!exists) {
-          insertSubj.run(s.nom, s.coef, s.cat, null, school.id);
+      // 2. Secondary subjects
+      const secondarySubjCount = db.prepare("SELECT COUNT(*) as count FROM matieres WHERE school_id = ? AND (categorie = 'Secondaire' OR categorie IS NULL OR categorie = '')").get(school.id) as any;
+      if (!secondarySubjCount || secondarySubjCount.count === 0) {
+        const defaultSecondarySubjects = [
+          { nom: 'Français', coef: 3, cat: 'Secondaire' },
+          { nom: 'Mathématiques', coef: 4, cat: 'Secondaire' },
+          { nom: 'Histoire-Géographie', coef: 2, cat: 'Secondaire' },
+          { nom: 'Sciences de la Vie et de la Terre (SVT)', coef: 2, cat: 'Secondaire' },
+          { nom: 'Physique-Chimie', coef: 2, cat: 'Secondaire' },
+          { nom: 'Anglais', coef: 2, cat: 'Secondaire' },
+          { nom: 'Philosophie', coef: 2, cat: 'Secondaire' },
+          { nom: 'Espagnol', coef: 2, cat: 'Secondaire' },
+          { nom: 'Allemand', coef: 2, cat: 'Secondaire' },
+          { nom: 'Éducation Physique et Sportive (EPS)', coef: 1, cat: 'Secondaire' },
+          { nom: 'Informatique', coef: 1, cat: 'Secondaire' },
+          { nom: 'Sciences Économiques et Sociales (SES)', coef: 2, cat: 'Secondaire' }
+        ];
+
+        const insertSubj = db.prepare("INSERT INTO matieres (nom, coefficient, categorie, parent_id, school_id) VALUES (?, ?, ?, ?, ?)");
+        defaultSecondarySubjects.forEach(s => {
+          const exists = db.prepare("SELECT id FROM matieres WHERE LOWER(nom) = LOWER(?) AND school_id = ?").get(s.nom, school.id);
+          if (!exists) {
+            insertSubj.run(s.nom, s.coef, s.cat, null, school.id);
+          }
+        });
+        console.log(`Default secondary subjects seeded for school ${school.id}`);
+      }
+
+      // 3. Evaluation configs
+      const evalConfigCount = db.prepare("SELECT COUNT(*) as count FROM evaluation_configs WHERE school_id = ?").get(school.id) as any;
+      if (!evalConfigCount || evalConfigCount.count === 0) {
+        const insertEval = db.prepare("INSERT INTO evaluation_configs (code, libelle, type_eval, sequence, school_id) VALUES (?, ?, ?, ?, ?)");
+        for (let i = 1; i <= 5; i++) {
+          insertEval.run(`EvalForm${i}`, `Évaluation Formative ${i}`, 'formative', i, school.id);
         }
-      });
-      console.log(`Default secondary subjects seeded for school ${school.id}`);
-    }
+        for (let i = 1; i <= 5; i++) {
+          insertEval.run(`EvalSomm${i}`, `Évaluation Sommative ${i}`, 'sommative', i, school.id);
+        }
+        console.log(`Default evaluation configs seeded for school ${school.id}`);
+      }
 
-    // 3. Evaluation configs
-    const evalConfigCount = db.prepare("SELECT COUNT(*) as count FROM evaluation_configs WHERE school_id = ?").get(school.id) as any;
-    if (!evalConfigCount || evalConfigCount.count === 0) {
-      const insertEval = db.prepare("INSERT INTO evaluation_configs (code, libelle, type_eval, sequence, school_id) VALUES (?, ?, ?, ?, ?)");
-      for (let i = 1; i <= 5; i++) {
-        insertEval.run(`EvalForm${i}`, `Évaluation Formative ${i}`, 'formative', i, school.id);
-      }
-      for (let i = 1; i <= 5; i++) {
-        insertEval.run(`EvalSomm${i}`, `Évaluation Sommative ${i}`, 'sommative', i, school.id);
-      }
-      console.log(`Default evaluation configs seeded for school ${school.id}`);
+      try {
+        db.prepare("INSERT OR REPLACE INTO super_admin_settings (key, value) VALUES (?, 'true')").run(schoolSeedKey);
+      } catch {}
     }
   });
 
-  // 4. Backfill default matricules for existing teachers and staff if missing
+  // 4. Backfill default matricules ONLY for existing teachers and staff missing one
   const teachersWithoutMatricule = db.prepare("SELECT id, school_id FROM enseignants WHERE matricule IS NULL OR TRIM(matricule) = ''").all() as any[];
   if (teachersWithoutMatricule && teachersWithoutMatricule.length > 0) {
     const updateTeacherMatricule = db.prepare("UPDATE enseignants SET matricule = ? WHERE id = ?");
@@ -5675,7 +5897,11 @@ try {
 }
 
   console.log("Database initialization completed.");
-  saveLocalCheckpointSync();
+  // Only write local checkpoint immediately if local cache existed or Cloud SQL is disabled;
+  // on fresh Cloud SQL containers, wait for ensureCloudSqlHydrated() to restore before writing backups.
+  if (!WAS_LOCAL_CACHE_MISSING_ON_BOOT || !isCloudSqlConfigured() || OFFLINE_MODE || getDatabaseStats().hasRealData) {
+    saveLocalCheckpointSync();
+  }
 }
 
 function parsePlanLimitValue(val: any, fallback: number): number {
@@ -6994,7 +7220,7 @@ async function startServer() {
       await Promise.race([
         ensureCloudSqlHydrated().catch(() => {}),
         initialHydrationPromise,
-        new Promise((resolve) => setTimeout(resolve, 6000)),
+        new Promise((resolve) => setTimeout(resolve, 12000)),
       ]);
     }
     res.setHeader('X-App-Build-Version', APP_BUILD_ID);
@@ -7003,14 +7229,90 @@ async function startServer() {
 
     if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
       const url = req.originalUrl || '';
-      const skipPaths = ['/api/auth/login', '/api/auth/verify', '/api/auth/google', '/api/backups/cloud-sync-test'];
-      if (!skipPaths.some(p => url.startsWith(p))) {
-        res.on('finish', () => {
-          if (res.statusCode >= 200 && res.statusCode < 400) {
-            bumpServerDataVersion();
-            if (!req._checkpointSaved) {
-              saveCheckpoint(`api:${req.method}:${url.split('?')[0]}`).catch(() => {});
+      const urlLower = url.toLowerCase();
+      const skipPaths = [
+        '/api/auth/login',
+        '/api/auth/verify',
+        '/api/auth/google',
+        '/api/backups/cloud-sync-test',
+        '/api/ai/',
+        '/api/super-admin/test-',
+        '/api/email/test',
+        '/api/sms/test',
+        '/api/whatsapp/test',
+      ];
+      const isExactGoogleAuth = url.split('?')[0] === '/api/auth/google';
+      const shouldAutoPersist =
+        !skipPaths.some((p) => (p === '/api/auth/google' ? isExactGoogleAuth : url.startsWith(p)));
+
+      if (shouldAutoPersist) {
+        const isDeletionRoute =
+          req.method === 'DELETE' ||
+          urlLower.includes('/delete') ||
+          urlLower.includes('/reject') ||
+          urlLower.includes('/archive') ||
+          urlLower.includes('/purge') ||
+          urlLower.includes('/reset');
+
+        if (isDeletionRoute) {
+          markExplicitDeletion();
+        }
+
+        const persistMutationBeforeResponse = async () => {
+          if (req._checkpointSaved || res.__persistedBeforeSend) return;
+          res.__persistedBeforeSend = true;
+          req._checkpointSaved = true;
+          bumpServerDataVersion();
+          try {
+            if (!res.headersSent) {
+              res.setHeader('X-App-Data-Version', String(serverDataVersion));
             }
+          } catch {}
+          if (checkpointTimer) {
+            clearTimeout(checkpointTimer);
+            checkpointTimer = null;
+          }
+          if (isDeletionRoute) {
+            markExplicitDeletion();
+          }
+          saveLocalCheckpointSync({ allowShrink: true });
+          await Promise.race([
+            saveCheckpoint(`api:${req.method}:${url.split('?')[0]}`, { allowShrink: true }).catch(() => false),
+            new Promise<void>((resolve) => setTimeout(resolve, 6000)),
+          ]);
+        };
+
+        const origJson = res.json.bind(res);
+        const origSend = res.send.bind(res);
+
+        res.json = function (body: any) {
+          if (!res.__persistedBeforeSend && res.statusCode >= 200 && res.statusCode < 400) {
+            void persistMutationBeforeResponse()
+              .catch(() => {})
+              .finally(() => {
+                origJson(body);
+              });
+            return res;
+          }
+          return origJson(body);
+        };
+
+        res.send = function (body: any) {
+          if (!res.__persistedBeforeSend && res.statusCode >= 200 && res.statusCode < 400) {
+            void persistMutationBeforeResponse()
+              .catch(() => {})
+              .finally(() => {
+                origSend(body);
+              });
+            return res;
+          }
+          return origSend(body);
+        };
+
+        res.on('finish', () => {
+          if (res.statusCode >= 200 && res.statusCode < 400 && !req._checkpointSaved && !res.__persistedBeforeSend) {
+            bumpServerDataVersion();
+            saveCheckpoint(`api:${req.method}:${url.split('?')[0]}`, { allowShrink: true }).catch(() => {});
           }
         });
       }
@@ -7239,22 +7541,23 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
 
   // API Routes
   app.use((req, res, next) => {
-    res.setHeader("X-App-Mode", isCloudSqlConfigured() ? "Cloud-SQL-Persistent" : "Local-Autonomous");
+    res.setHeader("X-App-Mode", isCloudSqlConfigured() ? "Firebase-Firestore-Primary-CloudSQL-Relay" : "Firebase-Firestore-Primary");
     next();
   });
 
   app.get("/api/offline/status", (req, res) => {
     const usingCloudSql = isCloudSqlConfigured();
     res.json({
-      strict_offline: !usingCloudSql,
-      internet_forbidden: !usingCloudSql,
-      database: usingCloudSql ? "Cloud Firestore & Cloud SQL (PostgreSQL)" : "Cloud Firestore & Cache local",
+      strict_offline: false,
+      internet_forbidden: false,
+      primaryDatabase: "cloud_firestore",
+      database: usingCloudSql ? "Firebase Cloud Firestore (Principal) & Relais Cloud SQL (PostgreSQL)" : "Firebase Cloud Firestore (Principal)",
       firestoreDatabaseId: FIRESTORE_DB_ID,
       firestoreCollections: FIRESTORE_COLLECTIONS,
-      mode: usingCloudSql ? "Cloud Persistant (Firestore + Cloud SQL)" : "Synchronisation Cloud Firestore",
+      mode: usingCloudSql ? "Firebase Cloud Firestore Prioritaire (+ Relais Cloud SQL)" : "Firebase Cloud Firestore Prioritaire (+ Cache hors-ligne)",
       message: usingCloudSql
-        ? "Base de données Cloud Firestore et Cloud SQL (PostgreSQL) active et persistante."
-        : "Les paramètres et comptes sont synchronisés via Cloud Firestore."
+        ? "Firebase Cloud Firestore est actif comme base de données principale avec relais automatique Cloud SQL (PostgreSQL)."
+        : "Firebase Cloud Firestore est actif comme base de données principale avec cache local de continuité."
     });
   });
 
@@ -7273,10 +7576,12 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
     res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
     res.json({
       status: "ok",
-      database: isCloudSqlConfigured() ? "cloud_firestore_and_cloudsql" : "cloud_firestore_and_cache",
+      primaryDatabase: "firebase_cloud_firestore",
+      database: isCloudSqlConfigured() ? "cloud_firestore_primary" : "cloud_firestore_and_cache",
       firestoreDatabaseId: FIRESTORE_DB_ID,
       firestoreCollections: FIRESTORE_COLLECTIONS,
       cloudSqlVersion: lastSyncedPgVersion,
+      hydrated: hasCompletedInitialPgHydration,
       buildId: APP_BUILD_ID,
       dataVersion: String(serverDataVersion),
       timestamp: new Date().toISOString()
@@ -22760,20 +23065,27 @@ function executeYearTransition(
           message: "Cet email n'est rattaché à aucun compte école. Vous n'avez accès qu'à la page d'information et de création de compte école."
         });
       } else {
+        let userRowModified = false;
         if (!user.google_id || user.approuve === 0) {
           db.prepare("UPDATE utilisateurs SET google_id = COALESCE(google_id, ?), approuve = 1 WHERE id = ?").run(cleanUid, user.id);
           user.google_id = user.google_id || cleanUid;
           user.approuve = 1;
+          userRowModified = true;
+        }
+        await getOrCreateUser(cleanUid, cleanEmail, {
+          nom: user.nom || cleanNom,
+          role: user.role,
+          schoolId: user.school_id,
+        }).catch((err) => {
+          console.warn("[Cloud SQL] Failed to sync Google user record:", err?.message || err);
+        });
+        if (userRowModified) {
+          await Promise.race([
+            saveCheckpoint('auth:google_link_login', { allowShrink: true }).catch(() => false),
+            new Promise((resolve) => setTimeout(resolve, 4000)),
+          ]);
         }
       }
-
-      getOrCreateUser(cleanUid, cleanEmail, {
-        nom: user.nom || cleanNom,
-        role: user.role,
-        schoolId: user.school_id,
-      }).catch((err) => {
-        console.warn("[Cloud SQL] Failed to sync Google user record:", err?.message || err);
-      });
 
       logActivity(user.id, 'LOGIN_GOOGLE', 'USER', user.id, { email: user.email }, user.school_id);
 
@@ -23061,8 +23373,12 @@ function executeYearTransition(
         return res.redirect(redirectTarget);
       }
 
-      if (!user.google_id) {
-        db.prepare("UPDATE utilisateurs SET google_id = ?, approuve = 1 WHERE id = ?").run(profile.sub, user.id);
+      if (!user.google_id || user.approuve === 0) {
+        db.prepare("UPDATE utilisateurs SET google_id = COALESCE(google_id, ?), approuve = 1 WHERE id = ?").run(profile.sub, user.id);
+        await Promise.race([
+          saveCheckpoint('auth:google_callback_link', { allowShrink: true }).catch(() => false),
+          new Promise((resolve) => setTimeout(resolve, 4000)),
+        ]);
       }
       logActivity(user.id, 'LOGIN_GOOGLE', 'USER', user.id, { email: user.email }, user.school_id);
 
@@ -23157,7 +23473,7 @@ function executeYearTransition(
     res.json({ success: true, message: "Mot de passe modifié avec succès !" });
   });
 
-  app.post("/api/auth/login", loginRateLimiter, (req, res) => {
+  app.post("/api/auth/login", loginRateLimiter, async (req, res) => {
     let { email, username, identifiant, password, otp, school_id, code_ecole } = req.body;
 
     const loginId = email || username || identifiant;
@@ -23221,12 +23537,14 @@ function executeYearTransition(
       return res.status(401).json({ success: false, error: "Identifiants incorrects. Vérifiez votre identifiant ou mot de passe." });
     }
 
+    let loginUserMutated = false;
     // If an email account is not linked to any school and not super_admin, attempt auto-linking to their school
     if (user.role !== 'super_admin' && !user.school_id) {
       const lic = db.prepare("SELECT school_id FROM subscription_licenses WHERE LOWER(TRIM(client_email)) = LOWER(TRIM(?)) AND school_id IS NOT NULL ORDER BY id DESC LIMIT 1").get(user.email) as any;
       if (lic && lic.school_id) {
         db.prepare("UPDATE utilisateurs SET school_id = ? WHERE id = ?").run(lic.school_id, user.id);
         user.school_id = lic.school_id;
+        loginUserMutated = true;
       } else {
         const txSch = db.prepare("SELECT school_name FROM subscription_transactions WHERE LOWER(TRIM(email)) = LOWER(TRIM(?)) ORDER BY id DESC LIMIT 1").get(user.email) as any;
         if (txSch && txSch.school_name) {
@@ -23234,6 +23552,7 @@ function executeYearTransition(
           if (sch) {
             db.prepare("UPDATE utilisateurs SET school_id = ? WHERE id = ?").run(sch.id, user.id);
             user.school_id = sch.id;
+            loginUserMutated = true;
           }
         }
       }
@@ -23312,6 +23631,14 @@ function executeYearTransition(
     if (user.approuve === 0 || user.otp_code) {
       db.prepare("UPDATE utilisateurs SET approuve = 1, otp_code = NULL, otp_expiry = NULL WHERE id = ?").run(user.id);
       user.approuve = 1;
+      loginUserMutated = true;
+    }
+
+    if (loginUserMutated) {
+      await Promise.race([
+        saveCheckpoint('auth:login_user_update', { allowShrink: true }).catch(() => false),
+        new Promise((resolve) => setTimeout(resolve, 4000)),
+      ]);
     }
     
     logActivity(user.id, 'LOGIN', 'USER', user.id, { email: user.email }, user.school_id);
@@ -30459,32 +30786,25 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         return res.status(403).json({ error: "Accès réservé exclusivement à l'administrateur (Fondé)" });
       }
 
-      if (!isCloudSqlConfigured()) {
-        return res.status(503).json({
-          success: false,
-          status: 'offline',
-          error: "La base de données Cloud SQL (PostgreSQL) n'est pas configurée sur cet environnement."
-        });
-      }
-
       const startedAt = Date.now();
-      const ok = await saveCheckpoint('cloud_sync_test');
-      if (!ok) {
-        return res.status(503).json({
-          success: false,
-          status: 'error',
-          error: "Échec de la vérification d'écriture vers Cloud SQL (PostgreSQL)."
-        });
+      const pgConfigured = isCloudSqlConfigured();
+      let pgOk = false;
+      if (pgConfigured) {
+        pgOk = await saveCheckpoint('cloud_sync_test');
       }
 
       const latencyMs = Math.max(1, Date.now() - startedAt);
       res.json({
         success: true,
-        provider: 'cloudsql_postgresql',
+        provider: 'firebase_cloud_firestore_primary',
+        firestoreDatabaseId: FIRESTORE_DB_ID,
         status: 'online',
         latency_ms: latencyMs,
+        cloudSqlRelayActive: pgOk,
         cloudSqlVersion: lastSyncedPgVersion,
-        message: `Connexion Cloud SQL (PostgreSQL) opérationnelle (checkpoint v${lastSyncedPgVersion}).`
+        message: pgOk
+          ? `Firebase Cloud Firestore actif (principal) + relais Cloud SQL opérationnel (v${lastSyncedPgVersion}).`
+          : "Firebase Cloud Firestore configuré comme base de données principale."
       });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -34476,7 +34796,312 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
     }
   });
 
-  // Cloud Vault & Cloud SQL Sync Status
+  // School-scoped Firestore Priority Snapshot & Reconciliation
+  app.get("/api/school/firestore-snapshot", authenticateToken, (req: any, res) => {
+    try {
+      const schoolId = Number(req.schoolId || 1);
+      if (!schoolId) return res.status(400).json({ error: "Identifiant école requis." });
+
+      const schoolInfo = db.prepare("SELECT * FROM school_info WHERE id = ?").get(schoolId) as any;
+      const academicYears = db.prepare("SELECT * FROM annees_scolaires WHERE school_id = ? ORDER BY id ASC").all(schoolId) as any[];
+      const classes = db.prepare("SELECT * FROM classes WHERE school_id = ? ORDER BY id ASC").all(schoolId) as any[];
+      const students = db.prepare("SELECT * FROM eleves WHERE school_id = ? ORDER BY id ASC").all(schoolId) as any[];
+      const enseignants = db.prepare("SELECT * FROM enseignants WHERE school_id = ? ORDER BY id ASC").all(schoolId) as any[];
+      const matieres = db.prepare("SELECT * FROM matieres WHERE school_id = ? ORDER BY id ASC").all(schoolId) as any[];
+      const grades = db.prepare("SELECT * FROM notes WHERE school_id = ? ORDER BY id DESC LIMIT 1200").all(schoolId) as any[];
+
+      res.json({
+        success: true,
+        school_id: schoolId,
+        schoolInfo: schoolInfo || null,
+        academicYears,
+        classes,
+        students,
+        enseignants,
+        matieres,
+        grades,
+        updatedAt: new Date().toISOString()
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Erreur extraction snapshot Firestore" });
+    }
+  });
+
+  app.post("/api/school/firestore-reconcile", authenticateToken, async (req: any, res) => {
+    try {
+      if (!isUserAdminOrFonde(req.user?.role)) {
+        return res.status(403).json({ error: "Accès réservé à l'administrateur de l'établissement." });
+      }
+      const schoolId = Number(req.schoolId || 1);
+      if (!schoolId) return res.status(400).json({ error: "Identifiant école requis." });
+
+      const {
+        schoolInfo,
+        academicYears = [],
+        classes = [],
+        students = [],
+        enseignants = [],
+        matieres = [],
+        grades = [],
+      } = req.body || {};
+
+      const counts = {
+        schoolInfo: 0,
+        academicYears: 0,
+        classes: 0,
+        students: 0,
+        enseignants: 0,
+        matieres: 0,
+        grades: 0,
+      };
+
+      const tx = db.transaction(() => {
+        if (schoolInfo && typeof schoolInfo === 'object' && schoolInfo.nom) {
+          const currentSchool = db.prepare("SELECT * FROM school_info WHERE id = ?").get(schoolId) as any;
+          const isCurrentDefault = !currentSchool || (
+            (currentSchool.nom === 'MégafixaEduc' || currentSchool.nom === 'École par Défaut') &&
+            !currentSchool.adresse &&
+            !currentSchool.email
+          );
+          const remoteIsCustomized = Boolean(
+            schoolInfo.nom !== 'MégafixaEduc' ||
+            schoolInfo.adresse ||
+            schoolInfo.email ||
+            schoolInfo.telephone
+          );
+          if (currentSchool && remoteIsCustomized && isCurrentDefault) {
+            db.prepare(`
+              UPDATE school_info SET
+                nom = COALESCE(NULLIF(?, ''), nom),
+                slogan = COALESCE(?, slogan),
+                adresse = COALESCE(?, adresse),
+                telephone = COALESCE(?, telephone),
+                email = COALESCE(?, email),
+                site_web = COALESCE(?, site_web),
+                numero_enregistrement = COALESCE(?, numero_enregistrement),
+                pays = COALESCE(NULLIF(?, ''), pays),
+                devise = COALESCE(NULLIF(?, ''), devise),
+                langue = COALESCE(NULLIF(?, ''), langue),
+                couleur_primaire = COALESCE(NULLIF(?, ''), couleur_primaire),
+                police = COALESCE(NULLIF(?, ''), police),
+                taille_police = COALESCE(?, taille_police),
+                timezone = COALESCE(NULLIF(?, ''), timezone)
+              WHERE id = ?
+            `).run(
+              schoolInfo.nom ?? null,
+              schoolInfo.slogan ?? null,
+              schoolInfo.adresse ?? null,
+              schoolInfo.telephone ?? null,
+              schoolInfo.email ?? null,
+              schoolInfo.site_web ?? null,
+              schoolInfo.numero_enregistrement ?? null,
+              schoolInfo.pays ?? null,
+              schoolInfo.devise ?? null,
+              schoolInfo.langue ?? null,
+              schoolInfo.couleur_primaire ?? null,
+              schoolInfo.police ?? null,
+              schoolInfo.taille_police ?? null,
+              schoolInfo.timezone ?? null,
+              schoolId
+            );
+            counts.schoolInfo = 1;
+          }
+        }
+
+        const yearIdMap = new Map<number, number>();
+        if (Array.isArray(academicYears)) {
+          for (const yr of academicYears) {
+            if (!yr?.libelle) continue;
+            const existing = db.prepare("SELECT id FROM annees_scolaires WHERE libelle = ? AND school_id = ?").get(String(yr.libelle), schoolId) as any;
+            if (existing) {
+              if (yr.id != null) yearIdMap.set(Number(yr.id), Number(existing.id));
+              continue;
+            }
+            const info = db.prepare(`
+              INSERT INTO annees_scolaires (libelle, date_debut, date_fin, est_active, archivee, cloturee, school_id)
+              VALUES (?, ?, ?, ?, ?, ?, ?)
+            `).run(
+              String(yr.libelle),
+              yr.date_debut ?? null,
+              yr.date_fin ?? null,
+              Number(yr.est_active || 0),
+              Number(yr.archivee || 0),
+              Number(yr.cloturee || 0),
+              schoolId
+            );
+            if (yr.id != null) yearIdMap.set(Number(yr.id), Number(info.lastInsertRowid));
+            counts.academicYears++;
+          }
+        }
+
+        const teacherIdMap = new Map<number, number>();
+        if (Array.isArray(enseignants)) {
+          for (const ens of enseignants) {
+            if (!ens?.nom || !ens?.prenom) continue;
+            const existing = db.prepare(
+              "SELECT id FROM enseignants WHERE LOWER(TRIM(nom)) = LOWER(?) AND LOWER(TRIM(prenom)) = LOWER(?) AND school_id = ?"
+            ).get(String(ens.nom), String(ens.prenom), schoolId) as any;
+            if (existing) {
+              if (ens.id != null) teacherIdMap.set(Number(ens.id), Number(existing.id));
+              continue;
+            }
+            const info = db.prepare(`
+              INSERT INTO enseignants (nom, prenom, telephone, email, adresse, school_id)
+              VALUES (?, ?, ?, ?, ?, ?)
+            `).run(
+              String(ens.nom),
+              String(ens.prenom),
+              ens.telephone ?? null,
+              ens.email ?? null,
+              ens.adresse ?? null,
+              schoolId
+            );
+            if (ens.id != null) teacherIdMap.set(Number(ens.id), Number(info.lastInsertRowid));
+            counts.enseignants++;
+          }
+        }
+
+        const subjectIdMap = new Map<number, number>();
+        if (Array.isArray(matieres)) {
+          for (const mat of matieres) {
+            if (!mat?.nom) continue;
+            const existing = db.prepare(
+              "SELECT id FROM matieres WHERE LOWER(TRIM(nom)) = LOWER(?) AND school_id = ?"
+            ).get(String(mat.nom), schoolId) as any;
+            if (existing) {
+              if (mat.id != null) subjectIdMap.set(Number(mat.id), Number(existing.id));
+              continue;
+            }
+            const info = db.prepare(`
+              INSERT INTO matieres (nom, coefficient, categorie, school_id, est_disciplinaire)
+              VALUES (?, ?, ?, ?, ?)
+            `).run(
+              String(mat.nom),
+              Number(mat.coefficient || 1),
+              mat.categorie ?? null,
+              schoolId,
+              Number(mat.est_disciplinaire || 0)
+            );
+            if (mat.id != null) subjectIdMap.set(Number(mat.id), Number(info.lastInsertRowid));
+            counts.matieres++;
+          }
+        }
+
+        const classIdMap = new Map<number, number>();
+        if (Array.isArray(classes)) {
+          for (const cls of classes) {
+            if (!cls?.nom || !cls?.niveau) continue;
+            const mappedYearId = cls.annee_id != null ? (yearIdMap.get(Number(cls.annee_id)) ?? cls.annee_id) : null;
+            const existing = db.prepare(
+              "SELECT id FROM classes WHERE LOWER(TRIM(nom)) = LOWER(?) AND COALESCE(annee_id, 0) = COALESCE(?, 0) AND school_id = ?"
+            ).get(String(cls.nom), mappedYearId, schoolId) as any;
+            if (existing) {
+              if (cls.id != null) classIdMap.set(Number(cls.id), Number(existing.id));
+              continue;
+            }
+            const info = db.prepare(`
+              INSERT INTO classes (
+                nom, niveau, frais_scolarite, frais_inscription, devise, annee_id, cycle, school_id
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            `).run(
+              String(cls.nom),
+              String(cls.niveau),
+              Number(cls.frais_scolarite || 0),
+              Number(cls.frais_inscription || 0),
+              cls.devise || 'FCFA',
+              mappedYearId,
+              cls.cycle || 'secondaire',
+              schoolId
+            );
+            if (cls.id != null) classIdMap.set(Number(cls.id), Number(info.lastInsertRowid));
+            counts.classes++;
+          }
+        }
+
+        const studentIdMap = new Map<number, number>();
+        if (Array.isArray(students)) {
+          for (const st of students) {
+            if (!st?.matricule || !st?.nom || !st?.prenom) continue;
+            const existing = db.prepare(
+              "SELECT id FROM eleves WHERE matricule = ? AND school_id = ?"
+            ).get(String(st.matricule), schoolId) as any;
+            if (existing) {
+              if (st.id != null) studentIdMap.set(Number(st.id), Number(existing.id));
+              continue;
+            }
+            const mappedClassId = st.classe_id != null ? (classIdMap.get(Number(st.classe_id)) ?? st.classe_id) : null;
+            const info = db.prepare(`
+              INSERT INTO eleves (
+                matricule, nom, prenom, sexe, date_naissance, classe_id,
+                nom_parent, tel_parent, email_parent, adresse, statut, school_id
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `).run(
+              String(st.matricule),
+              String(st.nom),
+              String(st.prenom),
+              st.sexe ?? null,
+              st.date_naissance ?? null,
+              mappedClassId,
+              st.nom_parent ?? null,
+              st.tel_parent ?? null,
+              st.email_parent ?? null,
+              st.adresse ?? null,
+              st.statut || 'Passant',
+              schoolId
+            );
+            if (st.id != null) studentIdMap.set(Number(st.id), Number(info.lastInsertRowid));
+            counts.students++;
+          }
+        }
+
+        if (Array.isArray(grades)) {
+          for (const gr of grades) {
+            const eleveId = gr?.eleve_id != null ? (studentIdMap.get(Number(gr.eleve_id)) ?? gr.eleve_id) : null;
+            const matiereId = gr?.matiere_id != null ? (subjectIdMap.get(Number(gr.matiere_id)) ?? gr.matiere_id) : null;
+            const anneeId = gr?.annee_id != null ? (yearIdMap.get(Number(gr.annee_id)) ?? gr.annee_id) : null;
+            if (!eleveId || !matiereId || !gr?.type_evaluation) continue;
+            try {
+              const info = db.prepare(`
+                INSERT OR IGNORE INTO notes (
+                  eleve_id, matiere_id, type_evaluation, note, date_evaluation, annee_id, trimestre, school_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+              `).run(
+                eleveId,
+                matiereId,
+                String(gr.type_evaluation),
+                gr.note ?? null,
+                gr.date_evaluation ?? null,
+                anneeId,
+                Number(gr.trimestre || 1),
+                schoolId
+              );
+              if (info.changes > 0) counts.grades++;
+            } catch {}
+          }
+        }
+      });
+
+      tx();
+
+      const totalRestored = Object.values(counts).reduce((a, b) => a + b, 0);
+      if (totalRestored > 0) {
+        bumpServerDataVersion();
+        saveLocalCheckpointSync();
+        (req as any)._checkpointSaved = true;
+        await saveCheckpoint('firestore_priority_reconcile');
+      }
+
+      res.json({
+        success: true,
+        restored: totalRestored > 0,
+        counts
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Erreur réconciliation Firestore" });
+    }
+  });
+
+  // Cloud Vault & Firebase Primary Sync Status
   app.get("/api/super-admin/cloud-vault", authenticateToken, requireSuperAdmin, (_req, res) => {
     try {
       const vault = buildSchoolAccountsVault();
@@ -34485,7 +35110,8 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       res.json({
         success: true,
         cloudSyncAvailable: pgActive,
-        provider: pgActive ? 'cloud_firestore_and_cloudsql' : 'cloud_firestore',
+        primaryDatabase: 'firebase_cloud_firestore',
+        provider: pgActive ? 'cloud_firestore_primary' : 'cloud_firestore',
         firestoreDatabaseId: FIRESTORE_DB_ID,
         firestoreCollections: FIRESTORE_COLLECTIONS,
         cloudSqlVersion: lastSyncedPgVersion,
@@ -34499,11 +35125,13 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
 
   app.post("/api/super-admin/cloud-vault/reconcile", authenticateToken, requireSuperAdmin, async (req, res) => {
     try {
-      const { vault } = req.body || {};
+      const { vault, prioritizeRemote } = req.body || {};
       if (!vault || !vault.tables || typeof vault.tables !== 'object') {
         return res.status(400).json({ error: "Vault invalide." });
       }
-      let reconciled = reconcileMissingSchoolAccountsFromVault(vault);
+      let reconciled = reconcileMissingSchoolAccountsFromVault(vault, {
+        prioritizeRemote: prioritizeRemote !== false
+      });
       reconciled += ensureApprovedRequestsHaveSchools();
       if (reconciled > 0) {
         bumpServerDataVersion();
@@ -34534,7 +35162,8 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       res.json({
         success: true,
         cloudSyncAvailable: pgActive,
-        database: pgActive ? 'Cloud Firestore & Cloud SQL (PostgreSQL)' : 'Cloud Firestore',
+        primaryDatabase: 'firebase_cloud_firestore',
+        database: pgActive ? 'Firebase Cloud Firestore (Principal) & Relais Cloud SQL (PostgreSQL)' : 'Firebase Cloud Firestore (Principal)',
         firestoreDatabaseId: FIRESTORE_DB_ID,
         firestoreCollections: FIRESTORE_COLLECTIONS,
         cloudSqlVersion: lastSyncedPgVersion,

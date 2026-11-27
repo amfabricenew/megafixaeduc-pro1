@@ -85,8 +85,10 @@ import SubscriptionSettingsTab from '../components/settings/SubscriptionSettings
 import AutomationSettingsPanel from '../components/messaging/AutomationSettingsPanel';
 import { formatAcademicYearLibelle, getDefaultDatesForAcademicYear, getNextAcademicYearLibelle } from '../utils/academicYear';
 import { auth, googleProvider, signInWithPopup } from '../lib/firebase';
+import { useFirebase } from '../contexts/FirebaseContext';
 
 export default function Settings() {
+  const { firestoreStatus, firestoreDatabaseId } = useFirebase();
   const confirm = useConfirm();
   const location = useLocation();
   const [annees, setAnnees] = React.useState<any[]>([]);
@@ -1589,35 +1591,47 @@ export default function Settings() {
 
       {activeTab === 'general' && (
         <div className="space-y-8 relative">
-          {/* Bannière Mode Strict Hors-Ligne */}
+          {/* Bannière Base de Données Principale Firebase Cloud Firestore */}
           <div className="bg-gradient-to-r from-slate-900 via-slate-850 to-indigo-950 text-white p-5 rounded-3xl border border-slate-700/60 shadow-lg flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
             <div className="flex items-center gap-3.5">
               <div className="w-12 h-12 rounded-2xl bg-emerald-500/20 border border-emerald-400/40 flex items-center justify-center text-emerald-400 shrink-0">
-                <Shield size={24} />
+                <Database size={24} />
               </div>
               <div>
                 <div className="flex items-center gap-2 flex-wrap">
                   <h3 className="font-black text-sm md:text-base tracking-wide text-white">
-                    Mode Strict Hors-Ligne & Souveraineté Locale
+                    Architecture Cloud-First & Firebase Cloud Firestore
                   </h3>
-                  <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-emerald-500/20 text-emerald-300 border border-emerald-400/30 flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
-                    Internet Interdit (100% Autonome)
+                  <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider border flex items-center gap-1 ${
+                    firestoreStatus === 'connected'
+                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-400/30'
+                      : 'bg-amber-500/20 text-amber-300 border-amber-400/30'
+                  }`}>
+                    <span className={`w-1.5 h-1.5 rounded-full ${
+                      firestoreStatus === 'connected' ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'
+                    }`}></span>
+                    {firestoreStatus === 'connected'
+                      ? 'Firebase Prioritaire Connecté'
+                      : firestoreStatus === 'checking'
+                      ? 'Vérification Firebase...'
+                      : 'Mode Continuité Locale'}
                   </span>
                 </div>
                 <p className="text-xs text-slate-300 mt-1 leading-relaxed">
-                  L'accès à Internet est formellement interdit et neutralisé même si une connexion est disponible. Toutes les opérations s'exécutent en circuit fermé sur la base SQLite locale.
+                  Firebase Cloud Firestore est configuré comme base de données principale pour la persistance des paramètres, comptes, classes, élèves et notes, avec relais SQL automatique.
                 </p>
               </div>
             </div>
             <div className="flex items-center gap-2 shrink-0">
               <div className="px-3.5 py-2 bg-white/10 backdrop-blur-md rounded-2xl border border-white/10 text-center">
-                <p className="text-[10px] font-bold text-slate-300 uppercase">Données Externes</p>
-                <p className="text-xs font-black text-amber-300">0 Reçues / 0 Émises</p>
+                <p className="text-[10px] font-bold text-slate-300 uppercase">Base Principale</p>
+                <p className="text-xs font-black text-amber-300">Cloud Firestore</p>
               </div>
               <div className="px-3.5 py-2 bg-emerald-500/15 backdrop-blur-md rounded-2xl border border-emerald-400/30 text-center">
-                <p className="text-[10px] font-bold text-emerald-300 uppercase">Base Locale</p>
-                <p className="text-xs font-black text-white">megafixaEduc.db</p>
+                <p className="text-[10px] font-bold text-emerald-300 uppercase">Instance ID</p>
+                <p className="text-xs font-black text-white truncate max-w-[140px]" title={firestoreDatabaseId}>
+                  {firestoreDatabaseId.slice(0, 18)}...
+                </p>
               </div>
             </div>
           </div>

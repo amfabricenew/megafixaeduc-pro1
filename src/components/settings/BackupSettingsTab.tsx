@@ -23,6 +23,9 @@ import {
   Check,
 } from 'lucide-react';
 import { BackupConfig, BackupSnapshot } from '../../types';
+import { useFirebase } from '../../contexts/FirebaseContext';
+import { firestoreDbService } from '../../services/firestoreDbService';
+import { exportSchoolSettingsToFirestore } from '../SchoolSettingsCloudExporter';
 
 function formatBackupDate(value?: string | null): string {
   if (!value) return 'Automatique en cours';
@@ -36,6 +39,8 @@ function formatBackupDate(value?: string | null): string {
 
 export default function BackupSettingsTab() {
   const confirm = useConfirm();
+  const { firestoreStatus, firestoreDatabaseId } = useFirebase();
+  const [syncingFirebase, setSyncingFirebase] = useState(false);
 
   const [config, setConfig] = useState<BackupConfig>({
     school_id: 1,
@@ -50,7 +55,7 @@ export default function BackupSettingsTab() {
     include_documents: 1,
     include_audit_logs: 1,
     encryption_enabled: 0,
-    storage_location: 'local_and_cloud',
+    storage_location: 'cloud',
     cloud_provider: 'firestore_snapshot',
     cloud_endpoint: '',
     cloud_api_key: '',
@@ -302,14 +307,21 @@ export default function BackupSettingsTab() {
       {/* Header Banner */}
       <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 text-white p-6 rounded-2xl shadow-md border border-slate-800 flex flex-col lg:flex-row lg:items-center justify-between gap-6">
         <div className="space-y-1.5">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <span className="p-2 bg-indigo-500/20 text-indigo-400 rounded-xl border border-indigo-500/30">
               <Database className="w-5 h-5" />
             </span>
-            <h2 className="text-xl font-bold tracking-tight">Sauvegardes Automatiques Système & Restauration</h2>
+            <h2 className="text-xl font-bold tracking-tight">Base Principale Firebase Cloud Firestore & Sauvegardes</h2>
+            <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase border ${
+              firestoreStatus === 'connected'
+                ? 'bg-emerald-500/20 text-emerald-300 border-emerald-400/40'
+                : 'bg-amber-500/20 text-amber-200 border-amber-400/40'
+            }`}>
+              {firestoreStatus === 'connected' ? 'Firebase Connecté (Prioritaire)' : 'Relais Hors-Ligne Prêt'}
+            </span>
           </div>
           <p className="text-xs text-slate-300 max-w-2xl leading-relaxed">
-            Vos données (utilisateurs, élèves, notes, paiements et paramètres) sont sauvegardées automatiquement par le système vers Cloud SQL et Cloud Firestore à chaque opération et selon votre cycle planifié.
+            Firebase Cloud Firestore ({firestoreDatabaseId}) est priorisé comme base de données principale pour vos paramètres, classes, élèves, notes et utilisateurs, avec réplication automatique de continuité vers le relais SQL.
           </p>
         </div>
 
@@ -334,6 +346,39 @@ export default function BackupSettingsTab() {
       {/* Action Bar */}
       <div className="flex flex-wrap items-center justify-between gap-3 bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
         <div className="flex flex-wrap items-center gap-2.5">
+          <button
+            type="button"
+            disabled={syncingFirebase}
+            onClick={async () => {
+              if (syncingFirebase) return;
+              setSyncingFirebase(true);
+              try {
+                const schoolId = Number(config?.school_id) || 1;
+                const [fbConnected, settingsRes, domainRes] = await Promise.all([
+                  firestoreDbService.verifyConnection(),
+                  exportSchoolSettingsToFirestore(schoolId, { force: true, throwOnError: false }),
+                  firestoreDbService.syncSchoolOperationalDomainToFirestore(schoolId, { force: true, throwOnError: false }),
+                  apiFetch('/api/backups/cloud-sync-test', { method: 'POST' }).catch(() => null),
+                ]);
+                if (fbConnected && (settingsRes.exported || domainRes.syncedSlices > 0)) {
+                  toast.success('Synchronisation Firebase Cloud Firestore réussie !');
+                } else if (fbConnected) {
+                  toast.success('Connexion Firebase Cloud Firestore active (prioritaire).');
+                } else {
+                  toast.error('Firebase Cloud Firestore hors ligne : relais local actif.');
+                }
+              } catch (err: any) {
+                toast.error(err?.message || 'Erreur lors de la synchronisation Firebase.');
+              } finally {
+                setSyncingFirebase(false);
+              }
+            }}
+            className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 text-xs font-bold transition-all disabled:opacity-50"
+          >
+            <RefreshCw className={`w-4 h-4 ${syncingFirebase ? 'animate-spin' : ''}`} />
+            <span>{syncingFirebase ? 'Synchronisation Firebase...' : 'Synchroniser Firebase maintenant'}</span>
+          </button>
+
           <button
             onClick={handleExportUsersJson}
             className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 text-xs font-bold transition-all"
@@ -460,9 +505,9 @@ export default function BackupSettingsTab() {
                 onChange={e => setConfig({ ...config, storage_location: e.target.value as any })}
                 className="w-full p-2 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white font-medium"
               >
+                <option value="cloud">Firebase Cloud Firestore (Base Principale)</option>
+                <option value="local_and_cloud">Hybride (Firebase Cloud Firestore + Relais Local)</option>
                 <option value="local">Serveur Local Uniquement</option>
-                <option value="cloud">Cloud Firestore Distant</option>
-                <option value="local_and_cloud">Hybride (Local + Cloud)</option>
               </select>
             </div>
           </div>

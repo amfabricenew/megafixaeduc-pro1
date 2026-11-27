@@ -21,8 +21,12 @@ import {
   buildPlanDocId,
   buildSchoolRequestDocId,
   buildSchoolSettingDocId,
+  buildClassDocId,
+  buildStudentDocId,
+  buildGradeDocId,
   buildAppDataDocId,
 } from '../lib/firestoreSchema';
+import { apiFetch } from '../utils/api';
 
 const SERVER_ONLY_SECRET_KEYS = new Set([
   'brevo_api_key',
@@ -178,13 +182,61 @@ export interface FirestoreSchoolRequestInput {
   school_id?: number | null;
 }
 
-const syncedSchoolSnapshotHashes = new Map<number, string>();
+const operationalDomainHashes = new Map<string, string>();
+const operationalDomainLastPushTs = new Map<string, number>();
+
+function fastDigest(input: string): string {
+  let hash = 2166136261;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function getLocalStorageStr(key: string): string | null {
+  try {
+    return typeof window !== 'undefined' ? window.localStorage.getItem(key) : null;
+  } catch {
+    return null;
+  }
+}
+
+function sanitizeArrayPayload(items: unknown[], maxJsonBytes = 760000): string {
+  if (!Array.isArray(items)) return '[]';
+  const cleaned = items.slice(0, 1500).map((item) => sanitizeNestedConfigValue(item, 0));
+  let jsonStr = JSON.stringify(cleaned);
+  if (jsonStr.length <= maxJsonBytes) return jsonStr;
+
+  // Progressively trim large base64 photos or heavy fields if payload approaches 800KB limit
+  const compact = cleaned.map((item) => {
+    if (!item || typeof item !== 'object') return item;
+    const copy = { ...(item as Record<string, unknown>) };
+    if (typeof copy.photo === 'string' && copy.photo.length > 256) {
+      delete copy.photo;
+    }
+    if (typeof copy.logo === 'string' && copy.logo.length > 256) {
+      delete copy.logo;
+    }
+    return copy;
+  });
+  jsonStr = JSON.stringify(compact);
+  if (jsonStr.length <= maxJsonBytes) return jsonStr;
+
+  // Binary trim array count to stay safely under Firestore document limit
+  let keep = compact.length;
+  while (keep > 1 && jsonStr.length > maxJsonBytes) {
+    keep = Math.floor(keep * 0.75);
+    jsonStr = JSON.stringify(compact.slice(0, keep));
+  }
+  return jsonStr.length <= maxJsonBytes ? jsonStr : '[]';
+}
 
 /**
- * Cloud Firestore Database Management Service
+ * Cloud Firestore Primary Database Management Service
  * Uses database ID `ai-studio-complexescolaire-58020480-d049-4084-942d-a5a7b046898c`
- * to persist user profiles, schools, subscription plans, school creation requests,
- * and platform settings durably across sessions and deployments.
+ * as the primary persistence layer for user profiles, schools, subscription plans,
+ * school requests, platform settings, classes, students, grades, and operational state.
  */
 export const firestoreDbService = {
   config: FIRESTORE_STORAGE_CONFIG,
@@ -213,6 +265,7 @@ export const firestoreDbService = {
   ): Promise<boolean> {
     if (!assertSignedInAndVerified()) return false;
     const cleanUid = sanitizeFirestoreDocId(uid);
+    if (!cleanUid || cleanUid.length > 128) return false;
     const path = `${FIRESTORE_COLLECTIONS.users}/${cleanUid}`;
 
     const email = clampStr(profile.email, 254).trim().toLowerCase();
@@ -239,10 +292,20 @@ export const firestoreDbService = {
       const ref = doc(db, FIRESTORE_COLLECTIONS.users, cleanUid);
       const existingSnap = await getDoc(ref).catch(() => null);
       if (existingSnap?.exists()) {
-        await updateDoc(ref, {
-          ...(payload.nom ? { nom: payload.nom } : {}),
-          updatedAt: payload.updatedAt,
-        });
+        if (isSelfBootstrappedAdmin) {
+          await updateDoc(ref, {
+            email: payload.email,
+            role: payload.role,
+            ...(payload.school_id !== undefined ? { school_id: payload.school_id } : {}),
+            ...(payload.nom ? { nom: payload.nom } : {}),
+            updatedAt: payload.updatedAt,
+          });
+        } else {
+          await updateDoc(ref, {
+            ...(payload.nom ? { nom: payload.nom } : {}),
+            updatedAt: payload.updatedAt,
+          });
+        }
       } else {
         await setDoc(ref, payload);
       }
@@ -277,28 +340,50 @@ export const firestoreDbService = {
     const nom = clampStr(school.nom || `École ${schoolIdVal}`, 200).trim();
     if (!nom) return false;
 
+    const currentEmail = auth.currentUser?.email?.trim().toLowerCase() || '';
+    const isSuper = isBootstrappedSuperAdminEmail(currentEmail);
+
     const payload: Record<string, any> = {
       id: schoolIdVal,
       nom,
       updatedAt: nowIso(),
     };
-    if (school.code_ecole) payload.code_ecole = clampStr(school.code_ecole, 64);
     if (school.email) payload.email = clampStr(school.email, 254);
     if (school.telephone) payload.telephone = clampStr(school.telephone, 40);
     if (school.pays) payload.pays = clampStr(school.pays, 80);
     if (school.devise) payload.devise = clampStr(school.devise, 16);
-    if (school.plan_abonnement) payload.plan_abonnement = clampStr(school.plan_abonnement, 80);
-    if (school.statut_abonnement) payload.statut_abonnement = clampStr(school.statut_abonnement, 40);
-    if (school.date_fin_abonnement) payload.date_fin_abonnement = clampStr(school.date_fin_abonnement, 64);
-    if (school.espace_primaire_actif != null) {
-      payload.espace_primaire_actif = Math.trunc(Number(school.espace_primaire_actif));
-    }
-    if (school.espace_secondaire_actif != null) {
-      payload.espace_secondaire_actif = Math.trunc(Number(school.espace_secondaire_actif));
+
+    if (isSuper) {
+      if (school.code_ecole) payload.code_ecole = clampStr(school.code_ecole, 64);
+      if (school.plan_abonnement) payload.plan_abonnement = clampStr(school.plan_abonnement, 80);
+      if (school.statut_abonnement) payload.statut_abonnement = clampStr(school.statut_abonnement, 40);
+      if (school.date_fin_abonnement) payload.date_fin_abonnement = clampStr(school.date_fin_abonnement, 64);
+      if (school.espace_primaire_actif != null) {
+        payload.espace_primaire_actif = Math.trunc(Number(school.espace_primaire_actif));
+      }
+      if (school.espace_secondaire_actif != null) {
+        payload.espace_secondaire_actif = Math.trunc(Number(school.espace_secondaire_actif));
+      }
     }
 
     try {
-      await setDoc(doc(db, FIRESTORE_COLLECTIONS.schools, docId), payload, { merge: true });
+      const docRef = doc(db, FIRESTORE_COLLECTIONS.schools, docId);
+      if (isSuper) {
+        await setDoc(docRef, payload, { merge: true });
+        return true;
+      }
+      // School admin can only update allowed mutable fields when the school document already exists
+      const existing = await getDoc(docRef).catch(() => null);
+      if (!existing?.exists()) return false;
+      const updateFields: Record<string, any> = {
+        nom: payload.nom,
+        updatedAt: payload.updatedAt,
+      };
+      if (payload.email !== undefined) updateFields.email = payload.email;
+      if (payload.telephone !== undefined) updateFields.telephone = payload.telephone;
+      if (payload.pays !== undefined) updateFields.pays = payload.pays;
+      if (payload.devise !== undefined) updateFields.devise = payload.devise;
+      await updateDoc(docRef, updateFields);
       return true;
     } catch (error) {
       safeReportError(error, OperationType.WRITE, path, options.throwOnError ?? true);
@@ -553,6 +638,54 @@ export const firestoreDbService = {
     }
   },
 
+  async getTenantAppData<T = Record<string, any>>(
+    schoolId: number | string,
+    scopeKey: string,
+    options: { throwOnError?: boolean; fromServer?: boolean } = {}
+  ): Promise<{ school_id: number; data: T; updatedAt: string | null } | null> {
+    if (!assertSignedInAndVerified()) return null;
+    const numericSchoolId = Math.trunc(Number(schoolId));
+    if (!Number.isFinite(numericSchoolId)) return null;
+
+    const docId = buildAppDataDocId(numericSchoolId, scopeKey);
+    const path = `${FIRESTORE_COLLECTIONS.appData}/${docId}`;
+    const docRef = doc(db, FIRESTORE_COLLECTIONS.appData, docId);
+
+    try {
+      let snap;
+      if (options.fromServer !== false) {
+        try {
+          snap = await getDocFromServer(docRef);
+        } catch (serverErr: any) {
+          const code = String(serverErr?.code || '');
+          if (code === 'permission-denied' || code.includes('permission')) {
+            throw serverErr;
+          }
+          snap = await getDoc(docRef);
+        }
+      } else {
+        snap = await getDoc(docRef);
+      }
+
+      if (!snap.exists()) return null;
+      const raw = snap.data();
+      if (!raw || typeof raw.payload !== 'string') return null;
+
+      try {
+        return {
+          school_id: numericSchoolId,
+          data: JSON.parse(raw.payload) as T,
+          updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : null,
+        };
+      } catch {
+        return null;
+      }
+    } catch (error) {
+      safeReportError(error, OperationType.GET, path, options.throwOnError ?? true);
+      return null;
+    }
+  },
+
   async saveTenantAppData(
     schoolId: number | string,
     scopeKey: string,
@@ -565,7 +698,11 @@ export const firestoreDbService = {
 
     const docId = buildAppDataDocId(numericSchoolId, scopeKey);
     const path = `${FIRESTORE_COLLECTIONS.appData}/${docId}`;
-    const payloadStr = clampStr(typeof data === 'string' ? data : JSON.stringify(data ?? {}), 800000);
+    const sanitized =
+      typeof data === 'string'
+        ? data
+        : JSON.stringify(sanitizeNestedConfigValue(data ?? {}, 0));
+    const payloadStr = clampStr(sanitized, 790000);
 
     try {
       await setDoc(doc(db, FIRESTORE_COLLECTIONS.appData, docId), {
@@ -577,6 +714,337 @@ export const firestoreDbService = {
     } catch (error) {
       safeReportError(error, OperationType.WRITE, path, options.throwOnError ?? true);
       return false;
+    }
+  },
+
+  async getScopedCollectionSnapshot<T = any[]>(
+    collectionName: 'classes' | 'students' | 'grades',
+    schoolId: number | string,
+    docId: string,
+    options: { throwOnError?: boolean; fromServer?: boolean } = {}
+  ): Promise<{ school_id: number; data: T; updatedAt: string | null } | null> {
+    if (!assertSignedInAndVerified()) return null;
+    const numericSchoolId = Math.trunc(Number(schoolId));
+    if (!Number.isFinite(numericSchoolId)) return null;
+
+    const cleanId = sanitizeFirestoreDocId(docId);
+    const path = `${collectionName}/${cleanId}`;
+    const docRef = doc(db, collectionName, cleanId);
+
+    try {
+      let snap;
+      if (options.fromServer !== false) {
+        try {
+          snap = await getDocFromServer(docRef);
+        } catch (serverErr: any) {
+          const code = String(serverErr?.code || '');
+          if (code === 'permission-denied' || code.includes('permission')) {
+            throw serverErr;
+          }
+          snap = await getDoc(docRef);
+        }
+      } else {
+        snap = await getDoc(docRef);
+      }
+
+      if (!snap.exists()) return null;
+      const raw = snap.data();
+      if (!raw || typeof raw.payload !== 'string') return null;
+
+      try {
+        return {
+          school_id: numericSchoolId,
+          data: JSON.parse(raw.payload) as T,
+          updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : null,
+        };
+      } catch {
+        return null;
+      }
+    } catch (error) {
+      safeReportError(error, OperationType.GET, path, options.throwOnError ?? true);
+      return null;
+    }
+  },
+
+  async saveScopedCollectionSnapshot(
+    collectionName: 'classes' | 'students' | 'grades',
+    schoolId: number | string,
+    docId: string,
+    items: unknown,
+    options: { throwOnError?: boolean } = {}
+  ): Promise<boolean> {
+    if (!assertSignedInAndVerified()) return false;
+    const numericSchoolId = Math.trunc(Number(schoolId));
+    if (!Number.isFinite(numericSchoolId)) return false;
+
+    const cleanId = sanitizeFirestoreDocId(docId);
+    const path = `${collectionName}/${cleanId}`;
+    const payloadStr = Array.isArray(items)
+      ? sanitizeArrayPayload(items, 780000)
+      : clampStr(JSON.stringify(sanitizeNestedConfigValue(items ?? {}, 0)), 780000);
+
+    try {
+      await setDoc(doc(db, collectionName, cleanId), {
+        school_id: numericSchoolId,
+        payload: payloadStr,
+        status: 'active',
+        updatedAt: nowIso(),
+      });
+      return true;
+    } catch (error) {
+      safeReportError(error, OperationType.WRITE, path, options.throwOnError ?? true);
+      return false;
+    }
+  },
+
+  async syncSchoolOperationalDomainToFirestore(
+    schoolId: number | string,
+    options: { force?: boolean; throwOnError?: boolean } = {}
+  ): Promise<{ syncedSlices: number; skippedSlices: number }> {
+    const result = { syncedSlices: 0, skippedSlices: 0 };
+    if (!assertSignedInAndVerified()) return result;
+    const token = getLocalStorageStr('token');
+    if (!token) return result;
+
+    const numericSchoolId = Math.trunc(Number(schoolId));
+    if (!Number.isFinite(numericSchoolId)) return result;
+
+    const perms = await this.canSyncSchoolSettingsWithFirestore(numericSchoolId);
+    if (!perms.canWrite) return result;
+
+    const headers = { Authorization: `Bearer ${token}` };
+    const snapRes = await apiFetch('/api/school/firestore-snapshot', { headers }).catch(() => null);
+    if (!snapRes || !snapRes.ok) return result;
+    const snapData = await snapRes.json().catch(() => null);
+    if (!snapData || !snapData.success) return result;
+
+    const schoolInfo = snapData.schoolInfo || null;
+    const classes = Array.isArray(snapData.classes) ? snapData.classes : [];
+    const students = Array.isArray(snapData.students) ? snapData.students : [];
+    const teachers = Array.isArray(snapData.enseignants) ? snapData.enseignants : [];
+    const subjects = Array.isArray(snapData.matieres) ? snapData.matieres : [];
+    const years = Array.isArray(snapData.academicYears) ? snapData.academicYears : [];
+    const grades = Array.isArray(snapData.grades) ? snapData.grades : [];
+
+    const now = Date.now();
+    const shouldPush = (sliceKey: string, digest: string): boolean => {
+      const mapKey = `${numericSchoolId}:${sliceKey}`;
+      const lastHash = operationalDomainHashes.get(mapKey);
+      const lastTs = operationalDomainLastPushTs.get(mapKey) || 0;
+      if (!options.force && lastHash === digest && now - lastTs < 300_000) {
+        return false;
+      }
+      return true;
+    };
+    const markPushed = (sliceKey: string, digest: string) => {
+      const mapKey = `${numericSchoolId}:${sliceKey}`;
+      operationalDomainHashes.set(mapKey, digest);
+      operationalDomainLastPushTs.set(mapKey, Date.now());
+    };
+
+    if (schoolInfo && schoolInfo.nom) {
+      const schoolDigest = fastDigest(JSON.stringify({
+        nom: schoolInfo.nom,
+        email: schoolInfo.email,
+        telephone: schoolInfo.telephone,
+        pays: schoolInfo.pays,
+        devise: schoolInfo.devise,
+      }));
+      if (shouldPush('school', schoolDigest)) {
+        const ok = await this.upsertSchoolRecord(
+          {
+            id: numericSchoolId,
+            nom: schoolInfo.nom,
+            code_ecole: schoolInfo.code_ecole,
+            email: schoolInfo.email,
+            telephone: schoolInfo.telephone,
+            pays: schoolInfo.pays,
+            devise: schoolInfo.devise,
+            plan_abonnement: schoolInfo.plan_abonnement,
+            statut_abonnement: schoolInfo.statut_abonnement,
+            date_fin_abonnement: schoolInfo.date_fin_abonnement,
+            espace_primaire_actif: schoolInfo.espace_primaire_actif,
+            espace_secondaire_actif: schoolInfo.espace_secondaire_actif,
+          },
+          { throwOnError: false }
+        );
+        if (ok) {
+          markPushed('school', schoolDigest);
+          result.syncedSlices++;
+        }
+      } else {
+        result.skippedSlices++;
+      }
+    }
+
+    if (classes.length > 0 || shouldPush('classes', 'empty')) {
+      const digest = fastDigest(JSON.stringify(classes));
+      if (shouldPush('classes', digest)) {
+        const ok = await this.saveScopedCollectionSnapshot(
+          'classes',
+          numericSchoolId,
+          buildClassDocId(numericSchoolId, 'classes'),
+          classes,
+          { throwOnError: options.throwOnError ?? false }
+        );
+        if (ok) {
+          markPushed('classes', digest);
+          result.syncedSlices++;
+        }
+      } else {
+        result.skippedSlices++;
+      }
+    }
+
+    if (students.length > 0 || shouldPush('students', 'empty')) {
+      const digest = fastDigest(JSON.stringify(students));
+      if (shouldPush('students', digest)) {
+        const ok = await this.saveScopedCollectionSnapshot(
+          'students',
+          numericSchoolId,
+          buildStudentDocId(numericSchoolId, 'students'),
+          students,
+          { throwOnError: options.throwOnError ?? false }
+        );
+        if (ok) {
+          markPushed('students', digest);
+          result.syncedSlices++;
+        }
+      } else {
+        result.skippedSlices++;
+      }
+    }
+
+    if (grades.length > 0 || shouldPush('grades', 'empty')) {
+      const digest = fastDigest(JSON.stringify(grades));
+      if (shouldPush('grades', digest)) {
+        const ok = await this.saveScopedCollectionSnapshot(
+          'grades',
+          numericSchoolId,
+          buildGradeDocId(numericSchoolId, 'grades'),
+          grades,
+          { throwOnError: options.throwOnError ?? false }
+        );
+        if (ok) {
+          markPushed('grades', digest);
+          result.syncedSlices++;
+        }
+      } else {
+        result.skippedSlices++;
+      }
+    }
+
+    const operationalPayload = {
+      schemaVersion: 1,
+      school_id: numericSchoolId,
+      academicYears: years,
+      enseignants: teachers,
+      matieres: subjects,
+      updatedAt: nowIso(),
+    };
+    const opDigest = fastDigest(JSON.stringify({
+      academicYears: years,
+      enseignants: teachers,
+      matieres: subjects,
+    }));
+    if (shouldPush('operational', opDigest)) {
+      const ok = await this.saveTenantAppData(
+        numericSchoolId,
+        'operational',
+        operationalPayload,
+        { throwOnError: options.throwOnError ?? false }
+      );
+      if (ok) {
+        markPushed('operational', opDigest);
+        result.syncedSlices++;
+      }
+    } else {
+      result.skippedSlices++;
+    }
+
+    return result;
+  },
+
+  async restoreSchoolOperationalDomainFromFirestore(
+    schoolId: number | string,
+    options: { throwOnError?: boolean } = {}
+  ): Promise<{ restored: boolean; counts?: Record<string, number> }> {
+    if (!assertSignedInAndVerified()) return { restored: false };
+    const token = getLocalStorageStr('token');
+    if (!token) return { restored: false };
+
+    const numericSchoolId = Math.trunc(Number(schoolId));
+    if (!Number.isFinite(numericSchoolId)) return { restored: false };
+
+    const perms = await this.canSyncSchoolSettingsWithFirestore(numericSchoolId);
+    if (!perms.canRead) return { restored: false };
+
+    const [configSnap, classesSnap, studentsSnap, gradesSnap, operationalSnap] = await Promise.all([
+      this.getSchoolConfigSnapshot(numericSchoolId, { throwOnError: false }),
+      this.getScopedCollectionSnapshot(
+        'classes',
+        numericSchoolId,
+        buildClassDocId(numericSchoolId, 'classes'),
+        { throwOnError: false }
+      ),
+      this.getScopedCollectionSnapshot(
+        'students',
+        numericSchoolId,
+        buildStudentDocId(numericSchoolId, 'students'),
+        { throwOnError: false }
+      ),
+      this.getScopedCollectionSnapshot(
+        'grades',
+        numericSchoolId,
+        buildGradeDocId(numericSchoolId, 'grades'),
+        { throwOnError: false }
+      ),
+      this.getTenantAppData(numericSchoolId, 'operational', { throwOnError: false }),
+    ]);
+
+    const hasAnyRemote = Boolean(
+      configSnap?.data ||
+      (Array.isArray(classesSnap?.data) && classesSnap.data.length > 0) ||
+      (Array.isArray(studentsSnap?.data) && studentsSnap.data.length > 0) ||
+      (Array.isArray(gradesSnap?.data) && gradesSnap.data.length > 0) ||
+      operationalSnap?.data
+    );
+    if (!hasAnyRemote) return { restored: false };
+
+    try {
+      const res = await apiFetch('/api/school/firestore-reconcile', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          schoolInfo: configSnap?.data?.schoolInfo || (configSnap?.data?.nom ? configSnap.data : undefined),
+          academicYears: operationalSnap?.data?.academicYears || configSnap?.data?.academicYears || [],
+          classes: Array.isArray(classesSnap?.data) ? classesSnap.data : [],
+          students: Array.isArray(studentsSnap?.data) ? studentsSnap.data : [],
+          grades: Array.isArray(gradesSnap?.data) ? gradesSnap.data : [],
+          enseignants: Array.isArray(operationalSnap?.data?.enseignants) ? operationalSnap.data.enseignants : [],
+          matieres: Array.isArray(operationalSnap?.data?.matieres) ? operationalSnap.data.matieres : [],
+          updatedAt:
+            configSnap?.updatedAt ||
+            operationalSnap?.updatedAt ||
+            studentsSnap?.updatedAt ||
+            classesSnap?.updatedAt ||
+            nowIso(),
+        }),
+      });
+      if (!res.ok) return { restored: false };
+      const data = await res.json().catch(() => ({}));
+      const counts = data?.counts || {};
+      const totalChanged = Object.values(counts).reduce<number>(
+        (acc, val) => acc + (Number(val) || 0),
+        0
+      );
+      return { restored: totalChanged > 0 || Boolean(data?.restored), counts };
+    } catch (err) {
+      if (options.throwOnError) throw err;
+      return { restored: false };
     }
   },
 
@@ -598,25 +1066,34 @@ export const firestoreDbService = {
   },
 
   /**
-   * Synchronizes normalized school records, subscription plans, school creation requests,
-   * and non-secret Super Admin settings into dedicated Cloud Firestore collections.
+   * Synchronizes normalized school records, Google-linked user profiles,
+   * subscription plans, school creation requests, and non-secret Super Admin settings
+   * into dedicated Cloud Firestore collections.
    */
   async syncNormalizedEntitiesFromVault(
     vault: {
       tables?: {
         school_info?: FirestoreSchoolInput[];
+        utilisateurs?: Array<{
+          email?: string;
+          role?: string;
+          school_id?: number;
+          nom?: string;
+          google_id?: string | null;
+        }>;
         plans?: FirestorePlanInput[];
         super_admin_settings?: Array<{ key: string; value: string }>;
         school_creation_requests?: FirestoreSchoolRequestInput[];
       };
     },
     options: { throwOnError?: boolean } = {}
-  ): Promise<{ schools: number; plans: number; settings: number; requests: number }> {
-    const counts = { schools: 0, plans: 0, settings: 0, requests: 0 };
+  ): Promise<{ schools: number; users: number; plans: number; settings: number; requests: number }> {
+    const counts = { schools: 0, users: 0, plans: 0, settings: 0, requests: 0 };
     if (!assertSignedInAndVerified() || !vault?.tables) return counts;
 
     const {
       school_info = [],
+      utilisateurs = [],
       plans = [],
       super_admin_settings = [],
       school_creation_requests = [],
@@ -635,14 +1112,38 @@ export const firestoreDbService = {
           schoolInfo: sc,
         };
         const digest = sanitizeSchoolConfigPayload({ schoolInfo: sc });
-        if (syncedSchoolSnapshotHashes.get(sid) !== digest) {
+        const hashKey = `${sid}:config_vault`;
+        if (operationalDomainHashes.get(hashKey) !== digest) {
           const savedCfg = await this.saveSchoolConfigSnapshot(sid, snapshotPayload, {
             throwOnError: options.throwOnError ?? false,
           });
           if (savedCfg) {
-            syncedSchoolSnapshotHashes.set(sid, digest);
+            operationalDomainHashes.set(hashKey, digest);
           }
         }
+      }
+    }
+
+    for (const u of utilisateurs) {
+      const uid = String(u?.google_id || '').trim();
+      if (!uid || !/^[a-zA-Z0-9_-]{1,128}$/.test(uid) || !u?.email) continue;
+      const userDigest = fastDigest(JSON.stringify({ uid, email: u.email, role: u.role, school_id: u.school_id, nom: u.nom }));
+      const uHashKey = `user:${uid}`;
+      if (operationalDomainHashes.get(uHashKey) === userDigest) continue;
+      const ok = await this.upsertUserProfile(
+        uid,
+        {
+          uid,
+          email: u.email,
+          role: u.role || 'user',
+          school_id: u.school_id,
+          nom: u.nom,
+        },
+        { throwOnError: options.throwOnError ?? false }
+      );
+      if (ok) {
+        operationalDomainHashes.set(uHashKey, userDigest);
+        counts.users++;
       }
     }
 

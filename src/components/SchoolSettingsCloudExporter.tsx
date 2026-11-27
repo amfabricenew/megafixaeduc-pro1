@@ -102,7 +102,12 @@ function isDefaultSeedSchoolInfo(info: any): boolean {
   const hasAddress = Boolean(String(info.adresse || '').trim());
   const hasEmail = Boolean(String(info.email || '').trim());
   const hasPhone = Boolean(String(info.telephone || '').trim());
-  return (nom === '' || nom === 'MégafixaEduc') && !hasAddress && !hasEmail && !hasPhone;
+  return (
+    (nom === '' || nom === 'MégafixaEduc' || nom === 'École par Défaut') &&
+    !hasAddress &&
+    !hasEmail &&
+    !hasPhone
+  );
 }
 
 function isCustomizedSchoolInfo(info: any): boolean {
@@ -110,7 +115,7 @@ function isCustomizedSchoolInfo(info: any): boolean {
   const nom = String(info.nom || '').trim();
   if (!nom) return false;
   return (
-    nom !== 'MégafixaEduc' ||
+    (nom !== 'MégafixaEduc' && nom !== 'École par Défaut') ||
     Boolean(String(info.adresse || '').trim()) ||
     Boolean(String(info.email || '').trim()) ||
     Boolean(String(info.telephone || '').trim()) ||
@@ -324,54 +329,75 @@ export const SchoolSettingsCloudExporter: React.FC<SchoolSettingsCloudExporterPr
         const perms = await firestoreDbService.canSyncSchoolSettingsWithFirestore(schoolId);
         setCanCloudWrite(perms.canWrite);
 
-        // On first hydration after page load/refresh, check if server settings were reset and restore from Firestore
+        // On first hydration after page load/refresh, prioritize Firebase Cloud Firestore:
+        // restore missing/newer school config, academic years, classes, students, grades, staff, and subjects
         if (!hasReconciledOnBootRef.current && perms.canRead) {
           hasReconciledOnBootRef.current = true;
-          const [currentSnapshot, remoteSnapshot] = await Promise.all([
+          const [currentSnapshot, remoteSnapshot, opRestore] = await Promise.all([
             fetchCurrentSchoolSettingsSnapshot(schoolId),
             firestoreDbService.getSchoolConfigSnapshot<SchoolSettingsExportSnapshot>(schoolId, {
               throwOnError: false,
             }),
+            hasServerWriteRole
+              ? firestoreDbService
+                  .restoreSchoolOperationalDomainFromFirestore(schoolId, { throwOnError: false })
+                  .catch(() => ({ restored: false }))
+              : Promise.resolve({ restored: false }),
           ]);
 
           const remoteData: any = remoteSnapshot?.data;
           const remoteSchoolInfo = remoteData?.schoolInfo || (remoteData?.nom ? remoteData : undefined);
-          if (
+          const localExportTs = Number(getLocalStorageItem(`megafixa_firestore_settings_ts_${schoolId}`) || '0');
+          const remoteUpdatedMs = remoteSnapshot?.updatedAt ? Date.parse(remoteSnapshot.updatedAt) : 0;
+          const remoteIsNewer = Number.isFinite(remoteUpdatedMs) && remoteUpdatedMs > localExportTs + 1500;
+          const shouldRestoreSettings =
             hasServerWriteRole &&
             remoteSchoolInfo &&
             isCustomizedSchoolInfo(remoteSchoolInfo) &&
-            isDefaultSeedSchoolInfo(currentSnapshot?.schoolInfo)
-          ) {
+            (isDefaultSeedSchoolInfo(currentSnapshot?.schoolInfo) || remoteIsNewer);
+
+          let anyRestored = Boolean(opRestore?.restored);
+          if (shouldRestoreSettings) {
             const restored = await restoreToServer(remoteSchoolInfo, false);
             if (restored) {
-              setLastSavedLabel(new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }));
-              return;
+              anyRestored = true;
             }
+          }
+          if (anyRestored) {
+            window.dispatchEvent(new CustomEvent('app:data-updated', { detail: { source: 'firestore' } }));
+            onRestored?.();
+            setLastSavedLabel(new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }));
           }
         }
 
-        const result = await exportSchoolSettingsToFirestore(schoolId, {
-          force: options.force,
-          throwOnError: Boolean(options.notify),
-        });
+        const [result, opSyncResult] = await Promise.all([
+          exportSchoolSettingsToFirestore(schoolId, {
+            force: options.force,
+            throwOnError: Boolean(options.notify),
+          }),
+          firestoreDbService.syncSchoolOperationalDomainToFirestore(schoolId, {
+            force: options.force,
+            throwOnError: false,
+          }),
+        ]);
 
-        if (result.exported) {
+        if (result.exported || opSyncResult.syncedSlices > 0) {
           setLastSavedLabel(
             new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })
           );
           if (options.notify) {
-            toast.success("Paramètres de l'école sauvegardés dans Cloud Firestore !");
+            toast.success("Données de l'école synchronisées dans Firebase Cloud Firestore !");
           }
         } else if (options.notify && !perms.canWrite) {
           toast.error(
-            'Connectez votre compte Google administrateur autorisé pour exporter vers Cloud Firestore.'
+            'Connectez votre compte Google administrateur autorisé pour synchroniser avec Firebase Cloud Firestore.'
           );
         } else if (options.notify) {
-          toast.success('Paramètres déjà synchronisés dans Cloud Firestore.');
+          toast.success('Données déjà synchronisées dans Firebase Cloud Firestore.');
         }
       } catch (err: any) {
         if (options.notify) {
-          toast.error(err?.message || "Erreur lors de l'exportation vers Cloud Firestore.");
+          toast.error(err?.message || 'Erreur lors de la synchronisation avec Firebase Cloud Firestore.');
         }
       } finally {
         inFlightRef.current = false;
@@ -472,18 +498,18 @@ export const SchoolSettingsCloudExporter: React.FC<SchoolSettingsCloudExporterPr
         </div>
         <div>
           <h4 className="font-bold text-lg leading-tight">
-            Sauvegarde Automatique Cloud (SQL & Firestore)
+            Base Principale Firebase Cloud Firestore
           </h4>
           <p className="text-xs text-indigo-700/80 mt-0.5">
-            Réplication automatique et continue par le système sans aucune action manuelle requise.
+            Firebase Cloud Firestore est priorisé comme base principale avec réplication continue vers le relais SQL.
           </p>
         </div>
       </div>
 
       <p className="text-sm text-slate-600 leading-relaxed">
-        Les coordonnées, l&apos;identité visuelle, la localisation et les années scolaires de votre
-        établissement sont sauvegardées automatiquement par le système à chaque modification et
-        répliquées dans le Cloud pour garantir qu&apos;aucune donnée ne soit perdue.
+        Les paramètres, années scolaires, classes, élèves, notes, matières et enseignants de votre
+        établissement sont synchronisés en priorité dans Firebase Cloud Firestore à chaque opération
+        pour garantir qu&apos;aucune donnée ne soit perdue.
       </p>
 
       {firebaseUser?.emailVerified && canCloudWrite && hasServerWriteRole && (

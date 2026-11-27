@@ -22,6 +22,7 @@ function isEligibleSuperAdminFirebaseSession(): boolean {
  */
 export async function syncCloudVaultWithFirestore(options: {
   allowShrink?: boolean;
+  prioritizeRemote?: boolean;
   throwOnError?: boolean;
 } = {}): Promise<{ reconciled: number; pushed: boolean } | null> {
   if (syncInFlight) return syncInFlight;
@@ -87,7 +88,10 @@ export async function syncCloudVaultWithFirestore(options: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${token}`
           },
-          body: JSON.stringify({ vault: remoteVault })
+          body: JSON.stringify({
+            vault: remoteVault,
+            prioritizeRemote: Boolean(options.prioritizeRemote),
+          })
         });
         if (reconcileRes.ok) {
           const data = await reconcileRes.json();
