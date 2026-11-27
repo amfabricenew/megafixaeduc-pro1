@@ -634,7 +634,7 @@ export default function Settings() {
   };
 
   const fetchAnnees = () => {
-    fetchWithAuth(`/api/annees?t=${Date.now()}`)
+    return fetchWithAuth(`/api/annees?t=${Date.now()}`)
       .then(res => res.json())
       .then(data => {
         if (Array.isArray(data)) {
@@ -764,8 +764,11 @@ export default function Settings() {
     }
   };
 
+  const handledSearchActionRef = React.useRef<string>('');
+  const [anneesLoadedOnce, setAnneesLoadedOnce] = React.useState(false);
+
   React.useEffect(() => {
-    fetchAnnees();
+    fetchAnnees().finally(() => setAnneesLoadedOnce(true));
     fetchUsers();
     checkDbHealth();
     fetchLogs();
@@ -774,10 +777,49 @@ export default function Settings() {
 
     const searchParams = new URLSearchParams(location.search);
     const tabParam = searchParams.get('tab');
+    const actionParam = searchParams.get('action');
     if (tabParam === 'general' || tabParam === 'account' || tabParam === 'language' || tabParam === 'roles' || tabParam === 'payments' || tabParam === 'sms' || tabParam === 'ai' || tabParam === 'backups' || tabParam === 'data_management' || tabParam === 'subscription') {
       setActiveTab(tabParam as any);
+    } else if (actionParam === 'new-year' || actionParam === 'open-planning') {
+      setActiveTab('general');
     }
   }, [location.search]);
+
+  React.useEffect(() => {
+    const searchParams = new URLSearchParams(location.search);
+    const actionParam = searchParams.get('action');
+    if (!actionParam) {
+      handledSearchActionRef.current = '';
+      return;
+    }
+
+    const actionSignature = `${location.pathname}${location.search}`;
+    if (handledSearchActionRef.current === actionSignature) return;
+
+    if (actionParam === 'new-year') {
+      handledSearchActionRef.current = actionSignature;
+      setActiveTab('general');
+      setShowYearModal(true);
+      navigate('/parametres?tab=general', { replace: true });
+      return;
+    }
+
+    if (actionParam === 'open-planning') {
+      if (!anneesLoadedOnce) return;
+      handledSearchActionRef.current = actionSignature;
+      setActiveTab('general');
+      const targetYear =
+        annees.find((a) => a.est_active_effective || a.est_active === 1) || annees[0] || null;
+      if (targetYear) {
+        setShowPlanningModal(targetYear);
+        fetchActivities(targetYear.id);
+      } else {
+        setShowYearModal(true);
+        showToast("Créez d'abord votre première année scolaire avant de planifier l'année.", 'error');
+      }
+      navigate('/parametres?tab=general', { replace: true });
+    }
+  }, [location.pathname, location.search, annees, anneesLoadedOnce, navigate]);
 
   const handleAddYear = (e: React.FormEvent) => {
     e.preventDefault();

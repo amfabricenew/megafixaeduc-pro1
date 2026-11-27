@@ -74,6 +74,7 @@ import { PWAInstallButton } from './PWAInstallButton';
 import { useOnlineStatus } from '../hooks/useOnlineStatus';
 import { LanguageSelector } from './LanguageSelector';
 import { SchoolSettingsCloudExporter } from './SchoolSettingsCloudExporter';
+import SchoolOnboardingReminders from './SchoolOnboardingReminders';
 
 
 function cn(...inputs: ClassValue[]) {
@@ -785,6 +786,7 @@ export default function Layout() {
       {/* Main Content */}
       <main ref={mainRef} data-scroll-container="main" className="flex-1 min-w-0 overflow-x-clip overflow-y-auto flex flex-col min-h-screen">
         <TimeSyncWarning />
+        <SchoolOnboardingReminders />
         <div className="hidden md:flex items-center justify-end px-8 pt-6 gap-3">
           {/* Academic Year Selector */}
           <div className="flex items-center gap-2 px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl">

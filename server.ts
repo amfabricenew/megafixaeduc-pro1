@@ -409,6 +409,52 @@ db.exec(`
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(request_id) REFERENCES school_creation_requests(id) ON DELETE CASCADE
   );
+
+  CREATE TABLE IF NOT EXISTS school_requests_archive (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    original_request_id INTEGER,
+    reference TEXT NOT NULL,
+    archive_type TEXT NOT NULL CHECK(archive_type IN ('rejected', 'deleted')),
+    nom_ecole TEXT NOT NULL,
+    type_etablissement TEXT,
+    pays TEXT DEFAULT 'Bénin',
+    ville TEXT,
+    adresse TEXT,
+    telephone_ecole TEXT,
+    email_ecole TEXT,
+    plan_souhaite TEXT,
+    montant_estime REAL DEFAULT 0,
+    demandeur_nom TEXT NOT NULL,
+    demandeur_fonction TEXT,
+    demandeur_email TEXT NOT NULL,
+    demandeur_telephone TEXT NOT NULL,
+    demandeur_whatsapp TEXT,
+    payment_method TEXT,
+    payment_phone TEXT,
+    payment_reference TEXT,
+    original_statut TEXT,
+    reason TEXT,
+    archived_by_user_id INTEGER,
+    archived_by_email TEXT,
+    archived_by_name TEXT,
+    auto_rejected_at DATETIME,
+    original_created_at DATETIME,
+    snapshot_json TEXT NOT NULL,
+    restored_at DATETIME,
+    restored_request_id INTEGER,
+    archived_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS school_onboarding_preferences (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    school_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    step_key TEXT NOT NULL,
+    dismissed_permanently INTEGER DEFAULT 0,
+    snooze_until_ms INTEGER DEFAULT 0,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(school_id, user_id, step_key)
+  );
 `);
 
 function parseDbTimestampUtcMs(value: unknown): number {
@@ -491,6 +537,8 @@ const SCHOOL_VAULT_TABLES = [
   'subscription_licenses',
   'subscription_transactions',
   'school_creation_requests',
+  'school_requests_archive',
+  'school_onboarding_preferences',
   'reclamations_demandes',
   'inscription_demandes',
   'super_admin_notifications',
@@ -515,6 +563,155 @@ function markExplicitDeletion(): void {
 
 function isWithinExplicitDeletionWindow(): boolean {
   return lastExplicitDeletionAt > 0 && (Date.now() - lastExplicitDeletionAt) < EXPLICIT_DELETION_WINDOW_MS;
+}
+
+function archiveSchoolRequestRecord(
+  reqRow: any,
+  options: {
+    archiveType: 'rejected' | 'deleted';
+    reason?: string | null;
+    actor?: { id?: number | null; email?: string | null; nom?: string | null } | null;
+    complaints?: any[];
+  }
+): void {
+  if (!reqRow || !reqRow.reference || !tableExists('school_requests_archive')) return;
+  try {
+    const complaints = Array.isArray(options.complaints)
+      ? options.complaints
+      : tableExists('reclamations_demandes') && reqRow.id
+        ? (db.prepare("SELECT * FROM reclamations_demandes WHERE request_id = ?").all(reqRow.id) as any[])
+        : [];
+
+    const reasonText = String(
+      options.reason ||
+      reqRow.motif_rejet ||
+      (options.archiveType === 'rejected'
+        ? 'Demande rejetée.'
+        : 'Demande supprimée par le Super Administrateur.')
+    ).trim();
+
+    const snapshotPayload = JSON.stringify({
+      request: reqRow,
+      complaints,
+      archive_type: options.archiveType,
+      archived_reason: reasonText,
+      archived_at: new Date().toISOString()
+    });
+
+    const existing = db.prepare(`
+      SELECT id, archive_type, reason
+      FROM school_requests_archive
+      WHERE reference = ? AND restored_at IS NULL
+      ORDER BY id DESC LIMIT 1
+    `).get(String(reqRow.reference)) as any;
+
+    if (existing) {
+      db.prepare(`
+        UPDATE school_requests_archive
+        SET archive_type = ?,
+            original_request_id = COALESCE(?, original_request_id),
+            nom_ecole = ?,
+            type_etablissement = ?,
+            pays = ?,
+            ville = ?,
+            adresse = ?,
+            telephone_ecole = ?,
+            email_ecole = ?,
+            plan_souhaite = ?,
+            montant_estime = ?,
+            demandeur_nom = ?,
+            demandeur_fonction = ?,
+            demandeur_email = ?,
+            demandeur_telephone = ?,
+            demandeur_whatsapp = ?,
+            payment_method = ?,
+            payment_phone = ?,
+            payment_reference = ?,
+            original_statut = ?,
+            reason = ?,
+            archived_by_user_id = ?,
+            archived_by_email = ?,
+            archived_by_name = ?,
+            auto_rejected_at = COALESCE(?, auto_rejected_at),
+            original_created_at = COALESCE(?, original_created_at),
+            snapshot_json = ?,
+            archived_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).run(
+        options.archiveType,
+        reqRow.id ?? null,
+        reqRow.nom_ecole || 'Établissement',
+        reqRow.type_etablissement || null,
+        reqRow.pays || 'Bénin',
+        reqRow.ville || null,
+        reqRow.adresse || null,
+        reqRow.telephone_ecole || null,
+        reqRow.email_ecole || null,
+        reqRow.plan_souhaite || null,
+        Number(reqRow.montant_estime || 0),
+        reqRow.demandeur_nom || 'Demandeur',
+        reqRow.demandeur_fonction || null,
+        reqRow.demandeur_email || '',
+        reqRow.demandeur_telephone || '',
+        reqRow.demandeur_whatsapp || null,
+        reqRow.payment_method || null,
+        reqRow.payment_phone || null,
+        reqRow.payment_reference || null,
+        reqRow.statut || options.archiveType,
+        reasonText,
+        options.actor?.id ?? null,
+        options.actor?.email ?? null,
+        options.actor?.nom ?? null,
+        reqRow.auto_rejected_at || null,
+        reqRow.created_at || null,
+        snapshotPayload,
+        existing.id
+      );
+      return;
+    }
+
+    db.prepare(`
+      INSERT INTO school_requests_archive (
+        original_request_id, reference, archive_type, nom_ecole, type_etablissement,
+        pays, ville, adresse, telephone_ecole, email_ecole, plan_souhaite, montant_estime,
+        demandeur_nom, demandeur_fonction, demandeur_email, demandeur_telephone, demandeur_whatsapp,
+        payment_method, payment_phone, payment_reference, original_statut, reason,
+        archived_by_user_id, archived_by_email, archived_by_name, auto_rejected_at,
+        original_created_at, snapshot_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      reqRow.id ?? null,
+      String(reqRow.reference),
+      options.archiveType,
+      reqRow.nom_ecole || 'Établissement',
+      reqRow.type_etablissement || null,
+      reqRow.pays || 'Bénin',
+      reqRow.ville || null,
+      reqRow.adresse || null,
+      reqRow.telephone_ecole || null,
+      reqRow.email_ecole || null,
+      reqRow.plan_souhaite || null,
+      Number(reqRow.montant_estime || 0),
+      reqRow.demandeur_nom || 'Demandeur',
+      reqRow.demandeur_fonction || null,
+      reqRow.demandeur_email || '',
+      reqRow.demandeur_telephone || '',
+      reqRow.demandeur_whatsapp || null,
+      reqRow.payment_method || null,
+      reqRow.payment_phone || null,
+      reqRow.payment_reference || null,
+      reqRow.statut || options.archiveType,
+      reasonText,
+      options.actor?.id ?? null,
+      options.actor?.email ?? null,
+      options.actor?.nom ?? null,
+      reqRow.auto_rejected_at || null,
+      reqRow.created_at || null,
+      snapshotPayload
+    );
+  } catch (err) {
+    console.warn('[Archive School Request] Error:', err);
+  }
 }
 
 function generateSecureUniquePassword(length = 16): string {
@@ -550,13 +747,66 @@ function generateSecureUniquePassword(length = 16): string {
   return chars.join('');
 }
 
+const STRICT_EMAIL_REGEX = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/;
+
+function isConformantEmail(raw: unknown): boolean {
+  if (typeof raw !== 'string') return false;
+  const clean = raw.trim().toLowerCase();
+  if (clean.length < 5 || clean.length > 254 || clean.includes('..')) return false;
+  if (!STRICT_EMAIL_REGEX.test(clean)) return false;
+  const parts = clean.split('@');
+  if (parts.length !== 2) return false;
+  const [localPart, domainPart] = parts;
+  if (!localPart || localPart.length > 64 || localPart.startsWith('.') || localPart.endsWith('.')) return false;
+  if (!domainPart || domainPart.length > 253) return false;
+  const labels = domainPart.split('.');
+  const tld = labels[labels.length - 1] || '';
+  if (!/^[a-z]{2,24}$/i.test(tld)) return false;
+  return true;
+}
+
+async function verifyEmailDomainIfOnline(email: string): Promise<boolean> {
+  const domain = String(email || '').trim().toLowerCase().split('@')[1];
+  if (!domain) return false;
+  try {
+    const dnsPromises = dns.promises;
+    const withTimeout = <T>(p: Promise<T>, ms = 1200): Promise<T | 'timeout'> =>
+      Promise.race([p, new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), ms))]);
+
+    const mxRes = await withTimeout(dnsPromises.resolveMx(domain));
+    if (mxRes === 'timeout') return true;
+    if (Array.isArray(mxRes) && mxRes.length > 0) return true;
+    return true;
+  } catch (err: any) {
+    const code = String(err?.code || '');
+    if (code === 'ENOTFOUND' || code === 'ENODATA' || code === 'NXDOMAIN') {
+      try {
+        const aRes = await Promise.race([
+          dns.promises.resolve4(domain),
+          new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), 1000)),
+        ]);
+        if (aRes === 'timeout') return true;
+        return Array.isArray(aRes) && aRes.length > 0;
+      } catch (aErr: any) {
+        const aCode = String(aErr?.code || '');
+        if (aCode === 'ENOTFOUND' || aCode === 'ENODATA' || aCode === 'NXDOMAIN') {
+          return false;
+        }
+        return true;
+      }
+    }
+    return true;
+  }
+}
+
+const inFlightSchoolRequestSubmissions = new Set<string>();
+
 function getSchoolRequestRecipients(requestRow: { demandeur_email?: string | null; email_ecole?: string | null }): string[] {
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   const unique = new Set<string>();
   const candidates = [requestRow?.demandeur_email, requestRow?.email_ecole];
   for (const raw of candidates) {
     const clean = String(raw || '').trim().toLowerCase();
-    if (clean && emailRegex.test(clean)) {
+    if (clean && isConformantEmail(clean)) {
       unique.add(clean);
     }
   }
@@ -2023,6 +2273,7 @@ async function processAutoRejection() {
 
     for (const req of requests) {
       const reason = "Demande rejetée automatiquement après 24H d'inactivité ou absence de validation.";
+      const autoRejectedAt = new Date().toISOString();
       db.prepare(`
         UPDATE school_creation_requests 
         SET statut = 'rejected', 
@@ -2031,6 +2282,15 @@ async function processAutoRejection() {
             updated_at = CURRENT_TIMESTAMP 
         WHERE id = ?
       `).run(reason, req.id);
+
+      archiveSchoolRequestRecord(
+        { ...req, statut: 'rejected', motif_rejet: reason, auto_rejected_at: autoRejectedAt },
+        {
+          archiveType: 'rejected',
+          reason,
+          actor: { id: null, email: 'system@megafixa.com', nom: 'Système (Auto-Rejet 24H)' }
+        }
+      );
 
       console.log(`[Auto-Rejection] Request ${req.reference} rejected after 24h.`);
 
@@ -4585,6 +4845,8 @@ ensureColumn('school_info', 'ai_provider', "TEXT DEFAULT 'gemini'");
 ensureColumn('school_info', 'ai_email', 'TEXT');
 ensureColumn('school_info', 'frais_adhesion_bibliotheque', 'REAL DEFAULT 1000');
 ensureColumn('utilisateurs', 'must_change_password', 'INTEGER DEFAULT 0');
+ensureColumn('utilisateurs', 'default_password_changed', 'INTEGER DEFAULT 0');
+ensureColumn('utilisateurs', 'default_password_changed_at', 'DATETIME');
 ensureColumn('utilisateurs', 'question_secrete', 'TEXT');
 ensureColumn('utilisateurs', 'reponse_secrete', 'TEXT');
 ensureColumn('paiements', 'tranche', 'TEXT');
@@ -5282,7 +5544,10 @@ try {
     "CREATE INDEX IF NOT EXISTS idx_examen_notes_lookup ON examen_notes(school_id, session_id, eleve_id)",
     "CREATE INDEX IF NOT EXISTS idx_publication_res_lookup ON publication_resultats(school_id, annee_id, type_periode, periode_valeur)",
     "CREATE INDEX IF NOT EXISTS idx_deleted_schools_archive_date ON deleted_schools_archive(deleted_at)",
-    "CREATE INDEX IF NOT EXISTS idx_deleted_schools_archive_orig ON deleted_schools_archive(original_school_id)"
+    "CREATE INDEX IF NOT EXISTS idx_deleted_schools_archive_orig ON deleted_schools_archive(original_school_id)",
+    "CREATE INDEX IF NOT EXISTS idx_school_requests_archive_type ON school_requests_archive(archive_type, archived_at)",
+    "CREATE INDEX IF NOT EXISTS idx_school_requests_archive_ref ON school_requests_archive(reference)",
+    "CREATE INDEX IF NOT EXISTS idx_school_onboarding_prefs_lookup ON school_onboarding_preferences(school_id, user_id, step_key)"
   ];
   for (const sql of indexStatements) {
     try {
@@ -5290,6 +5555,27 @@ try {
     } catch (idxErr: any) {
       console.warn(`[SQLite Index] Skipped index (${sql}):`, idxErr?.message || idxErr);
     }
+  }
+
+  // Backfill any previously rejected requests into school_requests_archive
+  try {
+    if (tableExists('school_creation_requests') && tableExists('school_requests_archive')) {
+      const rejectedRows = db.prepare("SELECT * FROM school_creation_requests WHERE statut = 'rejected'").all() as any[];
+      for (const r of rejectedRows) {
+        const alreadyArchived = db.prepare(
+          "SELECT id FROM school_requests_archive WHERE reference = ? AND restored_at IS NULL LIMIT 1"
+        ).get(String(r.reference));
+        if (!alreadyArchived) {
+          archiveSchoolRequestRecord(r, {
+            archiveType: 'rejected',
+            reason: r.motif_rejet || (r.auto_rejected_at ? "Demande rejetée automatiquement après 24H." : "Demande rejetée."),
+            actor: { id: null, email: 'archive@megafixa.com', nom: r.auto_rejected_at ? 'Système (Auto-Rejet 24H)' : 'Super Administrateur' }
+          });
+        }
+      }
+    }
+  } catch (backfillErr) {
+    console.warn('[Archive Backfill] Notice:', backfillErr);
   }
 } catch {}
 
@@ -6649,12 +6935,29 @@ async function startServer() {
     }
   }
 
-  // Database Initialization & Cloud SQL Hydration
+  // Database Initialization (local fast boot; Cloud SQL hydration warms in background + /api middleware)
   try {
     await initializeDatabase();
-    await ensureCloudSqlHydrated();
   } catch (e) {
     console.error("Database initialization failed:", e);
+  }
+  const initialHydrationPromise = ensureCloudSqlHydrated().catch((e) => {
+    console.warn("Background Cloud SQL hydration notice:", e?.message || e);
+  });
+
+  const vitePromise = process.env.NODE_ENV !== "production"
+    ? createViteServer({
+        server: {
+          middlewareMode: true,
+          hmr: false
+        },
+        appType: "spa",
+      })
+    : null;
+  if (vitePromise) {
+    vitePromise.catch((err) => {
+      console.error("Vite dev server initialization error:", err);
+    });
   }
 
   const app = express();
@@ -6686,7 +6989,14 @@ async function startServer() {
   // Lazy Cloud SQL hydration + auto-persist mutations + propagate build/data version headers
   app.use('/api', async (req: any, res: any, next: any) => {
     capturePublicOriginFromReq(req);
-    await ensureCloudSqlHydrated();
+    const reqPath = req.path || '';
+    if (reqPath !== '/health' && reqPath !== '/app-version' && reqPath !== '/offline/status') {
+      await Promise.race([
+        ensureCloudSqlHydrated().catch(() => {}),
+        initialHydrationPromise,
+        new Promise((resolve) => setTimeout(resolve, 6000)),
+      ]);
+    }
     res.setHeader('X-App-Build-Version', APP_BUILD_ID);
     res.setHeader('X-App-Data-Version', String(serverDataVersion));
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
@@ -7488,6 +7798,263 @@ const requireSuperAdmin = (req: any, res: any, next: any) => {
       });
     }
     return res.status(404).json({ error: "Établissement introuvable" });
+  });
+
+  // School Onboarding Status & Reminder Preferences (triggered after default password modification)
+  app.get("/api/school/onboarding-status", authenticateToken, (req: any, res) => {
+    try {
+      const userId = Number(req.userId || req.user?.id || 0);
+      const schoolId = Number(req.schoolId || req.user?.schoolId || 0);
+      const userRow = db.prepare(
+        "SELECT id, role, is_first_login, must_change_password, default_password_changed, default_password_changed_at, school_id FROM utilisateurs WHERE id = ?"
+      ).get(userId) as any;
+
+      if (!userRow || !schoolId) {
+        return res.json({ eligible: false, reason: 'no_school', steps: [] });
+      }
+
+      const roleLower = String(userRow.role || '').toLowerCase();
+      if (!['admin', 'direction', 'fonde'].includes(roleLower)) {
+        return res.json({ eligible: false, reason: 'role_not_admin', steps: [] });
+      }
+
+      // Only trigger AFTER default password has been modified
+      const mustChange = userRow.must_change_password === 1 || userRow.is_first_login === 1;
+      if (mustChange) {
+        return res.json({ eligible: false, reason: 'password_change_required', steps: [] });
+      }
+
+      const schoolRow = db.prepare("SELECT id, nom, logo, telephone, adresse, created_at FROM school_info WHERE id = ?").get(schoolId) as any;
+      if (!schoolRow) {
+        return res.json({ eligible: false, reason: 'school_not_found', steps: [] });
+      }
+
+      const safeCountBySchool = (sql: string): number => {
+        try {
+          const row = db.prepare(sql).get(schoolId) as any;
+          return Number(row?.count || 0);
+        } catch {
+          return 0;
+        }
+      };
+
+      const yearsCount = safeCountBySchool("SELECT COUNT(*) as count FROM annees_scolaires WHERE school_id = ?");
+      const classesCount = safeCountBySchool("SELECT COUNT(*) as count FROM classes WHERE school_id = ?");
+      const planningCount = safeCountBySchool("SELECT COUNT(*) as count FROM activites_scolaires WHERE school_id = ?");
+      const subjectsCount = safeCountBySchool("SELECT COUNT(*) as count FROM matieres WHERE school_id = ?");
+      const teachersCount = safeCountBySchool("SELECT COUNT(*) as count FROM enseignants WHERE school_id = ?");
+      const studentsCount = safeCountBySchool("SELECT COUNT(*) as count FROM eleves WHERE school_id = ?");
+      const timetableCount = safeCountBySchool("SELECT COUNT(*) as count FROM emplois_du_temps WHERE school_id = ?");
+
+      const hasLogo = Boolean(schoolRow.logo && String(schoolRow.logo).trim().length > 10);
+      const hasContact = Boolean(schoolRow.telephone && String(schoolRow.telephone).trim().length >= 6 && schoolRow.adresse && String(schoolRow.adresse).trim().length >= 3);
+      const identityCompleted = hasLogo && hasContact;
+
+      const prefRows = tableExists('school_onboarding_preferences')
+        ? (db.prepare(
+            "SELECT step_key, dismissed_permanently, snooze_until_ms FROM school_onboarding_preferences WHERE school_id = ? AND user_id = ?"
+          ).all(schoolId, userId) as any[])
+        : [];
+      const prefsMap = new Map<string, { dismissedPermanently: boolean; snoozeUntilMs: number }>();
+      for (const p of prefRows) {
+        prefsMap.set(String(p.step_key), {
+          dismissedPermanently: Number(p.dismissed_permanently) === 1,
+          snoozeUntilMs: Number(p.snooze_until_ms || 0)
+        });
+      }
+
+      const rawSteps = [
+        {
+          key: 'academic_year',
+          priority: 1,
+          badge: 'Étape 1 · Prioritaire',
+          title: 'Créez votre première année scolaire',
+          subtitle: `Initialisez le calendrier de ${schoolRow.nom}`,
+          description: 'Aucune année scolaire n’est encore enregistrée. Créez dès maintenant votre première année (ex : 2025-2026) pour activer les inscriptions, classes et bulletins.',
+          ctaLabel: 'Créer l’année scolaire',
+          route: '/parametres?tab=general&action=new-year',
+          tickerText: `Action requise : Créez votre première année scolaire pour démarrer la gestion de ${schoolRow.nom}`,
+          completed: yearsCount > 0,
+          accent: 'indigo'
+        },
+        {
+          key: 'classes',
+          priority: 2,
+          badge: 'Étape 2 · Structure Pédagogique',
+          title: 'Créez vos premières classes',
+          subtitle: 'Maternelle, Primaire, Collège ou Lycée',
+          description: 'Aucune classe n’existe encore dans votre établissement. Créez vos classes et définissez les frais de scolarité pour accueillir vos élèves.',
+          ctaLabel: 'Créer une classe',
+          route: '/classes',
+          tickerText: 'Rappel : Aucune classe n’est encore créée — ajoutez vos classes et tarifs de scolarité',
+          completed: classesCount > 0,
+          accent: 'emerald'
+        },
+        {
+          key: 'year_planning',
+          priority: 3,
+          badge: 'Étape 3 · Calendrier & Activités',
+          title: 'Planifiez votre année scolaire',
+          subtitle: 'Trimestres, devoirs, conseils et événements',
+          description: 'La planification annuelle de votre établissement est vide. Planifiez vos périodes, examens et activités clés pour guider toute l’équipe pédagogique.',
+          ctaLabel: 'Planifier l’année',
+          route: '/parametres?tab=general&action=open-planning',
+          tickerText: 'Planification de l’année : Ajoutez vos activités trimestrielles et dates clés dans le calendrier scolaire',
+          completed: planningCount > 0,
+          accent: 'amber'
+        },
+        {
+          key: 'school_identity',
+          priority: 4,
+          badge: 'Configuration Essentielle',
+          title: 'Personnalisez l’identité & le logo officiel',
+          subtitle: 'Cachet, logo et coordonnées sur les documents',
+          description: 'Ajoutez le logo et les coordonnées complètes de votre établissement afin que vos bulletins, reçus QR et attestations soient officiellement certifiés.',
+          ctaLabel: 'Configurer l’identité',
+          route: '/ecole',
+          tickerText: 'Conseil : Ajoutez le logo officiel et les coordonnées de l’école pour personnaliser vos bulletins et reçus',
+          completed: identityCompleted,
+          accent: 'sky'
+        },
+        {
+          key: 'subjects',
+          priority: 5,
+          badge: 'Configuration Essentielle',
+          title: 'Paramétrez vos matières & coefficients',
+          subtitle: 'Disciplines par cycle et coefficients',
+          description: 'Vérifiez et organisez les matières enseignées ainsi que leurs coefficients par classe pour préparer les saisies de notes.',
+          ctaLabel: 'Gérer les matières',
+          route: '/matieres',
+          tickerText: 'Pédagogie : Paramétrez vos matières et coefficients pour automatiser le calcul des moyennes',
+          completed: subjectsCount > 0,
+          accent: 'violet'
+        },
+        {
+          key: 'teachers',
+          priority: 6,
+          badge: 'Équipe Pédagogique',
+          title: 'Enregistrez vos enseignants',
+          subtitle: 'Comptes professeurs et maîtres titulaires',
+          description: 'Aucun enseignant n’est encore enregistré. Créez les fiches enseignants pour leur attribuer des classes et générer leurs accès.',
+          ctaLabel: 'Ajouter des enseignants',
+          route: '/enseignants',
+          tickerText: 'Équipe : Enregistrez vos enseignants et générez leurs accès personnels en un clic',
+          completed: teachersCount > 0,
+          accent: 'teal'
+        },
+        {
+          key: 'students',
+          priority: 7,
+          badge: 'Scolarité & Effectifs',
+          title: 'Inscrivez vos premiers élèves',
+          subtitle: 'Dossiers apprenants, matricules et parents',
+          description: 'Commencez les inscriptions ou importez votre liste d’élèves pour suivre la scolarité, les présences et les paiements.',
+          ctaLabel: 'Inscrire des élèves',
+          route: '/eleves',
+          tickerText: 'Inscriptions : Ajoutez ou importez vos premiers élèves pour ouvrir le suivi de scolarité et les encaissements',
+          completed: studentsCount > 0,
+          accent: 'blue'
+        },
+        {
+          key: 'timetable',
+          priority: 8,
+          badge: 'Organisation Hebdomadaire',
+          title: 'Structurez les emplois du temps',
+          subtitle: 'Grille horaire et attribution des salles',
+          description: 'Planifiez les créneaux horaires hebdomadaires de chaque classe et suivez l’exécution des cours en temps réel.',
+          ctaLabel: 'Créer l’emploi du temps',
+          route: '/emploi-du-temps',
+          tickerText: 'Emploi du temps : Planifiez les séances de cours hebdomadaires de vos classes',
+          completed: timetableCount > 0,
+          accent: 'orange'
+        }
+      ];
+
+      const steps = rawSteps.map((step) => {
+        const pref = prefsMap.get(step.key);
+        return {
+          ...step,
+          dismissedPermanently: pref?.dismissedPermanently ?? false,
+          snoozeUntilMs: pref?.snoozeUntilMs ?? 0
+        };
+      });
+
+      res.json({
+        eligible: true,
+        schoolId,
+        schoolName: schoolRow.nom,
+        defaultPasswordChanged: Number(userRow.default_password_changed || 0) === 1,
+        defaultPasswordChangedAt: userRow.default_password_changed_at || null,
+        counts: {
+          years: yearsCount,
+          classes: classesCount,
+          planning: planningCount,
+          subjects: subjectsCount,
+          teachers: teachersCount,
+          students: studentsCount,
+          timetable: timetableCount
+        },
+        steps
+      });
+    } catch (err: any) {
+      console.error('Onboarding status error:', err);
+      res.status(500).json({ error: 'Impossible de charger le statut de configuration.' });
+    }
+  });
+
+  app.post("/api/school/onboarding-preferences", authenticateToken, (req: any, res) => {
+    try {
+      const userId = Number(req.userId || req.user?.id || 0);
+      const schoolId = Number(req.schoolId || req.user?.schoolId || 0);
+      const { step_key, action, snooze_minutes } = req.body || {};
+
+      if (!userId || !schoolId || !step_key) {
+        return res.status(400).json({ error: 'Paramètres manquants.' });
+      }
+
+      const cleanKey = String(step_key).trim().slice(0, 80);
+      const existing = db.prepare(
+        "SELECT * FROM school_onboarding_preferences WHERE school_id = ? AND user_id = ? AND step_key = ?"
+      ).get(schoolId, userId, cleanKey) as any;
+
+      let dismissedPermanently = existing ? Number(existing.dismissed_permanently || 0) : 0;
+      let snoozeUntilMs = existing ? Number(existing.snooze_until_ms || 0) : 0;
+
+      if (action === 'dismiss_permanently') {
+        dismissedPermanently = 1;
+        snoozeUntilMs = 0;
+      } else if (action === 'snooze_later') {
+        const mins = Math.max(1, Math.min(1440, Number(snooze_minutes || 5)));
+        snoozeUntilMs = Date.now() + mins * 60 * 1000;
+      } else if (action === 'reset') {
+        dismissedPermanently = 0;
+        snoozeUntilMs = 0;
+      } else {
+        return res.status(400).json({ error: 'Action invalide.' });
+      }
+
+      db.prepare(`
+        INSERT INTO school_onboarding_preferences (school_id, user_id, step_key, dismissed_permanently, snooze_until_ms, updated_at)
+        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(school_id, user_id, step_key) DO UPDATE SET
+          dismissed_permanently = excluded.dismissed_permanently,
+          snooze_until_ms = excluded.snooze_until_ms,
+          updated_at = CURRENT_TIMESTAMP
+      `).run(schoolId, userId, cleanKey, dismissedPermanently, snoozeUntilMs);
+
+      saveLocalCheckpointSync();
+      scheduleCheckpoint('onboarding_preferences', 1500);
+
+      res.json({
+        success: true,
+        step_key: cleanKey,
+        dismissedPermanently: dismissedPermanently === 1,
+        snoozeUntilMs
+      });
+    } catch (err: any) {
+      console.error('Onboarding preference save error:', err);
+      res.status(500).json({ error: 'Erreur lors de la sauvegarde de la préférence.' });
+    }
   });
 
   // Notifications Helpers
@@ -22437,10 +23004,16 @@ function executeYearTransition(
 
     const hashedPassword = bcrypt.hashSync(password, 10);
     const hashedAnswer = answer ? bcrypt.hashSync(answer.toString().toLowerCase().trim(), 10) : null;
-    db.prepare("UPDATE utilisateurs SET mot_de_passe = ?, question_secrete = ?, reponse_secrete = ?, otp_code = NULL, otp_expiry = NULL, is_first_login = 0 WHERE id = ?")
-      .run(hashedPassword, question || null, hashedAnswer, user.id);
+    db.prepare(`
+      UPDATE utilisateurs
+      SET mot_de_passe = ?, question_secrete = ?, reponse_secrete = ?, otp_code = NULL, otp_expiry = NULL,
+          is_first_login = 0, must_change_password = 0, default_password_changed = 1, default_password_changed_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(hashedPassword, question || null, hashedAnswer, user.id);
 
     logActivity(user.id, 'SETUP_PASSWORD', 'USER', user.id, { email }, user.school_id);
+    saveLocalCheckpointSync();
+    scheduleCheckpoint('setup_password', 1500);
     res.json({ success: true });
   });
 
@@ -22567,7 +23140,8 @@ function executeYearTransition(
     const hashedNewPassword = bcrypt.hashSync(newPassword, 10);
     db.prepare(`
       UPDATE utilisateurs 
-      SET mot_de_passe = ?, mot_de_passe_initial = NULL, is_first_login = 0, must_change_password = 0
+      SET mot_de_passe = ?, mot_de_passe_initial = NULL, is_first_login = 0, must_change_password = 0,
+          default_password_changed = 1, default_password_changed_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `).run(hashedNewPassword, user.id);
 
@@ -22578,6 +23152,8 @@ function executeYearTransition(
     }
 
     logActivity(user.id, 'CHANGE_PASSWORD', 'USER', user.id, { email: user.email }, user.school_id);
+    saveLocalCheckpointSync();
+    scheduleCheckpoint('change_password', 1500);
     res.json({ success: true, message: "Mot de passe modifié avec succès !" });
   });
 
@@ -32799,6 +33375,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
 
   // Soumission d'une nouvelle demande de création de compte école
   app.post("/api/public/school-requests", async (req, res) => {
+    const lockKeys: string[] = [];
     try {
       const {
         nom_ecole,
@@ -32816,19 +33393,221 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         demandeur_telephone,
         demandeur_whatsapp,
         notes
-      } = req.body;
+      } = req.body || {};
 
-      if (!nom_ecole || !nom_ecole.trim()) {
-        return res.status(400).json({ error: "Le nom de l'établissement est requis." });
+      const cleanSchoolName = String(nom_ecole || '').trim();
+      const cleanPays = String(pays || 'Bénin').trim() || 'Bénin';
+      const cleanDemandeurNom = String(demandeur_nom || '').trim();
+      const cleanDemandeurEmail = String(demandeur_email || '').trim().toLowerCase();
+      const cleanSchoolEmail = String(email_ecole || '').trim().toLowerCase();
+      const cleanDemandeurTel = String(demandeur_telephone || '').trim();
+      const cleanSchoolTel = String(telephone_ecole || '').trim();
+      const cleanWhatsapp = String(demandeur_whatsapp || '').trim();
+
+      if (!cleanSchoolName || cleanSchoolName.length < 3) {
+        return res.status(400).json({
+          success: false,
+          code: "INVALID_SCHOOL_NAME",
+          error: "Le nom de l'établissement est requis (minimum 3 caractères)."
+        });
       }
-      if (!demandeur_nom || !demandeur_nom.trim()) {
-        return res.status(400).json({ error: "Le nom du demandeur (directeur/fondateur) est requis." });
+      if (cleanSchoolName.length > 200 || !/[a-zA-ZÀ-ÿ]/.test(cleanSchoolName)) {
+        return res.status(400).json({
+          success: false,
+          code: "INVALID_SCHOOL_NAME",
+          error: "Veuillez saisir un nom d'établissement valide."
+        });
       }
-      if (!demandeur_email || !demandeur_email.trim()) {
-        return res.status(400).json({ error: "L'adresse email du demandeur est requise." });
+      if (!cleanDemandeurNom || cleanDemandeurNom.length < 2 || cleanDemandeurNom.length > 150) {
+        return res.status(400).json({
+          success: false,
+          code: "INVALID_REQUESTER_NAME",
+          error: "Le nom complet du demandeur (directeur/fondateur) est requis (minimum 2 caractères)."
+        });
       }
-      if (!demandeur_telephone || !demandeur_telephone.trim()) {
-        return res.status(400).json({ error: "Le numéro de téléphone du demandeur est requis." });
+      if (!cleanDemandeurEmail) {
+        return res.status(400).json({
+          success: false,
+          code: "INVALID_EMAIL",
+          error: "L'adresse email du demandeur est requise."
+        });
+      }
+      if (!isConformantEmail(cleanDemandeurEmail)) {
+        return res.status(400).json({
+          success: false,
+          code: "INVALID_EMAIL",
+          error: `L'adresse email « ${cleanDemandeurEmail} » n'est pas conforme. Veuillez saisir une adresse email valide (ex: nom@domaine.com).`
+        });
+      }
+      const demandeurDomainOk = await verifyEmailDomainIfOnline(cleanDemandeurEmail);
+      if (!demandeurDomainOk) {
+        return res.status(400).json({
+          success: false,
+          code: "INVALID_EMAIL_DOMAIN",
+          error: `Le domaine de l'adresse email « ${cleanDemandeurEmail} » semble introuvable ou non conforme pour recevoir des messages. Veuillez vérifier votre adresse.`
+        });
+      }
+
+      if (cleanSchoolEmail) {
+        if (!isConformantEmail(cleanSchoolEmail)) {
+          return res.status(400).json({
+            success: false,
+            code: "INVALID_SCHOOL_EMAIL",
+            error: `L'adresse email de l'école « ${cleanSchoolEmail} » n'est pas conforme. Veuillez saisir une adresse email valide (ex: contact@ecole.com).`
+          });
+        }
+        const schoolDomainOk = await verifyEmailDomainIfOnline(cleanSchoolEmail);
+        if (!schoolDomainOk) {
+          return res.status(400).json({
+            success: false,
+            code: "INVALID_SCHOOL_EMAIL_DOMAIN",
+            error: `Le domaine de l'adresse email de l'école « ${cleanSchoolEmail} » semble introuvable. Veuillez vérifier l'adresse saisie.`
+          });
+        }
+      }
+
+      const demandeurTelDigits = cleanDemandeurTel.replace(/\D/g, '');
+      if (!cleanDemandeurTel || demandeurTelDigits.length < 8 || cleanDemandeurTel.length > 25) {
+        return res.status(400).json({
+          success: false,
+          code: "INVALID_PHONE",
+          error: "Le numéro de téléphone du demandeur est requis et doit contenir au moins 8 chiffres."
+        });
+      }
+      if (cleanSchoolTel && cleanSchoolTel.replace(/\D/g, '').length < 8) {
+        return res.status(400).json({
+          success: false,
+          code: "INVALID_SCHOOL_PHONE",
+          error: "Le numéro de téléphone de l'école doit contenir au moins 8 chiffres."
+        });
+      }
+      if (cleanWhatsapp && cleanWhatsapp.replace(/\D/g, '').length < 8) {
+        return res.status(400).json({
+          success: false,
+          code: "INVALID_WHATSAPP",
+          error: "Le numéro WhatsApp saisi doit contenir au moins 8 chiffres."
+        });
+      }
+
+      // Guard against simultaneous duplicate submissions
+      const candidateLockKeys = [
+        `email:${cleanDemandeurEmail}`,
+        ...(cleanSchoolEmail ? [`email:${cleanSchoolEmail}`] : []),
+        `school:${cleanSchoolName.toLowerCase()}::${cleanPays.toLowerCase()}`,
+      ];
+      if (candidateLockKeys.some((k) => inFlightSchoolRequestSubmissions.has(k))) {
+        return res.status(409).json({
+          success: false,
+          code: "REQUEST_ALREADY_PENDING",
+          error: "Une demande est déjà en cours d'envoi pour ces informations. Veuillez patienter quelques secondes."
+        });
+      }
+      for (const k of candidateLockKeys) {
+        inFlightSchoolRequestSubmissions.add(k);
+        lockKeys.push(k);
+      }
+
+      // 1. Check if an account already exists under these email addresses or school name
+      const emailsToCheck = Array.from(new Set([cleanDemandeurEmail, ...(cleanSchoolEmail ? [cleanSchoolEmail] : [])]));
+      for (const emailCandidate of emailsToCheck) {
+        const existingUser = db.prepare(
+          "SELECT id, email, school_id, role FROM utilisateurs WHERE LOWER(TRIM(email)) = ? LIMIT 1"
+        ).get(emailCandidate) as any;
+        if (existingUser) {
+          return res.status(409).json({
+            success: false,
+            code: "ACCOUNT_ALREADY_EXISTS",
+            email: emailCandidate,
+            error: `Un compte existe déjà sous cette adresse email (${emailCandidate}). Veuillez vous connecter directement à votre espace.`
+          });
+        }
+
+        const existingSchoolByEmail = db.prepare(
+          "SELECT id, nom, email, code_ecole FROM school_info WHERE LOWER(TRIM(email)) = ? LIMIT 1"
+        ).get(emailCandidate) as any;
+        if (existingSchoolByEmail) {
+          return res.status(409).json({
+            success: false,
+            code: "ACCOUNT_ALREADY_EXISTS",
+            email: emailCandidate,
+            error: `Un compte établissement (« ${existingSchoolByEmail.nom} ») existe déjà sous cette adresse email (${emailCandidate}). Veuillez vous connecter directement.`
+          });
+        }
+      }
+
+      const existingSchoolByName = db.prepare(
+        "SELECT id, nom, pays FROM school_info WHERE LOWER(TRIM(nom)) = ? AND LOWER(TRIM(COALESCE(pays, 'Bénin'))) = ? LIMIT 1"
+      ).get(cleanSchoolName.toLowerCase(), cleanPays.toLowerCase()) as any;
+      if (existingSchoolByName) {
+        return res.status(409).json({
+          success: false,
+          code: "ACCOUNT_ALREADY_EXISTS",
+          error: `Un compte établissement existe déjà pour « ${existingSchoolByName.nom} ». Veuillez vous connecter directement à votre espace.`
+        });
+      }
+
+      // 2. Check if a request already exists for these email addresses (pending or approved)
+      for (const emailCandidate of emailsToCheck) {
+        const existingReqByEmail = db.prepare(`
+          SELECT id, reference, nom_ecole, statut, demandeur_email, email_ecole
+          FROM school_creation_requests
+          WHERE statut IN ('pending', 'payment_pending', 'payment_confirmed', 'approved')
+            AND (
+              LOWER(TRIM(demandeur_email)) = ?
+              OR (email_ecole IS NOT NULL AND TRIM(email_ecole) != '' AND LOWER(TRIM(email_ecole)) = ?)
+            )
+          ORDER BY id DESC LIMIT 1
+        `).get(emailCandidate, emailCandidate) as any;
+
+        if (existingReqByEmail) {
+          if (existingReqByEmail.statut === 'approved') {
+            return res.status(409).json({
+              success: false,
+              code: "ACCOUNT_ALREADY_EXISTS",
+              reference: existingReqByEmail.reference,
+              statut: existingReqByEmail.statut,
+              email: emailCandidate,
+              error: `Un compte existe déjà sous cette adresse email (${emailCandidate}) suite à la validation de la demande ${existingReqByEmail.reference}. Veuillez vous connecter.`
+            });
+          }
+          return res.status(409).json({
+            success: false,
+            code: "REQUEST_ALREADY_PENDING",
+            reference: existingReqByEmail.reference,
+            statut: existingReqByEmail.statut,
+            email: emailCandidate,
+            error: `Une demande est déjà soumise pour cette adresse email (${emailCandidate}) et est actuellement en cours de traitement (Référence : ${existingReqByEmail.reference}). Vous ne pouvez pas la soumettre deux fois.`
+          });
+        }
+      }
+
+      // 3. Check duplicate request by school name + country
+      const existingReqBySchool = db.prepare(`
+        SELECT id, reference, nom_ecole, statut
+        FROM school_creation_requests
+        WHERE statut IN ('pending', 'payment_pending', 'payment_confirmed', 'approved')
+          AND LOWER(TRIM(nom_ecole)) = ?
+          AND LOWER(TRIM(COALESCE(pays, 'Bénin'))) = ?
+        ORDER BY id DESC LIMIT 1
+      `).get(cleanSchoolName.toLowerCase(), cleanPays.toLowerCase()) as any;
+
+      if (existingReqBySchool) {
+        if (existingReqBySchool.statut === 'approved') {
+          return res.status(409).json({
+            success: false,
+            code: "ACCOUNT_ALREADY_EXISTS",
+            reference: existingReqBySchool.reference,
+            statut: existingReqBySchool.statut,
+            error: `Un compte existe déjà pour l'établissement « ${existingReqBySchool.nom_ecole} » (Référence : ${existingReqBySchool.reference}). Veuillez vous connecter.`
+          });
+        }
+        return res.status(409).json({
+          success: false,
+          code: "REQUEST_ALREADY_PENDING",
+          reference: existingReqBySchool.reference,
+          statut: existingReqBySchool.statut,
+          error: `Une demande est déjà soumise pour l'établissement « ${existingReqBySchool.nom_ecole} » et est en cours de traitement (Référence : ${existingReqBySchool.reference}).`
+        });
       }
 
       // Generate unique reference
@@ -32850,21 +33629,21 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
 
       const result = stmt.run(
         cleanRef,
-        nom_ecole.trim(),
+        cleanSchoolName,
         type_etablissement || 'Général',
-        pays || 'Bénin',
-        ville || '',
-        adresse || '',
-        telephone_ecole || '',
-        email_ecole ? email_ecole.trim().toLowerCase() : '',
+        cleanPays,
+        String(ville || '').trim(),
+        String(adresse || '').trim(),
+        cleanSchoolTel,
+        cleanSchoolEmail,
         finalPlanName,
         finalEstimatedAmount,
-        demandeur_nom.trim(),
+        cleanDemandeurNom,
         demandeur_fonction || 'Directeur / Fondateur',
-        demandeur_email.trim().toLowerCase(),
-        demandeur_telephone.trim(),
-        demandeur_whatsapp ? demandeur_whatsapp.trim() : demandeur_telephone.trim(),
-        notes || ''
+        cleanDemandeurEmail,
+        cleanDemandeurTel,
+        cleanWhatsapp || cleanDemandeurTel,
+        String(notes || '').trim()
       );
 
       const requestId = Number(result.lastInsertRowid);
@@ -32934,6 +33713,10 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
     } catch (err: any) {
       console.error("Erreur création demande école:", err);
       res.status(500).json({ error: "Erreur lors de l'enregistrement de la demande : " + (err.message || err) });
+    } finally {
+      for (const k of lockKeys) {
+        inFlightSchoolRequestSubmissions.delete(k);
+      }
     }
   });
 
@@ -33073,13 +33856,24 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       }
 
       const cleanEmail = request.demandeur_email.trim().toLowerCase();
+      const cleanSchoolEmail = String(request.email_ecole || '').trim().toLowerCase();
 
-      // Check if user email already exists in system
+      // Check if user email or school email already exists in system
       const existingUser = db.prepare("SELECT id, school_id FROM utilisateurs WHERE LOWER(TRIM(email)) = ?").get(cleanEmail) as any;
       if (existingUser) {
-        return res.status(400).json({
-          error: `L'adresse email (${cleanEmail}) est déjà associée à un compte utilisateur existant (École ID: ${existingUser.school_id || 'N/A'}).`
+        return res.status(409).json({
+          error: `Un compte existe déjà sous cette adresse email (${cleanEmail}) (École ID: ${existingUser.school_id || 'N/A'}).`
         });
+      }
+      if (cleanSchoolEmail && cleanSchoolEmail !== cleanEmail) {
+        const existingSchoolEmailOwner = db.prepare(
+          "SELECT id, nom FROM school_info WHERE LOWER(TRIM(email)) = ? LIMIT 1"
+        ).get(cleanSchoolEmail) as any;
+        if (existingSchoolEmailOwner) {
+          return res.status(409).json({
+            error: `Un compte établissement (« ${existingSchoolEmailOwner.nom} ») existe déjà sous l'adresse email ${cleanSchoolEmail}.`
+          });
+        }
       }
 
       // Generate unique school code
@@ -33458,6 +34252,13 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         WHERE id = ?
       `).run(finalReason, requestId);
 
+      const updatedRejectedReq = db.prepare("SELECT * FROM school_creation_requests WHERE id = ?").get(requestId) as any;
+      archiveSchoolRequestRecord(updatedRejectedReq || { ...request, statut: 'rejected', motif_rejet: finalReason }, {
+        archiveType: 'rejected',
+        reason: finalReason,
+        actor: (req as any).user || null
+      });
+
       saveLocalCheckpointSync();
       (req as any)._checkpointSaved = true;
       await saveCheckpoint('reject_school_request');
@@ -33495,25 +34296,183 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       res.json({
         success: true,
         emailStatus: rejectEmailStatus,
-        message: "La demande a été rejetée et le demandeur a été notifié."
+        message: "La demande a été rejetée, archivée et le demandeur a été notifié."
       });
     } catch (err: any) {
       res.status(500).json({ error: "Erreur lors du rejet de la demande : " + (err.message || err) });
     }
   });
 
-  // Suppression d'une demande par le Super Admin
+  // Suppression d'une demande par le Super Admin (avec archivage permanent)
   app.delete("/api/super-admin/school-requests/:id", authenticateToken, requireSuperAdmin, async (req, res) => {
     try {
       const requestId = parseInt(req.params.id, 10);
-      db.prepare("DELETE FROM school_creation_requests WHERE id = ?").run(requestId);
+      const existingReq = db.prepare("SELECT * FROM school_creation_requests WHERE id = ?").get(requestId) as any;
+      if (!existingReq) {
+        return res.status(404).json({ error: "Demande introuvable." });
+      }
+
+      const complaints = tableExists('reclamations_demandes')
+        ? (db.prepare("SELECT * FROM reclamations_demandes WHERE request_id = ?").all(requestId) as any[])
+        : [];
+      const bodyReason = String((req.body && req.body.reason) || '').trim();
+      const archiveReason = bodyReason || existingReq.motif_rejet || 'Supprimée par le Super Administrateur.';
+
+      db.transaction(() => {
+        archiveSchoolRequestRecord(existingReq, {
+          archiveType: 'deleted',
+          reason: archiveReason,
+          actor: (req as any).user || null,
+          complaints
+        });
+        db.prepare("DELETE FROM school_creation_requests WHERE id = ?").run(requestId);
+      })();
+
       markExplicitDeletion();
       saveLocalCheckpointSync();
       (req as any)._checkpointSaved = true;
       await saveCheckpoint('delete_school_request');
-      res.json({ success: true, message: "Demande supprimée." });
+      res.json({ success: true, message: "Demande supprimée et conservée dans les archives." });
     } catch (err: any) {
       res.status(500).json({ error: "Erreur lors de la suppression de la demande." });
+    }
+  });
+
+  // Liste des demandes archivées (supprimées et rejetées)
+  app.get("/api/super-admin/school-requests/archives", authenticateToken, requireSuperAdmin, (req, res) => {
+    try {
+      const filterType = String(req.query?.type || 'all').toLowerCase();
+      let archives = db.prepare(`
+        SELECT * FROM school_requests_archive
+        ORDER BY archived_at DESC, id DESC
+      `).all() as any[];
+
+      const stats = {
+        total: archives.length,
+        deleted: archives.filter(a => a.archive_type === 'deleted').length,
+        rejected: archives.filter(a => a.archive_type === 'rejected').length,
+        restored: archives.filter(a => Boolean(a.restored_at)).length
+      };
+
+      if (filterType === 'deleted' || filterType === 'rejected') {
+        archives = archives.filter(a => a.archive_type === filterType);
+      }
+
+      res.json({ archives, stats });
+    } catch (err: any) {
+      console.error("Erreur récupération archives demandes:", err);
+      res.status(500).json({ error: "Erreur lors de la récupération des archives de demandes." });
+    }
+  });
+
+  // Restaurer une demande archivée vers la file active
+  app.post("/api/super-admin/school-requests/archives/:archiveId/restore", authenticateToken, requireSuperAdmin, async (req, res) => {
+    try {
+      const archiveId = parseInt(req.params.archiveId, 10);
+      if (isNaN(archiveId)) {
+        return res.status(400).json({ error: "Identifiant d'archive invalide." });
+      }
+
+      const archive = db.prepare("SELECT * FROM school_requests_archive WHERE id = ?").get(archiveId) as any;
+      if (!archive) {
+        return res.status(404).json({ error: "Archive introuvable." });
+      }
+
+      const existingActive = db.prepare("SELECT id, reference FROM school_creation_requests WHERE reference = ?").get(archive.reference) as any;
+      if (existingActive && archive.archive_type === 'deleted') {
+        return res.status(409).json({ error: `Une demande active porte déjà la référence ${archive.reference}.` });
+      }
+
+      let parsedSnapshot: any = null;
+      try {
+        parsedSnapshot = JSON.parse(archive.snapshot_json);
+      } catch {}
+      const reqSnapshot = parsedSnapshot?.request || {};
+
+      let restoredId = 0;
+      const targetStatut = (archive.original_statut && ['pending', 'payment_pending', 'payment_confirmed'].includes(archive.original_statut))
+        ? archive.original_statut
+        : 'payment_pending';
+
+      db.transaction(() => {
+        if (existingActive) {
+          // If the rejected dossier is still in school_creation_requests, reopen it for processing
+          db.prepare(`
+            UPDATE school_creation_requests
+            SET statut = ?,
+                motif_rejet = NULL,
+                auto_rejected_at = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+          `).run(targetStatut, existingActive.id);
+          restoredId = existingActive.id;
+        } else {
+          const insertRes = db.prepare(`
+            INSERT INTO school_creation_requests (
+              reference, nom_ecole, type_etablissement, pays, ville, adresse,
+              telephone_ecole, email_ecole, plan_souhaite, montant_estime,
+              demandeur_nom, demandeur_fonction, demandeur_email, demandeur_telephone,
+              demandeur_whatsapp, notes, payment_method, payment_phone, payment_reference,
+              statut, admin_notes, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), CURRENT_TIMESTAMP)
+          `).run(
+            archive.reference,
+            archive.nom_ecole,
+            archive.type_etablissement || reqSnapshot.type_etablissement || 'Général',
+            archive.pays || 'Bénin',
+            archive.ville || reqSnapshot.ville || null,
+            archive.adresse || reqSnapshot.adresse || null,
+            archive.telephone_ecole || reqSnapshot.telephone_ecole || null,
+            archive.email_ecole || reqSnapshot.email_ecole || null,
+            archive.plan_souhaite || reqSnapshot.plan_souhaite || 'PRO',
+            Number(archive.montant_estime || reqSnapshot.montant_estime || 0),
+            archive.demandeur_nom,
+            archive.demandeur_fonction || reqSnapshot.demandeur_fonction || null,
+            archive.demandeur_email,
+            archive.demandeur_telephone,
+            archive.demandeur_whatsapp || reqSnapshot.demandeur_whatsapp || null,
+            reqSnapshot.notes || null,
+            archive.payment_method || reqSnapshot.payment_method || null,
+            archive.payment_phone || reqSnapshot.payment_phone || null,
+            archive.payment_reference || reqSnapshot.payment_reference || null,
+            targetStatut,
+            `Restaurée depuis les archives (${archive.archive_type}) le ${new Date().toLocaleDateString('fr-FR')}.`,
+            archive.original_created_at || reqSnapshot.created_at || null
+          );
+          restoredId = Number(insertRes.lastInsertRowid);
+
+          if (Array.isArray(parsedSnapshot?.complaints) && tableExists('reclamations_demandes')) {
+            const insertComp = db.prepare(`
+              INSERT INTO reclamations_demandes (request_id, message, statut, admin_response, created_at)
+              VALUES (?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
+            `);
+            for (const c of parsedSnapshot.complaints) {
+              insertComp.run(restoredId, c.message, c.statut || 'pending', c.admin_response || null, c.created_at || null);
+            }
+          }
+        }
+
+        db.prepare(`
+          UPDATE school_requests_archive
+          SET restored_at = CURRENT_TIMESTAMP,
+              restored_request_id = ?
+          WHERE id = ?
+        `).run(restoredId, archiveId);
+      })();
+
+      saveLocalCheckpointSync();
+      (req as any)._checkpointSaved = true;
+      await saveCheckpoint('restore_school_request_archive');
+
+      const restoredRow = db.prepare("SELECT * FROM school_creation_requests WHERE id = ?").get(restoredId);
+      res.json({
+        success: true,
+        message: `Dossier ${archive.reference} restauré vers les demandes actives.`,
+        request: restoredRow
+      });
+    } catch (err: any) {
+      console.error("Erreur restauration archive demande:", err);
+      res.status(500).json({ error: "Erreur lors de la restauration de la demande : " + (err.message || err) });
     }
   });
 
@@ -34996,15 +35955,15 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
     }
   });
 
-  if (process.env.NODE_ENV !== "production") {
-      const vite = await createViteServer({
-        server: { 
-          middlewareMode: true,
-          hmr: false
-        },
-        appType: "spa",
+  if (vitePromise) {
+      app.use(async (req, res, next) => {
+        try {
+          const vite = await vitePromise;
+          return vite.middlewares(req, res, next);
+        } catch (err) {
+          return next(err);
+        }
       });
-      app.use(vite.middlewares);
     } else {
       const candidatePaths = [
         currentDirname,

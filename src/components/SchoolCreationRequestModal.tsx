@@ -109,10 +109,16 @@ export default function SchoolCreationRequestModal({
   const [complaintText, setComplaintText] = useState('');
   const [submittingComplaint, setSubmittingComplaint] = useState(false);
   const [viewingStatus, setViewingStatus] = useState<any>(null);
+  const [submitFeedback, setSubmitFeedback] = useState<{
+    code?: string;
+    message: string;
+    reference?: string;
+  } | null>(null);
 
   // Reset states on open based on mode
   useEffect(() => {
     if (isOpen) {
+      setSubmitFeedback(null);
       setForm(prev => ({
         ...prev,
         nom_ecole: prev.nom_ecole || defaultSchoolName || '',
@@ -238,22 +244,73 @@ export default function SchoolCreationRequestModal({
   const selectedPlanDetails = getSelectedPlanDetails();
   const selectedPaymentMethod = config.payment_methods.find(m => m.id === selectedMethodId) || config.payment_methods[0];
 
+  const isValidEmailAddress = (raw: string): boolean => {
+    const clean = String(raw || '').trim().toLowerCase();
+    if (clean.length < 5 || clean.length > 254 || clean.includes('..')) return false;
+    const regex = /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/i;
+    if (!regex.test(clean)) return false;
+    const domain = clean.split('@')[1] || '';
+    const tld = domain.split('.').pop() || '';
+    return /^[a-z]{2,24}$/i.test(tld);
+  };
+
   // Submit Step 1: Create request
   const handleSubmitRequest = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!form.nom_ecole.trim()) return toast.error("Veuillez saisir le nom de l'établissement.");
-    if (!form.demandeur_nom.trim()) return toast.error("Veuillez saisir votre nom complet.");
-    if (!form.demandeur_email.trim()) return toast.error("Veuillez saisir votre adresse email.");
-    if (!form.demandeur_telephone.trim()) return toast.error("Veuillez renseigner votre numéro de téléphone.");
+    if (loading) return;
+    setSubmitFeedback(null);
+
+    const schoolName = form.nom_ecole.trim();
+    const requesterName = form.demandeur_nom.trim();
+    const requesterEmail = form.demandeur_email.trim().toLowerCase();
+    const schoolEmail = form.email_ecole.trim().toLowerCase();
+    const requesterPhone = form.demandeur_telephone.trim();
+    const schoolPhone = form.telephone_ecole.trim();
+    const whatsapp = form.sameAsPhone ? requesterPhone : (form.demandeur_whatsapp.trim() || requesterPhone);
+
+    const failValidation = (msg: string, code = 'VALIDATION_ERROR') => {
+      setSubmitFeedback({ code, message: msg });
+      toast.error(msg);
+    };
+
+    if (schoolName.length < 3 || !/[a-zA-ZÀ-ÿ]/.test(schoolName)) {
+      return failValidation("Veuillez saisir un nom d'établissement valide (minimum 3 caractères).");
+    }
+    if (requesterName.length < 2) {
+      return failValidation("Veuillez saisir votre nom complet (minimum 2 caractères).");
+    }
+    if (!requesterEmail) {
+      return failValidation("Veuillez saisir votre adresse email.");
+    }
+    if (!isValidEmailAddress(requesterEmail)) {
+      return failValidation(`L'adresse email « ${requesterEmail} » n'est pas conforme. Veuillez saisir une adresse email valide (ex: nom@domaine.com).`, 'INVALID_EMAIL');
+    }
+    if (schoolEmail && !isValidEmailAddress(schoolEmail)) {
+      return failValidation(`L'adresse email de l'école « ${schoolEmail} » n'est pas conforme. Veuillez saisir une adresse email valide.`, 'INVALID_SCHOOL_EMAIL');
+    }
+    if (!requesterPhone || requesterPhone.replace(/\D/g, '').length < 8) {
+      return failValidation("Veuillez renseigner un numéro de téléphone valide (au moins 8 chiffres).");
+    }
+    if (schoolPhone && schoolPhone.replace(/\D/g, '').length < 8) {
+      return failValidation("Le numéro de téléphone de l'école doit contenir au moins 8 chiffres.");
+    }
+    if (!form.sameAsPhone && whatsapp && whatsapp.replace(/\D/g, '').length < 8) {
+      return failValidation("Le numéro WhatsApp saisi doit contenir au moins 8 chiffres.");
+    }
 
     setLoading(true);
     try {
-      const whatsapp = form.sameAsPhone ? form.demandeur_telephone : (form.demandeur_whatsapp || form.demandeur_telephone);
       const res = await fetch('/api/public/school-requests', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           ...form,
+          nom_ecole: schoolName,
+          demandeur_nom: requesterName,
+          demandeur_email: requesterEmail,
+          email_ecole: schoolEmail,
+          demandeur_telephone: requesterPhone,
+          telephone_ecole: schoolPhone,
           demandeur_whatsapp: whatsapp,
           montant_estime: selectedPlanDetails.price
         })
@@ -261,11 +318,19 @@ export default function SchoolCreationRequestModal({
 
       const data = await res.json();
       if (!res.ok || !data.success) {
-        throw new Error(data.error || "Échec de l'envoi de la demande");
+        const errMessage = data.error || "Échec de l'envoi de la demande";
+        setSubmitFeedback({
+          code: data.code,
+          message: errMessage,
+          reference: data.reference
+        });
+        toast.error(errMessage);
+        return;
       }
 
+      setSubmitFeedback(null);
       setCreatedRequest({ ...data.request, emailStatus: data.emailStatus });
-      setPaymentPhone(form.demandeur_telephone);
+      setPaymentPhone(requesterPhone);
       const sentTargets = Array.isArray(data?.emailStatus?.recipients) ? data.emailStatus.recipients : [];
       if (data?.emailStatus?.sent && sentTargets.length > 0) {
         toast.success(`Demande enregistrée ! Confirmation envoyée par email à : ${sentTargets.join(', ')}`);
@@ -274,7 +339,9 @@ export default function SchoolCreationRequestModal({
       }
       setStep(2);
     } catch (err: any) {
-      toast.error(err.message || "Erreur de connexion");
+      const errMessage = err.message || "Erreur de connexion";
+      setSubmitFeedback({ message: errMessage });
+      toast.error(errMessage);
     } finally {
       setLoading(false);
     }
@@ -712,6 +779,72 @@ export default function SchoolCreationRequestModal({
                   Aucun mot de passe n'est requis lors de la demande : à la validation, le système génère automatiquement un mot de passe unique et ultra-sécurisé envoyé par email.
                 </span>
               </div>
+
+              {submitFeedback && (
+                <div
+                  role="alert"
+                  className={`p-4 rounded-2xl border flex flex-col gap-3 text-xs ${
+                    submitFeedback.code === 'REQUEST_ALREADY_PENDING'
+                      ? 'bg-amber-500/15 border-amber-500/40 text-amber-100'
+                      : 'bg-rose-500/15 border-rose-500/40 text-rose-100'
+                  }`}
+                >
+                  <div className="flex items-start gap-2.5">
+                    <AlertCircle
+                      size={18}
+                      className={`shrink-0 mt-0.5 ${
+                        submitFeedback.code === 'REQUEST_ALREADY_PENDING' ? 'text-amber-400' : 'text-rose-400'
+                      }`}
+                    />
+                    <p className="font-semibold leading-relaxed">{submitFeedback.message}</p>
+                  </div>
+
+                  {submitFeedback.code === 'REQUEST_ALREADY_PENDING' && submitFeedback.reference && (
+                    <div className="flex flex-wrap gap-2 pl-7">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setTrackingRef(submitFeedback.reference!);
+                          setMode('tracking');
+                          setSubmitFeedback(null);
+                          setLoading(true);
+                          fetch(`/api/public/school-requests/${encodeURIComponent(submitFeedback.reference!)}/status`)
+                            .then(r => r.json())
+                            .then(statusData => {
+                              if (statusData?.reference) {
+                                setViewingStatus(statusData);
+                                setCreatedRequest(statusData);
+                                setStep(statusData.statut === 'payment_pending' ? 2 : 3);
+                              }
+                            })
+                            .catch(() => {})
+                            .finally(() => setLoading(false));
+                        }}
+                        className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold transition-colors cursor-pointer"
+                      >
+                        <Search size={14} />
+                        <span>Suivre mon dossier ({submitFeedback.reference})</span>
+                      </button>
+                    </div>
+                  )}
+
+                  {submitFeedback.code === 'ACCOUNT_ALREADY_EXISTS' && (
+                    <div className="flex flex-wrap gap-2 pl-7">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onClose();
+                          window.location.href = '/login';
+                        }}
+                        className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white text-slate-900 hover:bg-slate-100 font-bold transition-colors cursor-pointer"
+                      >
+                        <span>Aller à la page de connexion</span>
+                        <ArrowRight size={14} />
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Submit Button */}
               <div className="pt-4 flex items-center justify-end gap-3 border-t border-slate-800">

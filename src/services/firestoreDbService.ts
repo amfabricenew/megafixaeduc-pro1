@@ -9,6 +9,7 @@ import {
   deleteDoc,
   onSnapshot,
   handleFirestoreError,
+  testFirestoreConnection,
   OperationType,
 } from '../lib/firebase';
 import {
@@ -190,17 +191,7 @@ export const firestoreDbService = {
   collections: FIRESTORE_COLLECTIONS,
 
   async verifyConnection(): Promise<boolean> {
-    const path = `${FIRESTORE_COLLECTIONS.test}/connection`;
-    try {
-      await getDocFromServer(doc(db, FIRESTORE_COLLECTIONS.test, 'connection'));
-      return true;
-    } catch (error: any) {
-      const msg = error instanceof Error ? error.message : String(error);
-      if (msg.includes('the client is offline')) {
-        console.error('Please check your Firebase configuration.');
-      }
-      return false;
-    }
+    return testFirestoreConnection();
   },
 
   async getUserProfile(uid: string, options: { throwOnError?: boolean } = {}) {

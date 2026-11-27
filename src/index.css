@@ -194,3 +194,31 @@ body {
     font-size: 14px;
   }
 }
+
+@keyframes megafixa-marquee {
+  0% {
+    transform: translate3d(0, 0, 0);
+  }
+  100% {
+    transform: translate3d(-50%, 0, 0);
+  }
+}
+
+.animate-megafixa-marquee {
+  display: flex;
+  width: max-content;
+  animation: megafixa-marquee 38s linear infinite;
+  will-change: transform;
+}
+
+.megafixa-marquee-group:hover .animate-megafixa-marquee,
+.megafixa-marquee-group:focus-within .animate-megafixa-marquee {
+  animation-play-state: paused;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-megafixa-marquee {
+    animation: none;
+    transform: none;
+  }
+}

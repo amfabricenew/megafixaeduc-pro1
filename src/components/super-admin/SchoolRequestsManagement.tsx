@@ -28,7 +28,9 @@ import {
   BellRing,
   MoreVertical,
   History,
-  LifeBuoy
+  LifeBuoy,
+  Archive,
+  RotateCcw
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { clsx, type ClassValue } from 'clsx';
@@ -44,9 +46,14 @@ interface SchoolRequestsManagementProps {
 }
 
 export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolRequestsManagementProps) {
-  const [activeTab, setActiveTab] = useState<'requests' | 'complaints'>('requests');
+  const [activeTab, setActiveTab] = useState<'requests' | 'complaints' | 'archives'>('requests');
   const [requests, setRequests] = useState<any[]>([]);
   const [complaints, setComplaints] = useState<any[]>([]);
+  const [archives, setArchives] = useState<any[]>([]);
+  const [archiveStats, setArchiveStats] = useState<any>({ total: 0, deleted: 0, rejected: 0, restored: 0 });
+  const [archiveFilter, setArchiveFilter] = useState<'all' | 'deleted' | 'rejected'>('all');
+  const [archiveSearch, setArchiveSearch] = useState('');
+  const [restoringArchiveId, setRestoringArchiveId] = useState<number | null>(null);
   const [plans, setPlans] = useState<any[]>([]);
   const [stats, setStats] = useState<any>({ total: 0, pending: 0, payment_confirmed: 0, approved: 0, rejected: 0 });
   const [loading, setLoading] = useState(true);
@@ -59,6 +66,7 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
   const [rejectingRequest, setRejectingRequest] = useState<any | null>(null);
   const [rejectReason, setRejectReason] = useState('');
   const [deletingRequestId, setDeletingRequestId] = useState<number | null>(null);
+  const [deleteReason, setDeleteReason] = useState('');
   
   // Notice modal state
   const [notifyingRequest, setNotifyingRequest] = useState<any | null>(null);
@@ -91,7 +99,7 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
       setLoading(true);
       const token = localStorage.getItem('token');
       
-      const [reqsRes, compRes, plansRes] = await Promise.all([
+      const [reqsRes, compRes, plansRes, archivesRes] = await Promise.all([
         fetch('/api/super-admin/school-requests', {
           headers: { 'Authorization': `Bearer ${token}` }
         }),
@@ -99,6 +107,9 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
           headers: { 'Authorization': `Bearer ${token}` }
         }),
         fetch('/api/super-admin/plans', {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }),
+        fetch('/api/super-admin/school-requests/archives', {
           headers: { 'Authorization': `Bearer ${token}` }
         })
       ]);
@@ -119,6 +130,12 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
         if (Array.isArray(plansData)) {
           setPlans(plansData);
         }
+      }
+
+      if (archivesRes.ok) {
+        const archData = await archivesRes.json();
+        setArchives(archData.archives || []);
+        setArchiveStats(archData.stats || { total: 0, deleted: 0, rejected: 0, restored: 0 });
       }
     } catch (err) {
       console.error("Erreur récupération données:", err);
@@ -297,7 +314,7 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
     }
   };
 
-  // Submit Delete
+  // Submit Delete (preserves record in permanent archive)
   const handleConfirmDelete = async () => {
     if (!deletingRequestId) return;
     setSubmittingDelete(true);
@@ -305,18 +322,48 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
       const token = localStorage.getItem('token');
       const res = await fetch(`/api/super-admin/school-requests/${deletingRequestId}`, {
         method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${token}` }
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ reason: deleteReason.trim() || undefined })
       });
+      const data = await res.json().catch(() => ({}));
       if (res.ok) {
-        toast.success("Dossier de demande supprimé.");
+        toast.success(data.message || "Dossier supprimé et conservé en archive.");
         setDeletingRequestId(null);
+        setDeleteReason('');
         fetchData();
         syncCloudVaultWithFirestore({ allowShrink: true }).catch(() => {});
+      } else {
+        toast.error(data.error || "Erreur lors de la suppression.");
       }
     } catch (err) {
       toast.error("Erreur de suppression.");
     } finally {
       setSubmittingDelete(false);
+    }
+  };
+
+  const handleRestoreArchive = async (archiveId: number) => {
+    setRestoringArchiveId(archiveId);
+    try {
+      const token = localStorage.getItem('token');
+      const res = await fetch(`/api/super-admin/school-requests/archives/${archiveId}/restore`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || "Échec de la restauration");
+      }
+      toast.success(data.message || "Demande restaurée dans les dossiers actifs.");
+      fetchData();
+      syncCloudVaultWithFirestore().catch(() => {});
+    } catch (err: any) {
+      toast.error(err.message || "Impossible de restaurer ce dossier.");
+    } finally {
+      setRestoringArchiveId(null);
     }
   };
 
@@ -347,17 +394,30 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
     return matchesSearch && matchesStatus;
   });
 
+  const filteredArchives = archives.filter(a => {
+    const matchesSearch =
+      !archiveSearch.trim() ||
+      a.nom_ecole?.toLowerCase().includes(archiveSearch.toLowerCase()) ||
+      a.reference?.toLowerCase().includes(archiveSearch.toLowerCase()) ||
+      a.demandeur_nom?.toLowerCase().includes(archiveSearch.toLowerCase()) ||
+      a.demandeur_email?.toLowerCase().includes(archiveSearch.toLowerCase()) ||
+      a.demandeur_telephone?.toLowerCase().includes(archiveSearch.toLowerCase()) ||
+      a.reason?.toLowerCase().includes(archiveSearch.toLowerCase());
+    const matchesType = archiveFilter === 'all' ? true : a.archive_type === archiveFilter;
+    return matchesSearch && matchesType;
+  });
+
   const pendingComplaintsCount = complaints.filter(c => c.statut === 'pending').length;
 
   return (
     <div className="space-y-6">
 
       {/* Sub Tabs */}
-      <div className="flex items-center gap-2 bg-slate-100 p-1.5 rounded-2xl w-fit">
+      <div className="flex flex-wrap items-center gap-2 bg-slate-100 p-1.5 rounded-2xl w-fit">
         <button
           onClick={() => setActiveTab('requests')}
           className={cn(
-            "flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer",
+            "flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap shrink-0",
             activeTab === 'requests' ? "bg-white text-indigo-600 shadow-sm" : "text-slate-500 hover:text-slate-900"
           )}
         >
@@ -367,7 +427,7 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
         <button
           onClick={() => setActiveTab('complaints')}
           className={cn(
-            "flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer relative",
+            "flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer relative whitespace-nowrap shrink-0",
             activeTab === 'complaints' ? "bg-white text-indigo-600 shadow-sm" : "text-slate-500 hover:text-slate-900"
           )}
         >
@@ -378,6 +438,16 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
               {pendingComplaintsCount}
             </span>
           )}
+        </button>
+        <button
+          onClick={() => setActiveTab('archives')}
+          className={cn(
+            "flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap shrink-0",
+            activeTab === 'archives' ? "bg-white text-indigo-600 shadow-sm" : "text-slate-500 hover:text-slate-900"
+          )}
+        >
+          <Archive size={16} />
+          <span>Archives (Supprimées & Rejetées) ({archives.length})</span>
         </button>
       </div>
 
@@ -586,7 +656,7 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
             )}
           </div>
         </>
-      ) : (
+      ) : activeTab === 'complaints' ? (
         /* Complaints View */
         <div className="space-y-4">
           <div className="flex items-center justify-between">
@@ -659,6 +729,184 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
                     </div>
                   </div>
                 ))}
+              </div>
+            )}
+          </div>
+        </div>
+      ) : (
+        /* Archives View: Deleted & Rejected Requests */
+        <div className="space-y-4">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div className="bg-white p-4 rounded-2xl border border-slate-200 flex items-center gap-3.5">
+              <div className="w-11 h-11 rounded-xl bg-slate-100 text-slate-700 flex items-center justify-center shrink-0">
+                <Archive size={20} />
+              </div>
+              <div>
+                <p className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Total Archivées</p>
+                <p className="text-xl font-black text-slate-900 tabular-nums mt-0.5">{archiveStats.total || archives.length}</p>
+              </div>
+            </div>
+
+            <div className="bg-white p-4 rounded-2xl border border-slate-200 flex items-center gap-3.5">
+              <div className="w-11 h-11 rounded-xl bg-rose-50 text-rose-600 flex items-center justify-center shrink-0">
+                <XCircle size={20} />
+              </div>
+              <div>
+                <p className="text-[11px] font-bold text-rose-700 uppercase tracking-wider">Demandes Rejetées</p>
+                <p className="text-xl font-black text-rose-800 tabular-nums mt-0.5">{archiveStats.rejected || archives.filter(a => a.archive_type === 'rejected').length}</p>
+              </div>
+            </div>
+
+            <div className="bg-white p-4 rounded-2xl border border-slate-200 flex items-center gap-3.5">
+              <div className="w-11 h-11 rounded-xl bg-amber-50 text-amber-600 flex items-center justify-center shrink-0">
+                <Trash2 size={20} />
+              </div>
+              <div>
+                <p className="text-[11px] font-bold text-amber-700 uppercase tracking-wider">Demandes Supprimées</p>
+                <p className="text-xl font-black text-amber-800 tabular-nums mt-0.5">{archiveStats.deleted || archives.filter(a => a.archive_type === 'deleted').length}</p>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-white p-4 rounded-2xl border border-slate-200 flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div className="relative flex-1">
+              <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+              <input
+                type="text"
+                placeholder="Rechercher dans les archives (école, référence, promoteur, email, motif)..."
+                value={archiveSearch}
+                onChange={(e) => setArchiveSearch(e.target.value)}
+                className="w-full pl-10 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
+              />
+            </div>
+
+            <div className="flex items-center gap-1.5 bg-slate-100 p-1 rounded-xl shrink-0">
+              {[
+                { id: 'all', label: 'Toutes' },
+                { id: 'rejected', label: 'Rejetées' },
+                { id: 'deleted', label: 'Supprimées' }
+              ].map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setArchiveFilter(tab.id as any)}
+                  className={cn(
+                    "px-3 py-1.5 rounded-lg text-xs font-bold transition-colors whitespace-nowrap shrink-0 cursor-pointer",
+                    archiveFilter === tab.id ? "bg-white text-slate-900 shadow-2xs" : "text-slate-600 hover:text-slate-900"
+                  )}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+            {loading ? (
+              <div className="p-12 text-center text-slate-400">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600 mx-auto mb-2" />
+                <p className="text-xs font-semibold">Chargement des archives...</p>
+              </div>
+            ) : filteredArchives.length === 0 ? (
+              <div className="p-12 text-center text-slate-400">
+                <Archive className="w-10 h-10 mx-auto mb-2 text-slate-300" />
+                <p className="text-xs font-bold text-slate-600">Aucune demande archivée pour ce filtre</p>
+                <p className="text-[11px] text-slate-400 mt-1">Toutes les demandes rejetées ou supprimées sont automatiquement conservées ici.</p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="bg-slate-50 border-b border-slate-200 text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                      <th className="py-3.5 px-4">Référence & Archivage</th>
+                      <th className="py-3.5 px-4">Établissement</th>
+                      <th className="py-3.5 px-4">Promoteur</th>
+                      <th className="py-3.5 px-4">Statut d'Archive</th>
+                      <th className="py-3.5 px-4">Motif & Auteur</th>
+                      <th className="py-3.5 px-4 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 text-xs font-medium text-slate-600">
+                    {filteredArchives.map((arch) => (
+                      <tr key={arch.id} className="hover:bg-slate-50/70 transition-colors">
+                        <td className="py-3.5 px-4">
+                          <span className="font-mono font-bold text-slate-800">{arch.reference}</span>
+                          <p className="text-[11px] text-slate-400 tabular-nums mt-0.5">
+                            {new Date(arch.archived_at).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' })}
+                          </p>
+                        </td>
+                        <td className="py-3.5 px-4">
+                          <p className="font-bold text-slate-900 text-sm">{arch.nom_ecole}</p>
+                          <p className="text-[11px] text-slate-500 mt-0.5">
+                            {arch.ville || 'N/A'} · {arch.plan_souhaite || 'Standard'}
+                          </p>
+                        </td>
+                        <td className="py-3.5 px-4">
+                          <p className="font-bold text-slate-900">{arch.demandeur_nom}</p>
+                          <p className="text-[11px] text-slate-500">{arch.demandeur_email}</p>
+                          <p className="text-[11px] text-indigo-600 font-mono tabular-nums">{arch.demandeur_telephone}</p>
+                        </td>
+                        <td className="py-3.5 px-4">
+                          <div className="space-y-1">
+                            <p className={cn(
+                              "font-bold flex items-center gap-1.5 text-xs",
+                              arch.archive_type === 'deleted' ? "text-amber-700" : "text-rose-700"
+                            )}>
+                              {arch.archive_type === 'deleted' ? <Trash2 size={13} /> : <XCircle size={13} />}
+                              <span>
+                                {arch.archive_type === 'deleted'
+                                  ? 'Supprimée'
+                                  : arch.auto_rejected_at
+                                    ? 'Auto-Rejetée (24H)'
+                                    : 'Rejetée'}
+                              </span>
+                            </p>
+                            {arch.restored_at && (
+                              <p className="text-[10px] font-semibold text-emerald-700">
+                                Restaurée le {new Date(arch.restored_at).toLocaleDateString('fr-FR')}
+                              </p>
+                            )}
+                          </div>
+                        </td>
+                        <td className="py-3.5 px-4 max-w-xs">
+                          <p className="text-xs text-slate-700 line-clamp-2">{arch.reason || 'Aucun motif précisé'}</p>
+                          {(arch.archived_by_name || arch.archived_by_email) && (
+                            <p className="text-[10px] text-slate-400 mt-0.5">
+                              Par : {arch.archived_by_name || arch.archived_by_email}
+                            </p>
+                          )}
+                        </td>
+                        <td className="py-3.5 px-4 text-right">
+                          <div className="flex items-center justify-end gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => setSelectedRequestDetails({
+                                ...arch,
+                                statut: arch.archive_type === 'deleted' ? 'Supprimée (Archivée)' : 'Rejetée (Archivée)',
+                                motif_rejet: arch.reason
+                              })}
+                              className="p-1.5 text-slate-500 hover:text-indigo-600 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
+                              title="Consulter les détails"
+                            >
+                              <Eye size={16} />
+                            </button>
+                            {!arch.restored_at && (
+                              <button
+                                type="button"
+                                disabled={restoringArchiveId === arch.id}
+                                onClick={() => handleRestoreArchive(arch.id)}
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white font-bold text-[11px] rounded-xl transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                              >
+                                <RotateCcw size={13} />
+                                <span>{restoringArchiveId === arch.id ? 'Restauration...' : 'Restaurer'}</span>
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             )}
           </div>
@@ -903,12 +1151,35 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
       {/* Delete Modal */}
       {deletingRequestId && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="bg-white rounded-3xl w-full max-w-sm p-6 space-y-4 shadow-2xl relative text-center">
+          <div className="bg-white rounded-3xl w-full max-w-md p-6 space-y-4 shadow-2xl relative text-center">
             <div className="w-12 h-12 rounded-2xl bg-rose-50 text-rose-600 flex items-center justify-center mx-auto"><Trash2 size={24} /></div>
-            <h3 className="text-base font-black text-slate-900">Supprimer la Demande ?</h3>
-            <div className="flex gap-3 pt-2">
-              <button onClick={() => setDeletingRequestId(null)} className="flex-1 py-2.5 bg-slate-100 text-slate-600 font-bold text-xs rounded-xl">Annuler</button>
-              <button onClick={handleConfirmDelete} disabled={submittingDelete} className="flex-1 py-2.5 bg-rose-600 text-white font-bold text-xs rounded-xl">{submittingDelete ? '...' : 'Supprimer'}</button>
+            <div className="space-y-1">
+              <h3 className="text-base font-black text-slate-900">Supprimer cette demande ?</h3>
+              <p className="text-xs text-slate-500">
+                Le dossier sera retiré de la liste active mais restera conservé dans l'onglet <strong>Archives</strong>.
+              </p>
+            </div>
+            <textarea
+              rows={2}
+              value={deleteReason}
+              onChange={(e) => setDeleteReason(e.target.value)}
+              placeholder="Motif de suppression pour l'archive (optionnel)..."
+              className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-left focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
+            />
+            <div className="flex gap-3 pt-1">
+              <button
+                onClick={() => { setDeletingRequestId(null); setDeleteReason(''); }}
+                className="flex-1 py-2.5 bg-slate-100 text-slate-600 font-bold text-xs rounded-xl cursor-pointer"
+              >
+                Annuler
+              </button>
+              <button
+                onClick={handleConfirmDelete}
+                disabled={submittingDelete}
+                className="flex-1 py-2.5 bg-rose-600 text-white font-bold text-xs rounded-xl cursor-pointer disabled:opacity-50"
+              >
+                {submittingDelete ? 'Archivage...' : 'Supprimer & Archiver'}
+              </button>
             </div>
           </div>
         </div>

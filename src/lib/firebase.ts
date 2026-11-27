@@ -4,6 +4,8 @@ import {
   initializeFirestore,
   getFirestore, 
   persistentLocalCache,
+  persistentMultipleTabManager,
+  memoryLocalCache,
   doc, 
   getDoc, 
   getDocFromServer,
@@ -22,16 +24,37 @@ import firebaseConfig from '../../firebase-applet-config.json';
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 export const auth = getAuth(app);
 
-// Initialize Firestore with auto-detect long polling and persistent local cache
-// Prevents 10-second backend connection timeouts in proxied / iframe preview environments
+// Force HTTP long-polling and multi-tab cache management (with memory fallback)
+// so proxied / iframe preview environments never hang on buffered WebChannel streams
 export const db = (() => {
+  const transportSettings = {
+    experimentalForceLongPolling: true,
+    experimentalLongPollingOptions: { timeoutSeconds: 10 },
+  };
   try {
-    return initializeFirestore(app, {
-      experimentalAutoDetectLongPolling: true,
-      localCache: persistentLocalCache({})
-    }, firebaseConfig.firestoreDatabaseId);
-  } catch (e) {
-    return getFirestore(app, firebaseConfig.firestoreDatabaseId);
+    return initializeFirestore(
+      app,
+      {
+        ...transportSettings,
+        localCache: persistentLocalCache({
+          tabManager: persistentMultipleTabManager(),
+        }),
+      },
+      firebaseConfig.firestoreDatabaseId
+    );
+  } catch {
+    try {
+      return initializeFirestore(
+        app,
+        {
+          ...transportSettings,
+          localCache: memoryLocalCache(),
+        },
+        firebaseConfig.firestoreDatabaseId
+      );
+    } catch {
+      return getFirestore(app, firebaseConfig.firestoreDatabaseId);
+    }
   }
 })();
 
@@ -105,27 +128,44 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
   throw new Error(JSON.stringify(errInfo));
 }
 
-// Test Firestore connection gracefully on boot using getDocFromServer
-export async function testFirestoreConnection() {
-  try {
-    if (typeof navigator !== 'undefined' && !navigator.onLine) {
-      return;
-    }
-    const timeout = new Promise((_, reject) =>
-      setTimeout(() => reject(new Error('Connection check timeout')), 3000)
-    );
-    await Promise.race([
-      getDocFromServer(doc(db, 'test', 'connection')),
-      timeout
-    ]);
-  } catch (error: any) {
-    if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.error("Please check your Firebase configuration.");
-    }
+let connectionCheckPromise: Promise<boolean> | null = null;
+
+// Test Firestore connection gracefully on boot using a single shared getDocFromServer probe
+export async function testFirestoreConnection(): Promise<boolean> {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return false;
   }
+  if (connectionCheckPromise) {
+    return connectionCheckPromise;
+  }
+  connectionCheckPromise = (async () => {
+    try {
+      await getDocFromServer(doc(db, 'test', 'connection'));
+      return true;
+    } catch (error: any) {
+      const code = String(error?.code || '').toLowerCase();
+      const message = error instanceof Error ? error.message : String(error || '');
+      if (
+        code === 'permission-denied' ||
+        code === 'not-found' ||
+        code === 'unauthenticated' ||
+        message.includes('Missing or insufficient permissions')
+      ) {
+        return true;
+      }
+      if (message.includes('the client is offline')) {
+        console.error("Please check your Firebase configuration.");
+      }
+      return false;
+    } finally {
+      connectionCheckPromise = null;
+    }
+  })();
+  return connectionCheckPromise;
 }
 
 if (typeof window !== 'undefined') {
   testFirestoreConnection().catch(() => {});
 }
+
 
