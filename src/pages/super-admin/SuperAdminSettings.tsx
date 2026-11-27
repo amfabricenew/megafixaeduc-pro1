@@ -33,6 +33,7 @@ import {
 } from 'lucide-react';
 import SchoolMessagingModal from '../../components/super-admin/SchoolMessagingModal';
 import { syncCloudVaultWithFirestore } from '../../utils/cloudVaultSync';
+import { firestoreDbService } from '../../services/firestoreDbService';
 import { apiFetch } from '../../utils/api';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -131,6 +132,7 @@ export default function SuperAdminSettings() {
   const [settings, setSettings] = React.useState<any>({});
   const [loading, setLoading] = React.useState(true);
   const [saving, setSaving] = React.useState(false);
+  const settingsLoadedRef = React.useRef(false);
 
   // Plans & Payments State (chargés dynamiquement depuis /api/super-admin/plans)
   const [plans, setPlans] = React.useState<any[]>([]);
@@ -192,6 +194,7 @@ export default function SuperAdminSettings() {
       const response = await apiFetch('/api/super-admin/settings');
       if (response.ok) {
         const data = await response.json();
+        settingsLoadedRef.current = true;
         setSettings(data);
 
         // Preserve exact payment methods configured by Super Admin (never re-inject deleted defaults)
@@ -260,15 +263,24 @@ export default function SuperAdminSettings() {
       const currentLinks = customLinks !== undefined ? customLinks : planPaymentLinks;
       const rawSettings = { ...(safeCustomSettings || settings) };
       for (const key of Object.keys(rawSettings)) {
-        if (key.startsWith('has_') || key === 'super_admin_config_customized' || key === 'super_admin_config_updated_at') {
+        if (
+          rawSettings[key] === undefined ||
+          key.startsWith('has_') ||
+          key === 'super_admin_config_customized' ||
+          key === 'super_admin_config_updated_at'
+        ) {
           delete rawSettings[key];
         }
       }
-      const payload = {
+      const payload: Record<string, any> = {
         ...rawSettings,
-        payment_methods: JSON.stringify(currentMethods),
-        plan_payment_links: JSON.stringify(currentLinks)
       };
+      if (settingsLoadedRef.current || customMethods !== undefined || currentMethods.length > 0) {
+        payload.payment_methods = JSON.stringify(currentMethods);
+      }
+      if (settingsLoadedRef.current || customLinks !== undefined || Object.keys(currentLinks || {}).length > 0) {
+        payload.plan_payment_links = JSON.stringify(currentLinks);
+      }
       const response = await apiFetch('/api/super-admin/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -278,10 +290,11 @@ export default function SuperAdminSettings() {
         toast.success("Paramètres et moyens de paiement enregistrés avec succès");
         await fetchSettings();
         window.dispatchEvent(new Event('school_subscription_updated'));
+        firestoreDbService.saveSuperAdminSettingsMap(payload, { throwOnError: false }).catch(() => {});
         syncCloudVaultWithFirestore({ allowShrink: true }).catch(() => {});
       } else {
         const errData = await response.json().catch(() => null);
-        toast.error(errData?.error || "Erreur lors de l'enregistrement");
+        toast.error(errData?.error || `Erreur lors de l'enregistrement (${response.status})`);
       }
     } catch (error: any) {
       toast.error(error?.message || "Erreur lors de l'enregistrement");

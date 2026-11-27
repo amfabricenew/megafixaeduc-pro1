@@ -116,11 +116,14 @@ export const apiFetch = async (input: RequestInfo | URL, init?: RequestInit, ret
 
     if (timeoutId) clearTimeout(timeoutId);
 
-    // Retry for transient server errors (502, 503, 504) or rate limits (429)
-    if (retryCount < 2 && [429, 502, 503, 504].includes(res.status)) {
-      const delay = res.headers.get('Retry-After') 
-        ? parseInt(res.headers.get('Retry-After')!) * 1000 
-        : 500 * (retryCount + 1);
+    // Retry for transient server/proxy errors (502, 503, 504) or rate limits (429)
+    const resContentType = (res.headers.get('content-type') || '').toLowerCase();
+    const isBusinessJson503 = res.status === 503 && resContentType.includes('application/json');
+    if (retryCount < 3 && !isBusinessJson503 && [429, 502, 503, 504].includes(res.status)) {
+      const retryAfterSec = parseInt(res.headers.get('Retry-After') || '', 10);
+      const delay = Number.isFinite(retryAfterSec) && retryAfterSec > 0
+        ? Math.min(retryAfterSec * 1000, 4000)
+        : [700, 1400, 2200][retryCount] || 1500;
       await new Promise(resolve => setTimeout(resolve, delay));
       return apiFetch(input, init, retryCount + 1);
     }

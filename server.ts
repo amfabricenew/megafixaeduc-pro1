@@ -7217,11 +7217,15 @@ async function startServer() {
     capturePublicOriginFromReq(req);
     const reqPath = req.path || '';
     if (reqPath !== '/health' && reqPath !== '/app-version' && reqPath !== '/offline/status') {
-      await Promise.race([
-        ensureCloudSqlHydrated().catch(() => {}),
-        initialHydrationPromise,
-        new Promise((resolve) => setTimeout(resolve, 12000)),
-      ]);
+      if (!hasCompletedInitialPgHydration) {
+        await Promise.race([
+          ensureCloudSqlHydrated().catch(() => {}),
+          initialHydrationPromise,
+          new Promise((resolve) => setTimeout(resolve, 4000)),
+        ]);
+      } else if (req.method === 'GET' && Date.now() - lastPgCheckAt >= 15000) {
+        void ensureCloudSqlHydrated().catch(() => {});
+      }
     }
     res.setHeader('X-App-Build-Version', APP_BUILD_ID);
     res.setHeader('X-App-Data-Version', String(serverDataVersion));
@@ -7276,9 +7280,10 @@ async function startServer() {
             markExplicitDeletion();
           }
           saveLocalCheckpointSync({ allowShrink: true });
+          const bgCheckpoint = saveCheckpoint(`api:${req.method}:${url.split('?')[0]}`, { allowShrink: true }).catch(() => false);
           await Promise.race([
-            saveCheckpoint(`api:${req.method}:${url.split('?')[0]}`, { allowShrink: true }).catch(() => false),
-            new Promise<void>((resolve) => setTimeout(resolve, 6000)),
+            bgCheckpoint,
+            new Promise<void>((resolve) => setTimeout(resolve, 1500)),
           ]);
         };
 
@@ -7286,7 +7291,7 @@ async function startServer() {
         const origSend = res.send.bind(res);
 
         res.json = function (body: any) {
-          if (!res.__persistedBeforeSend && res.statusCode >= 200 && res.statusCode < 400) {
+          if (!req._checkpointSaved && !res.__persistedBeforeSend && res.statusCode >= 200 && res.statusCode < 400) {
             void persistMutationBeforeResponse()
               .catch(() => {})
               .finally(() => {
@@ -7298,7 +7303,7 @@ async function startServer() {
         };
 
         res.send = function (body: any) {
-          if (!res.__persistedBeforeSend && res.statusCode >= 200 && res.statusCode < 400) {
+          if (!req._checkpointSaved && !res.__persistedBeforeSend && res.statusCode >= 200 && res.statusCode < 400) {
             void persistMutationBeforeResponse()
               .catch(() => {})
               .finally(() => {
@@ -35280,9 +35285,9 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
     }
   });
 
-  app.post("/api/super-admin/settings", authenticateToken, requireSuperAdmin, async (req, res) => {
+  app.post("/api/super-admin/settings", authenticateToken, requireSuperAdmin, async (req: any, res: any) => {
     try {
-      const updates = req.body || {};
+      const updates = req.body && typeof req.body === 'object' ? req.body : {};
       const secretKeys = new Set([
         'brevo_api_key', 'smtp_pass', 'sms_api_key', 'sms_auth_token',
         'whatsapp_auth_token', 'whatsapp_api_key', 'fedapay_secret_key', 'stripe_secret_key', 'paypal_secret_key', 'openai_api_key'
@@ -35291,8 +35296,18 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       const stmtSuper = db.prepare("INSERT OR REPLACE INTO super_admin_settings (key, value) VALUES (?, ?)");
       db.transaction(() => {
         for (const [key, value] of Object.entries(updates)) {
-          if (key.startsWith('has_') || key === 'super_admin_config_customized' || key === 'super_admin_config_updated_at' || key === 'system_jwt_secret') continue;
-          const valStr = typeof value === 'string' ? value : JSON.stringify(value);
+          if (
+            !key ||
+            value === undefined ||
+            key.startsWith('has_') ||
+            key === 'super_admin_config_customized' ||
+            key === 'super_admin_config_updated_at' ||
+            key === 'system_jwt_secret'
+          ) {
+            continue;
+          }
+          const valStr = value === null ? '' : (typeof value === 'string' ? value : JSON.stringify(value));
+          if (typeof valStr !== 'string') continue;
           // Never overwrite stored secret keys with masked placeholder strings
           if (secretKeys.has(key) && (!valStr.trim() || /^[•*]+$/.test(valStr.trim()))) {
             continue;
@@ -35303,11 +35318,24 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         markSuperAdminConfigCustomized();
       })();
 
-      saveLocalCheckpointSync();
-      (req as any)._checkpointSaved = true;
-      await saveCheckpoint('super_admin_settings');
+      bumpServerDataVersion();
+      if (!res.headersSent) {
+        res.setHeader('X-App-Data-Version', String(serverDataVersion));
+      }
+      saveLocalCheckpointSync({ allowShrink: true });
+      req._checkpointSaved = true;
+      res.__persistedBeforeSend = true;
+      const bgSave = saveCheckpoint('super_admin_settings', { allowShrink: true }).catch((err) => {
+        console.warn('[POST /api/super-admin/settings] Background checkpoint warning:', err?.message || err);
+        return false;
+      });
+      await Promise.race([
+        bgSave,
+        new Promise<void>((resolve) => setTimeout(resolve, 1500)),
+      ]);
       res.json({ success: true });
-    } catch (err) {
+    } catch (err: any) {
+      console.error('[POST /api/super-admin/settings] Error:', err);
       res.status(500).json({ error: "Erreur lors de la mise à jour des paramètres." });
     }
   });
@@ -35817,9 +35845,21 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
       })();
 
       recordSaasLog(req.userId, "UPDATE_SCHOOL_MESSAGING", { schoolId, hasSmtp: Boolean(smtp), hasSms: Boolean(sms), hasWhatsapp: Boolean(whatsapp) }, req);
-      saveLocalCheckpointSync();
-      (req as any)._checkpointSaved = true;
-      await saveCheckpoint('school_messaging_config');
+      bumpServerDataVersion();
+      if (!res.headersSent) {
+        res.setHeader('X-App-Data-Version', String(serverDataVersion));
+      }
+      saveLocalCheckpointSync({ allowShrink: true });
+      req._checkpointSaved = true;
+      (res as any).__persistedBeforeSend = true;
+      const bgMessagingSave = saveCheckpoint('school_messaging_config', { allowShrink: true }).catch((err) => {
+        console.warn('[PUT /api/super-admin/schools/:id/messaging-config] Background checkpoint warning:', err?.message || err);
+        return false;
+      });
+      await Promise.race([
+        bgMessagingSave,
+        new Promise<void>((resolve) => setTimeout(resolve, 1500)),
+      ]);
 
       res.json({ success: true, message: "Configuration des passerelles enregistrée avec succès." });
     } catch (err: any) {

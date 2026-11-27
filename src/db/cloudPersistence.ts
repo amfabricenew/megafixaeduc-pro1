@@ -1,6 +1,6 @@
 import zlib from 'zlib';
 import crypto from 'crypto';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, sql } from 'drizzle-orm';
 import { pgDb, isCloudSqlConfigured } from './index.ts';
 import {
   cloudCheckpoints,
@@ -308,33 +308,42 @@ export async function saveMasterCheckpointToCloudSql(
         });
 
       if (input.normalized) {
-        // Sync Super Admin settings key-value table
+        // Batch sync Super Admin settings key-value table (deduplicated by key)
         if (input.normalized.settingsRows.length > 0) {
+          const settingsMap = new Map<string, { key: string; value: string; updatedAt: Date }>();
           for (const s of input.normalized.settingsRows) {
+            if (!s?.key) continue;
+            const k = String(s.key);
+            settingsMap.set(k, {
+              key: k,
+              value: String(s.value ?? ''),
+              updatedAt: now,
+            });
+          }
+          const settingsValues = Array.from(settingsMap.values());
+          if (settingsValues.length > 0) {
             await tx
               .insert(superAdminSettings)
-              .values({
-                key: String(s.key),
-                value: String(s.value ?? ''),
-                updatedAt: now,
-              })
+              .values(settingsValues)
               .onConflictDoUpdate({
                 target: superAdminSettings.key,
                 set: {
-                  value: String(s.value ?? ''),
-                  updatedAt: now,
+                  value: sql`excluded.value`,
+                  updatedAt: sql`excluded.updated_at`,
                 },
               });
           }
         }
 
-        // Sync subscription plans (authoritative replace when customized or explicit changes)
+        // Batch sync subscription plans
         if (input.normalized.planRows.length > 0 || input.allowShrink) {
           await tx.delete(subscriptionPlans);
+          const planMap = new Map<number, any>();
           for (const p of input.normalized.planRows) {
             if (p.id == null || !p.name) continue;
-            await tx.insert(subscriptionPlans).values({
-              id: Number(p.id),
+            const pid = Number(p.id);
+            planMap.set(pid, {
+              id: pid,
               name: String(p.name),
               price: Number(p.price ?? 0),
               period: p.period ? String(p.period) : 'mois',
@@ -348,15 +357,21 @@ export async function saveMasterCheckpointToCloudSql(
               updatedAt: now,
             });
           }
+          const planValues = Array.from(planMap.values());
+          if (planValues.length > 0) {
+            await tx.insert(subscriptionPlans).values(planValues);
+          }
         }
 
-        // Sync schools registry
+        // Batch sync schools registry
         if (input.normalized.schoolRows.length > 0 || input.allowShrink) {
           await tx.delete(schools);
+          const schoolMap = new Map<number, any>();
           for (const sc of input.normalized.schoolRows) {
             if (sc.id == null || !sc.nom) continue;
-            await tx.insert(schools).values({
-              id: Number(sc.id),
+            const sid = Number(sc.id);
+            schoolMap.set(sid, {
+              id: sid,
               nom: String(sc.nom),
               codeEcole: sc.code_ecole ? String(sc.code_ecole) : null,
               email: sc.email ? String(sc.email) : null,
@@ -372,15 +387,21 @@ export async function saveMasterCheckpointToCloudSql(
               updatedAt: now,
             });
           }
+          const schoolValues = Array.from(schoolMap.values());
+          if (schoolValues.length > 0) {
+            await tx.insert(schools).values(schoolValues);
+          }
         }
 
-        // Sync school creation requests
+        // Batch sync school creation requests
         if (input.normalized.requestRows.length > 0 || input.allowShrink) {
           await tx.delete(schoolRequests);
+          const reqMap = new Map<number, any>();
           for (const r of input.normalized.requestRows) {
             if (r.id == null || !r.reference) continue;
-            await tx.insert(schoolRequests).values({
-              id: Number(r.id),
+            const rid = Number(r.id);
+            reqMap.set(rid, {
+              id: rid,
               reference: String(r.reference),
               nomEcole: String(r.nom_ecole || ''),
               emailEcole: r.email_ecole ? String(r.email_ecole) : null,
@@ -395,15 +416,20 @@ export async function saveMasterCheckpointToCloudSql(
               updatedAt: now,
             });
           }
+          const reqValues = Array.from(reqMap.values());
+          if (reqValues.length > 0) {
+            await tx.insert(schoolRequests).values(reqValues);
+          }
         }
 
-        // Sync deleted school archives (append/upsert, never purge)
-        for (const arch of input.normalized.archiveRows) {
-          if (arch.id == null) continue;
-          await tx
-            .insert(deletedSchoolArchives)
-            .values({
-              id: Number(arch.id),
+        // Batch sync deleted school archives (append/upsert, never purge)
+        if (input.normalized.archiveRows.length > 0) {
+          const archMap = new Map<number, any>();
+          for (const arch of input.normalized.archiveRows) {
+            if (arch.id == null) continue;
+            const aid = Number(arch.id);
+            archMap.set(aid, {
+              id: aid,
               originalSchoolId: arch.original_school_id != null ? Number(arch.original_school_id) : null,
               nom: String(arch.nom || arch.school_name || 'École archivée'),
               codeEcole: arch.code_ecole ? String(arch.code_ecole) : null,
@@ -411,19 +437,27 @@ export async function saveMasterCheckpointToCloudSql(
               reason: arch.reason ? String(arch.reason) : null,
               snapshotJson: JSON.stringify(arch),
               deletedAt: now,
-            })
-            .onConflictDoUpdate({
-              target: deletedSchoolArchives.id,
-              set: {
-                snapshotJson: JSON.stringify(arch),
-              },
             });
+          }
+          const archValues = Array.from(archMap.values());
+          if (archValues.length > 0) {
+            await tx
+              .insert(deletedSchoolArchives)
+              .values(archValues)
+              .onConflictDoUpdate({
+                target: deletedSchoolArchives.id,
+                set: {
+                  snapshotJson: sql`excluded.snapshot_json`,
+                },
+              });
+          }
         }
 
-        // Authoritatively reconcile user directory into PostgreSQL users table (handles edits, Google UID linking, and deletions)
+        // Batch reconcile user directory into PostgreSQL users table
         if (input.normalized.userRows.length > 0 || input.allowShrink) {
           await tx.delete(users);
           const seenUids = new Set<string>();
+          const userValues: any[] = [];
           for (const u of input.normalized.userRows) {
             if (!u.email) continue;
             let uid = u.google_id
@@ -433,7 +467,7 @@ export async function saveMasterCheckpointToCloudSql(
               uid = `local_${u.id ?? crypto.createHash('md5').update(`${u.email}:${seenUids.size}`).digest('hex')}`;
             }
             seenUids.add(uid);
-            await tx.insert(users).values({
+            userValues.push({
               uid,
               email: String(u.email),
               nom: u.nom ? String(u.nom) : null,
@@ -441,6 +475,9 @@ export async function saveMasterCheckpointToCloudSql(
               schoolId: u.school_id != null ? Number(u.school_id) : null,
               updatedAt: now,
             });
+          }
+          if (userValues.length > 0) {
+            await tx.insert(users).values(userValues);
           }
         }
       }
