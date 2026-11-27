@@ -1,6 +1,20 @@
 import { useEffect, useRef } from 'react';
 import { handleStaticApiFallback } from './cloudFallback';
-import { observeServerHeaders } from './appUpdater';
+import { observeServerHeaders, markLocalDataVersionSeen } from './appUpdater';
+
+let rateLimitedUntil = 0;
+let lastNotifyDispatchAt = 0;
+
+export function isRateLimited(): boolean {
+  return Date.now() < rateLimitedUntil;
+}
+
+export function markRateLimited(ms = 6000): void {
+  const until = Date.now() + Math.max(1500, Math.min(ms, 20000));
+  if (until > rateLimitedUntil) {
+    rateLimitedUntil = until;
+  }
+}
 
 let appSyncChannel: BroadcastChannel | null = null;
 if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
@@ -13,7 +27,10 @@ if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
 
 export const notifyAppUpdate = () => {
   if (typeof window !== 'undefined') {
-    const timestamp = Date.now().toString();
+    const now = Date.now();
+    if (now - lastNotifyDispatchAt < 1200) return;
+    lastNotifyDispatchAt = now;
+    const timestamp = now.toString();
     try {
       localStorage.setItem('megafixa_last_update', timestamp);
     } catch (e) {
@@ -116,16 +133,31 @@ export const apiFetch = async (input: RequestInfo | URL, init?: RequestInit, ret
 
     if (timeoutId) clearTimeout(timeoutId);
 
-    // Retry for transient server/proxy errors (502, 503, 504) or rate limits (429)
     const resContentType = (res.headers.get('content-type') || '').toLowerCase();
-    const isBusinessJson503 = res.status === 503 && resContentType.includes('application/json');
-    if (retryCount < 3 && !isBusinessJson503 && [429, 502, 503, 504].includes(res.status)) {
+    if (res.status === 429) {
       const retryAfterSec = parseInt(res.headers.get('Retry-After') || '', 10);
-      const delay = Number.isFinite(retryAfterSec) && retryAfterSec > 0
-        ? Math.min(retryAfterSec * 1000, 4000)
-        : [700, 1400, 2200][retryCount] || 1500;
-      await new Promise(resolve => setTimeout(resolve, delay));
-      return apiFetch(input, init, retryCount + 1);
+      const cooldownMs = Number.isFinite(retryAfterSec) && retryAfterSec > 0
+        ? Math.min(Math.max(retryAfterSec * 1000, 2000), 15000)
+        : 6000;
+      markRateLimited(cooldownMs);
+      // Only retry 429 at most once after waiting for the cooldown window to prevent request amplification
+      if (retryCount < 1) {
+        await new Promise(resolve => setTimeout(resolve, Math.min(cooldownMs, 4000)));
+        return apiFetch(input, init, retryCount + 1);
+      }
+    } else {
+      // Retry for transient server/proxy errors (502, 503, 504)
+      const isBusinessJson503 = res.status === 503 && resContentType.includes('application/json');
+      if (retryCount < 2 && !isBusinessJson503 && [502, 503, 504].includes(res.status)) {
+        const delay = [900, 1800][retryCount] || 1500;
+        await new Promise(resolve => setTimeout(resolve, delay));
+        return apiFetch(input, init, retryCount + 1);
+      }
+    }
+
+    // Prevent our own mutation response from re-triggering a redundant server_data_version wave
+    if (res.ok && ['POST', 'PUT', 'DELETE', 'PATCH'].includes(methodUpper)) {
+      markLocalDataVersionSeen(res.headers.get('X-App-Data-Version'));
     }
 
     // Detect server deployment / global data version changes on every API response
@@ -198,6 +230,9 @@ export const apiFetch = async (input: RequestInfo | URL, init?: RequestInit, ret
             if (target.status === 404) {
               return { error: "Ressource introuvable sur le serveur (Erreur 404).", status: 404 };
             }
+            if (target.status === 429) {
+              return { error: "Trop de requêtes simultanées vers le serveur (429). Veuillez patienter quelques secondes puis réessayer.", status: 429 };
+            }
             return { error: `Réponse inattendue du serveur (${target.status})`, status: target.status };
           }
           try {
@@ -208,6 +243,9 @@ export const apiFetch = async (input: RequestInfo | URL, init?: RequestInit, ret
             }
             if (target.status === 409) {
               return { error: "Cette adresse email ou ressource est déjà utilisée.", status: 409 };
+            }
+            if (target.status === 429) {
+              return { error: "Trop de requêtes simultanées vers le serveur (429). Veuillez patienter quelques secondes puis réessayer.", status: 429 };
             }
             return { error: `Erreur de communication avec le serveur (${target.status})`, status: target.status };
           }
@@ -231,6 +269,7 @@ export function useAppSync(onSync: () => void, intervalMs: number = 8000) {
 
   useEffect(() => {
     const handler = (force = false) => {
+      if (!force && isRateLimited()) return;
       const now = Date.now();
       if (!force && now - lastRunRef.current < 800) return;
       lastRunRef.current = now;

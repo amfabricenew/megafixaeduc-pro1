@@ -7239,6 +7239,7 @@ async function startServer() {
         '/api/auth/verify',
         '/api/auth/google',
         '/api/backups/cloud-sync-test',
+        '/api/super-admin/cloud-vault/reconcile',
         '/api/ai/',
         '/api/super-admin/test-',
         '/api/email/test',
@@ -7342,7 +7343,11 @@ async function startServer() {
   // Global Rate Limiter
   const globalLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 5000, // relaxed limit for school app and media
+    max: 10000, // relaxed limit for school app, dashboards and media
+    skip: (req) => {
+      const p = req.path || '';
+      return p === '/health' || p === '/app-version' || p === '/offline/status';
+    },
     message: { error: "Trop de requêtes, veuillez patienter quelques instants." },
     standardHeaders: true,
     legacyHeaders: false,
@@ -35138,11 +35143,19 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         prioritizeRemote: prioritizeRemote !== false
       });
       reconciled += ensureApprovedRequestsHaveSchools();
+      (req as any)._checkpointSaved = true;
+      (res as any).__persistedBeforeSend = true;
       if (reconciled > 0) {
         bumpServerDataVersion();
+        if (!res.headersSent) {
+          res.setHeader('X-App-Data-Version', String(serverDataVersion));
+        }
         saveLocalCheckpointSync();
-        (req as any)._checkpointSaved = true;
-        await saveCheckpoint('cloud_vault_reconcile');
+        const bgReconcileSave = saveCheckpoint('cloud_vault_reconcile').catch(() => false);
+        await Promise.race([
+          bgReconcileSave,
+          new Promise<void>((resolve) => setTimeout(resolve, 1500)),
+        ]);
       }
       res.json({
         success: true,
@@ -35258,28 +35271,32 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
     }
   });
 
+  const buildSafeSuperAdminSettingsMap = () => {
+    const saasSettings = db.prepare("SELECT * FROM saas_settings").all() as any[];
+    const superAdminSettings = db.prepare("SELECT * FROM super_admin_settings").all() as any[];
+    const settingsMap: any = {};
+    // Load saas_settings first, then let super_admin_settings be the authoritative override
+    saasSettings.forEach((s: any) => { settingsMap[s.key] = s.value; });
+    superAdminSettings.forEach((s: any) => { settingsMap[s.key] = s.value; });
+    delete settingsMap.system_jwt_secret;
+
+    const secretKeys = [
+      'brevo_api_key', 'smtp_pass', 'sms_api_key', 'sms_auth_token',
+      'whatsapp_auth_token', 'whatsapp_api_key', 'fedapay_secret_key', 'stripe_secret_key', 'paypal_secret_key', 'openai_api_key'
+    ];
+    for (const sk of secretKeys) {
+      const hasVal = Boolean(settingsMap[sk] && String(settingsMap[sk]).trim() !== '');
+      settingsMap[`has_${sk}`] = hasVal || (sk === 'brevo_api_key' && Boolean(process.env.BREVO_API_KEY)) || (sk === 'smtp_pass' && Boolean(process.env.SMTP_PASS));
+      if (hasVal) {
+        settingsMap[sk] = '••••••••';
+      }
+    }
+    return settingsMap;
+  };
+
   app.get("/api/super-admin/settings", authenticateToken, requireSuperAdmin, (req, res) => {
     try {
-      const saasSettings = db.prepare("SELECT * FROM saas_settings").all() as any[];
-      const superAdminSettings = db.prepare("SELECT * FROM super_admin_settings").all() as any[];
-      const settingsMap: any = {};
-      // Load saas_settings first, then let super_admin_settings be the authoritative override
-      saasSettings.forEach((s: any) => { settingsMap[s.key] = s.value; });
-      superAdminSettings.forEach((s: any) => { settingsMap[s.key] = s.value; });
-      delete settingsMap.system_jwt_secret;
-
-      const secretKeys = [
-        'brevo_api_key', 'smtp_pass', 'sms_api_key', 'sms_auth_token',
-        'whatsapp_auth_token', 'whatsapp_api_key', 'fedapay_secret_key', 'stripe_secret_key', 'paypal_secret_key', 'openai_api_key'
-      ];
-      for (const sk of secretKeys) {
-        const hasVal = Boolean(settingsMap[sk] && String(settingsMap[sk]).trim() !== '');
-        settingsMap[`has_${sk}`] = hasVal || (sk === 'brevo_api_key' && Boolean(process.env.BREVO_API_KEY)) || (sk === 'smtp_pass' && Boolean(process.env.SMTP_PASS));
-        if (hasVal) {
-          settingsMap[sk] = '••••••••';
-        }
-      }
-      res.json(settingsMap);
+      res.json(buildSafeSuperAdminSettingsMap());
     } catch (err) {
       res.status(500).json({ error: "Erreur lors de la récupération des paramètres." });
     }
@@ -35333,7 +35350,7 @@ Tu disposes d'une maîtrise absolue de TOUTES les fonctionnalités, calculs, flu
         bgSave,
         new Promise<void>((resolve) => setTimeout(resolve, 1500)),
       ]);
-      res.json({ success: true });
+      res.json({ success: true, settings: buildSafeSuperAdminSettingsMap() });
     } catch (err: any) {
       console.error('[POST /api/super-admin/settings] Error:', err);
       res.status(500).json({ error: "Erreur lors de la mise à jour des paramètres." });

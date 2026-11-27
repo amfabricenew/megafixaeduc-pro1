@@ -6,9 +6,17 @@ const RELOAD_COOLDOWN_MS = 20000;
 
 let knownBuildId: string | null = null;
 let knownDataVersion: string | null = null;
+let lastSyncDispatchAt = 0;
+let lastUpdateCheckAt = 0;
 let isApplyingUpdate = false;
 let monitorInitialized = false;
 let syncChannel: BroadcastChannel | null = null;
+
+export function markLocalDataVersionSeen(dataVersion?: string | null): void {
+  if (dataVersion && dataVersion.trim().length > 0) {
+    knownDataVersion = dataVersion;
+  }
+}
 
 function isStaticFallbackHost(): boolean {
   if (typeof window === 'undefined') return true;
@@ -60,7 +68,10 @@ export async function clearAppCachesAndUpdateSW(): Promise<void> {
 
 export function triggerCrossLevelDataSync(reason = 'server_sync'): void {
   if (typeof window === 'undefined') return;
-  const timestamp = Date.now().toString();
+  const now = Date.now();
+  if (now - lastSyncDispatchAt < 1500) return;
+  lastSyncDispatchAt = now;
+  const timestamp = now.toString();
   try {
     localStorage.setItem('megafixa_last_update', timestamp);
   } catch {
@@ -168,15 +179,22 @@ export function observeServerHeaders(headers: Headers | null | undefined): void 
 export async function checkForAppUpdate(): Promise<void> {
   if (typeof window === 'undefined' || isApplyingUpdate || isStaticFallbackHost()) return;
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+  const now = Date.now();
+  if (now - lastUpdateCheckAt < 5000) return;
+  lastUpdateCheckAt = now;
 
   try {
-    const res = await fetch(`/api/app-version?_t=${Date.now()}`, {
+    const res = await fetch(`/api/app-version?_t=${now}`, {
       cache: 'no-store',
       headers: {
         'Cache-Control': 'no-cache, no-store',
         'Pragma': 'no-cache'
       }
     });
+    if (res.status === 429) {
+      lastUpdateCheckAt = Date.now() + 15000;
+      return;
+    }
     if (!res.ok) return;
     const contentType = res.headers.get('content-type') || '';
     if (!contentType.includes('application/json')) return;
@@ -197,7 +215,7 @@ export function initAutoUpdateMonitor(): void {
   // Initial check immediately on app load
   void checkForAppUpdate();
 
-  // Check whenever user switches back to tab, restores focus, or regains connectivity
+  // Check whenever user switches back to tab, restores focus, or regains connectivity (debounced in checkForAppUpdate)
   const handleTrigger = () => {
     void checkForAppUpdate();
   };
@@ -222,10 +240,10 @@ export function initAutoUpdateMonitor(): void {
     });
   }
 
-  // Periodic background poll (every 25 seconds) so idle connected dashboards also auto-update
+  // Periodic background poll (every 60 seconds) so idle connected dashboards also auto-update without request bursts
   window.setInterval(() => {
     if (document.visibilityState !== 'hidden') {
       void checkForAppUpdate();
     }
-  }, 25000);
+  }, 60000);
 }

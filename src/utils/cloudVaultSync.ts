@@ -1,5 +1,6 @@
 import { auth, db, doc, getDocFromServer, setDoc, handleFirestoreError, OperationType } from '../lib/firebase';
 import { firestoreDbService } from '../services/firestoreDbService';
+import { isRateLimited, markRateLimited } from './api';
 
 const SUPER_ADMIN_CLOUD_EMAILS = ['ayedeguef@gmail.com', 'amfabricenew@gmail.com'];
 const VAULT_DOC_PATH = 'backups/school_accounts_registry';
@@ -7,6 +8,7 @@ const FIRESTORE_VAULT_BYTE_LIMIT = 750000;
 const FIRESTORE_CHUNK_SIZE = 650000;
 
 let syncInFlight: Promise<{ reconciled: number; pushed: boolean } | null> | null = null;
+let lastBackgroundSyncAt = 0;
 
 function isEligibleSuperAdminFirebaseSession(): boolean {
   const current = auth.currentUser;
@@ -26,6 +28,13 @@ export async function syncCloudVaultWithFirestore(options: {
   throwOnError?: boolean;
 } = {}): Promise<{ reconciled: number; pushed: boolean } | null> {
   if (syncInFlight) return syncInFlight;
+  if (!options.throwOnError && isRateLimited()) {
+    return null;
+  }
+  const now = Date.now();
+  if (!options.throwOnError && !options.prioritizeRemote && now - lastBackgroundSyncAt < 5000) {
+    return null;
+  }
 
   syncInFlight = (async () => {
     try {
@@ -33,6 +42,7 @@ export async function syncCloudVaultWithFirestore(options: {
       if (!token || !isEligibleSuperAdminFirebaseSession()) {
         return null;
       }
+      lastBackgroundSyncAt = Date.now();
 
       const vaultRef = doc(db, 'backups', 'school_accounts_registry');
       let remoteVault: any = null;
@@ -93,6 +103,10 @@ export async function syncCloudVaultWithFirestore(options: {
             prioritizeRemote: Boolean(options.prioritizeRemote),
           })
         });
+        if (reconcileRes.status === 429) {
+          markRateLimited(8000);
+          return { reconciled: 0, pushed: false };
+        }
         if (reconcileRes.ok) {
           const data = await reconcileRes.json();
           reconciled = Number(data?.reconciled || 0);
@@ -105,6 +119,10 @@ export async function syncCloudVaultWithFirestore(options: {
         const exportRes = await fetch('/api/super-admin/cloud-vault', {
           headers: { 'Authorization': `Bearer ${token}` }
         });
+        if (exportRes.status === 429) {
+          markRateLimited(8000);
+          return { reconciled, pushed: false };
+        }
         if (!exportRes.ok) return { reconciled, pushed: false };
         const data = await exportRes.json();
         latestVault = data?.vault || null;

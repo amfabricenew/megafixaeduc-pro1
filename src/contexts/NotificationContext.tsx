@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { apiFetch } from '../utils/api';
+import { apiFetch, isRateLimited } from '../utils/api';
 import { useAuth } from './AuthContext';
 
 export interface AppNotification {
@@ -201,11 +201,12 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode }> = ({ 
     fetchNotifications();
     const interval = setInterval(() => {
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      if (isRateLimited()) return;
       fetchNotifications();
-    }, 30000);
+    }, 45000);
 
     const handleRefresh = () => {
-      lastFetchAtRef.current = 0;
+      if (isRateLimited()) return;
       fetchNotifications();
     };
 

@@ -189,38 +189,43 @@ export default function SuperAdminSettings() {
     }
   };
 
+  const applySettingsPayload = (data: any) => {
+    if (!data || typeof data !== 'object') return;
+    settingsLoadedRef.current = true;
+    setSettings(data);
+
+    // Preserve exact payment methods configured by Super Admin (never re-inject deleted defaults)
+    if (data.payment_methods !== undefined && data.payment_methods !== null) {
+      try {
+        const parsed = typeof data.payment_methods === 'string' ? JSON.parse(data.payment_methods) : data.payment_methods;
+        setPaymentMethods(Array.isArray(parsed) ? parsed : []);
+      } catch (e) {
+        console.error(e);
+        setPaymentMethods([]);
+      }
+    } else {
+      setPaymentMethods(DEFAULT_PAYMENT_METHODS);
+    }
+
+    // Load plan payment links if saved
+    if (data.plan_payment_links) {
+      try {
+        const parsed = typeof data.plan_payment_links === 'string' ? JSON.parse(data.plan_payment_links) : data.plan_payment_links;
+        if (parsed && typeof parsed === 'object') {
+          setPlanPaymentLinks(parsed);
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    }
+  };
+
   const fetchSettings = async () => {
     try {
       const response = await apiFetch('/api/super-admin/settings');
       if (response.ok) {
         const data = await response.json();
-        settingsLoadedRef.current = true;
-        setSettings(data);
-
-        // Preserve exact payment methods configured by Super Admin (never re-inject deleted defaults)
-        if (data.payment_methods !== undefined && data.payment_methods !== null) {
-          try {
-            const parsed = typeof data.payment_methods === 'string' ? JSON.parse(data.payment_methods) : data.payment_methods;
-            setPaymentMethods(Array.isArray(parsed) ? parsed : []);
-          } catch (e) {
-            console.error(e);
-            setPaymentMethods([]);
-          }
-        } else {
-          setPaymentMethods(DEFAULT_PAYMENT_METHODS);
-        }
-
-        // Load plan payment links if saved
-        if (data.plan_payment_links) {
-          try {
-            const parsed = typeof data.plan_payment_links === 'string' ? JSON.parse(data.plan_payment_links) : data.plan_payment_links;
-            if (parsed && typeof parsed === 'object') {
-              setPlanPaymentLinks(parsed);
-            }
-          } catch (e) {
-            console.error(e);
-          }
-        }
+        applySettingsPayload(data);
       }
     } catch (error) {
       console.error("Error fetching settings:", error);
@@ -287,11 +292,14 @@ export default function SuperAdminSettings() {
         body: JSON.stringify(payload)
       });
       if (response.ok) {
+        const resData = await response.json().catch(() => null);
         toast.success("Paramètres et moyens de paiement enregistrés avec succès");
-        await fetchSettings();
-        window.dispatchEvent(new Event('school_subscription_updated'));
+        if (resData?.settings && typeof resData.settings === 'object') {
+          applySettingsPayload(resData.settings);
+        } else {
+          await fetchSettings();
+        }
         firestoreDbService.saveSuperAdminSettingsMap(payload, { throwOnError: false }).catch(() => {});
-        syncCloudVaultWithFirestore({ allowShrink: true }).catch(() => {});
       } else {
         const errData = await response.json().catch(() => null);
         toast.error(errData?.error || `Erreur lors de l'enregistrement (${response.status})`);

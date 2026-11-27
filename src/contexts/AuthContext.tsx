@@ -1,4 +1,4 @@
-import { apiFetch } from '../utils/api';
+import { apiFetch, isRateLimited } from '../utils/api';
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import type { SchoolPlanDetails } from '../utils/subscriptions';
 
@@ -339,8 +339,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     const handlePermissionSync = () => {
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      if (isRateLimited()) return;
       const now = Date.now();
-      if (now - lastSyncRef.current < 4000) return;
+      if (now - lastSyncRef.current < 10000) return;
       lastSyncRef.current = now;
       refreshUser();
       refreshPlan();
@@ -349,10 +350,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     const interval = setInterval(() => {
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      if (isRateLimited()) return;
       refreshUser();
       refreshPlan();
       fetchYears();
-    }, 30000);
+    }, 60000);
 
     const handleStorage = (e: StorageEvent) => {
       if (e.key === 'school_permissions_version' || e.key === 'user') {

@@ -41,6 +41,7 @@ import { LanguageSelector } from '../LanguageSelector';
 import { onAuthStateChanged, signInWithPopup } from 'firebase/auth';
 import { auth, googleProvider } from '../../lib/firebase';
 import { syncCloudVaultWithFirestore } from '../../utils/cloudVaultSync';
+import { isRateLimited, markRateLimited } from '../../utils/api';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -204,11 +205,16 @@ export default function SuperAdminLayout() {
 
   const fetchNotifications = React.useCallback(async () => {
     try {
+      if (isRateLimited()) return;
       const token = localStorage.getItem('token');
       if (!token) return;
       const res = await fetch('/api/super-admin/notifications', {
         headers: { 'Authorization': `Bearer ${token}` }
       });
+      if (res.status === 429) {
+        markRateLimited(8000);
+        return;
+      }
       if (res.ok) {
         const data = await res.json();
         const newUnread = data.unreadCount || 0;
@@ -236,8 +242,9 @@ export default function SuperAdminLayout() {
     fetchNotifications();
     const interval = setInterval(() => {
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      if (isRateLimited()) return;
       fetchNotifications();
-    }, 20000);
+    }, 45000);
     return () => clearInterval(interval);
   }, [fetchNotifications]);
 
@@ -279,14 +286,19 @@ export default function SuperAdminLayout() {
       runCloudSync(false);
     }, 60_000);
 
+    let mutationSyncTimer: number | null = null;
     const handleMutationEvent = () => {
-      if (!active) return;
-      window.setTimeout(() => {
-        if (active) runCloudSync(false);
-      }, 600);
+      if (!active || isRateLimited()) return;
+      if (mutationSyncTimer !== null) {
+        window.clearTimeout(mutationSyncTimer);
+      }
+      mutationSyncTimer = window.setTimeout(() => {
+        mutationSyncTimer = null;
+        if (active && !isRateLimited()) runCloudSync(false);
+      }, 2500);
     };
     const handleVisibilityOrHide = () => {
-      if (!active) return;
+      if (!active || isRateLimited()) return;
       if (document.visibilityState === 'hidden') {
         runCloudSync(false);
       }
@@ -314,6 +326,9 @@ export default function SuperAdminLayout() {
 
     return () => {
       active = false;
+      if (mutationSyncTimer !== null) {
+        window.clearTimeout(mutationSyncTimer);
+      }
       window.clearInterval(intervalId);
       window.removeEventListener('app:data-updated', handleMutationEvent);
       window.removeEventListener('schoolInfoChanged', handleMutationEvent);

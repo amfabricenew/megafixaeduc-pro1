@@ -1,4 +1,4 @@
-import { apiFetch } from '../utils/api';
+import { apiFetch, isRateLimited } from '../utils/api';
 import React from 'react';
 
 interface SchoolInfo {
@@ -35,8 +35,10 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const lastThemeFetchRef = React.useRef<number>(0);
 
   const fetchTheme = (force = false) => {
+    if (isRateLimited()) return;
     const now = Date.now();
-    if (!force && now - lastThemeFetchRef.current < 3000) return;
+    if (!force && now - lastThemeFetchRef.current < 10000) return;
+    if (force && now - lastThemeFetchRef.current < 2500) return;
     lastThemeFetchRef.current = now;
     let token: string | null = null;
     try {
