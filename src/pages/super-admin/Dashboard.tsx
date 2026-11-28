@@ -30,6 +30,7 @@ import { motion } from 'framer-motion';
 import { Link } from 'react-router-dom';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
+import { apiFetch } from '../../utils/api';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -62,10 +63,10 @@ export default function SuperAdminDashboard() {
       try {
         const token = localStorage.getItem('token');
         const [statsRes, notifRes] = await Promise.all([
-          fetch('/api/super-admin/stats', {
+          apiFetch('/api/super-admin/stats', {
             headers: { 'Authorization': `Bearer ${token}` }
           }),
-          fetch('/api/super-admin/notifications', {
+          apiFetch('/api/super-admin/notifications', {
             headers: { 'Authorization': `Bearer ${token}` }
           })
         ]);

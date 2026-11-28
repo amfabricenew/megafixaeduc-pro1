@@ -22,7 +22,7 @@ import {
   Globe,
   Filter
 } from 'lucide-react';
-import { apiFetch } from '../utils/api';
+import { apiFetch, isRateLimited } from '../utils/api';
 import { useAuth } from '../contexts/AuthContext';
 import { formatClassName } from '../utils/format';
 import toast from 'react-hot-toast';
@@ -100,10 +100,12 @@ export default function AdminActiveSessions() {
 
   useEffect(() => {
     fetchSessions(false, selectedDate);
-    // Poll every 15 seconds so changes made by teachers or other admins are visible
+    // Poll every 30 seconds while visible so changes are reflected without request bursts
     const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      if (isRateLimited()) return;
       fetchSessions(false, selectedDate);
-    }, 15000);
+    }, 30000);
     return () => clearInterval(interval);
   }, [selectedDate]);
 

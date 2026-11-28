@@ -15,7 +15,7 @@ import {
   Users,
   X
 } from 'lucide-react';
-import { apiFetch } from '../utils/api';
+import { apiFetch, isRateLimited } from '../utils/api';
 import { useAuth } from '../contexts/AuthContext';
 
 export interface OnboardingStep {
@@ -186,13 +186,19 @@ export const SchoolOnboardingReminders: React.FC = () => {
     localUser?.is_first_login === true ||
     localUser?.is_first_login === '1';
 
-  const fetchStatus = React.useCallback(async () => {
+  const lastStatusFetchRef = React.useRef<number>(0);
+
+  const fetchStatus = React.useCallback(async (force = false) => {
     if (!localUser?.id || !isAdminCandidate || mustChangeClient) {
       setStatusData(null);
       setActivePosterKey(null);
       setTickerVisible(false);
       return;
     }
+    if (isRateLimited()) return;
+    const now = Date.now();
+    if (!force && now - lastStatusFetchRef.current < 4000) return;
+    lastStatusFetchRef.current = now;
 
     try {
       const res = await apiFetch('/api/school/onboarding-status');
@@ -214,25 +220,33 @@ export const SchoolOnboardingReminders: React.FC = () => {
 
   // Initial load + listen to data mutations, route changes, window focus, and periodic status check
   React.useEffect(() => {
-    fetchStatus();
+    fetchStatus(false);
   }, [fetchStatus, location.pathname, location.search]);
 
   React.useEffect(() => {
     if (!isAdminCandidate || mustChangeClient) return;
 
+    let debounceTimer: number | null = null;
     const handleDataUpdated = () => {
-      window.setTimeout(() => {
-        fetchStatus();
-      }, 250);
+      if (isRateLimited()) return;
+      if (debounceTimer !== null) window.clearTimeout(debounceTimer);
+      debounceTimer = window.setTimeout(() => {
+        debounceTimer = null;
+        fetchStatus(false);
+      }, 1500);
     };
 
     window.addEventListener('app:data-updated', handleDataUpdated);
     window.addEventListener('schoolInfoChanged', handleDataUpdated);
     window.addEventListener('focus', handleDataUpdated);
 
-    const pollInterval = window.setInterval(fetchStatus, 25000);
+    const pollInterval = window.setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      fetchStatus(false);
+    }, 60000);
 
     return () => {
+      if (debounceTimer !== null) window.clearTimeout(debounceTimer);
       window.removeEventListener('app:data-updated', handleDataUpdated);
       window.removeEventListener('schoolInfoChanged', handleDataUpdated);
       window.removeEventListener('focus', handleDataUpdated);

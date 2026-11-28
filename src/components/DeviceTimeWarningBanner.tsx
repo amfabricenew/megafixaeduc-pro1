@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { AlertTriangle, Clock, RefreshCw, X, Globe } from 'lucide-react';
-import { apiFetch } from '../utils/api';
+import { apiFetch, isRateLimited } from '../utils/api';
 
 interface SchoolTimeResponse {
   serverTimestamp: number;
@@ -46,7 +46,11 @@ export default function DeviceTimeWarningBanner() {
   useEffect(() => {
     checkDeviceTime();
     // Check every 2 minutes
-    const interval = setInterval(checkDeviceTime, 120000);
+    const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      if (isRateLimited()) return;
+      checkDeviceTime();
+    }, 120000);
     return () => clearInterval(interval);
   }, [checkDeviceTime]);
 

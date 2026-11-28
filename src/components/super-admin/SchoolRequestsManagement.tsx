@@ -36,6 +36,7 @@ import toast from 'react-hot-toast';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { syncCloudVaultWithFirestore } from '../../utils/cloudVaultSync';
+import { apiFetch } from '../../utils/api';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -100,16 +101,16 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
       const token = localStorage.getItem('token');
       
       const [reqsRes, compRes, plansRes, archivesRes] = await Promise.all([
-        fetch('/api/super-admin/school-requests', {
+        apiFetch('/api/super-admin/school-requests', {
           headers: { 'Authorization': `Bearer ${token}` }
         }),
-        fetch('/api/super-admin/complaints', {
+        apiFetch('/api/super-admin/complaints', {
           headers: { 'Authorization': `Bearer ${token}` }
         }),
-        fetch('/api/super-admin/plans', {
+        apiFetch('/api/super-admin/plans', {
           headers: { 'Authorization': `Bearer ${token}` }
         }),
-        fetch('/api/super-admin/school-requests/archives', {
+        apiFetch('/api/super-admin/school-requests/archives', {
           headers: { 'Authorization': `Bearer ${token}` }
         })
       ]);
@@ -168,7 +169,7 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
     setSubmittingNotice(true);
     try {
       const token = localStorage.getItem('token');
-      const res = await fetch(`/api/super-admin/school-requests/${requestId}/send-notice`, {
+      const res = await apiFetch(`/api/super-admin/school-requests/${requestId}/send-notice`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -201,7 +202,7 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
     setSubmittingResolve(true);
     try {
       const token = localStorage.getItem('token');
-      const res = await fetch(`/api/super-admin/complaints/${complaintId}/resolve`, {
+      const res = await apiFetch(`/api/super-admin/complaints/${complaintId}/resolve`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -253,7 +254,7 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
     setSubmittingApprove(true);
     try {
       const token = localStorage.getItem('token');
-      const res = await fetch(`/api/super-admin/school-requests/${approvingRequest.id}/approve`, {
+      const res = await apiFetch(`/api/super-admin/school-requests/${approvingRequest.id}/approve`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -288,7 +289,7 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
     setSubmittingReject(true);
     try {
       const token = localStorage.getItem('token');
-      const res = await fetch(`/api/super-admin/school-requests/${rejectingRequest.id}/reject`, {
+      const res = await apiFetch(`/api/super-admin/school-requests/${rejectingRequest.id}/reject`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -320,7 +321,7 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
     setSubmittingDelete(true);
     try {
       const token = localStorage.getItem('token');
-      const res = await fetch(`/api/super-admin/school-requests/${deletingRequestId}`, {
+      const res = await apiFetch(`/api/super-admin/school-requests/${deletingRequestId}`, {
         method: 'DELETE',
         headers: {
           'Content-Type': 'application/json',
@@ -349,7 +350,7 @@ export default function SchoolRequestsManagement({ onSchoolApproved }: SchoolReq
     setRestoringArchiveId(archiveId);
     try {
       const token = localStorage.getItem('token');
-      const res = await fetch(`/api/super-admin/school-requests/archives/${archiveId}/restore`, {
+      const res = await apiFetch(`/api/super-admin/school-requests/archives/${archiveId}/restore`, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${token}` }
       });

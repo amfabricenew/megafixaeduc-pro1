@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { RefreshCw, AlertTriangle } from 'lucide-react';
-import { apiFetch } from '../utils/api';
+import { apiFetch, isRateLimited } from '../utils/api';
 
 export default function TimeSyncWarning() {
   const [isOutOfSync, setIsOutOfSync] = useState(false);
@@ -65,6 +65,7 @@ export default function TimeSyncWarning() {
     checkSync();
     const interval = setInterval(() => {
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      if (isRateLimited()) return;
       checkSync();
     }, 120000); // Check every 2 mins
     return () => clearInterval(interval);

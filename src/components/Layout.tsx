@@ -1,4 +1,4 @@
-import { apiFetch } from '../utils/api';
+import { apiFetch, isRateLimited } from '../utils/api';
 import TimeSyncWarning from './TimeSyncWarning';
 import React from 'react';
 import ErrorBoundary from './ErrorBoundary';
@@ -119,8 +119,9 @@ export default function Layout() {
 
   const lastSchoolFetchRef = React.useRef<number>(0);
   const fetchSchoolInfo = React.useCallback((force = false) => {
+    if (!force && isRateLimited()) return;
     const now = Date.now();
-    if (!force && now - lastSchoolFetchRef.current < 2500) return;
+    if (!force && now - lastSchoolFetchRef.current < 5000) return;
     lastSchoolFetchRef.current = now;
     apiFetch('/api/school-info')
       .then(res => res.json())

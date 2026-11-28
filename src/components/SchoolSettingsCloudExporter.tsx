@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Cloud, RotateCcw } from 'lucide-react';
 import toast from 'react-hot-toast';
-import { apiFetch } from '../utils/api';
+import { apiFetch, isRateLimited } from '../utils/api';
 import { useAuth } from '../contexts/AuthContext';
 import { useFirebase } from '../contexts/FirebaseContext';
 import { firestoreDbService } from '../services/firestoreDbService';
@@ -271,6 +271,7 @@ export const SchoolSettingsCloudExporter: React.FC<SchoolSettingsCloudExporterPr
   const inFlightRef = useRef(false);
   const hasReconciledOnBootRef = useRef(false);
   const debounceTimerRef = useRef<number | null>(null);
+  const lastBackgroundExportAtRef = useRef<number>(0);
 
   const resolvedUser =
     user ||
@@ -320,9 +321,12 @@ export const SchoolSettingsCloudExporter: React.FC<SchoolSettingsCloudExporterPr
   const runPeriodicExport = useCallback(
     async (options: { force?: boolean; notify?: boolean } = {}) => {
       if (inFlightRef.current) return;
+      if (!options.notify && isRateLimited()) return;
+      if (!options.notify && !options.force && Date.now() - lastBackgroundExportAtRef.current < 15000) return;
       if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
       if (!getLocalStorageItem('token')) return;
 
+      lastBackgroundExportAtRef.current = Date.now();
       inFlightRef.current = true;
       if (options.notify) setBusy(true);
       try {
@@ -421,25 +425,31 @@ export const SchoolSettingsCloudExporter: React.FC<SchoolSettingsCloudExporterPr
       void runPeriodicExport({ force: false });
     }, intervalMs);
 
-    const scheduleExport = (delayMs = 400) => {
+    const scheduleExport = (delayMs = 5000) => {
+      if (isRateLimited()) return;
       if (debounceTimerRef.current !== null) {
         window.clearTimeout(debounceTimerRef.current);
       }
       debounceTimerRef.current = window.setTimeout(() => {
-        void runPeriodicExport({ force: true });
+        debounceTimerRef.current = null;
+        if (!isRateLimited() && Date.now() - lastBackgroundExportAtRef.current >= 10000) {
+          void runPeriodicExport({ force: true });
+        }
       }, delayMs);
     };
 
-    const handleSchoolInfoChanged = () => scheduleExport(350);
-    const handleYearChanged = () => scheduleExport(350);
-    const handleDataUpdated = () => scheduleExport(600);
+    const handleSchoolInfoChanged = () => scheduleExport(4500);
+    const handleYearChanged = () => scheduleExport(4500);
+    const handleDataUpdated = () => scheduleExport(6000);
     const handleVisibilityOrHide = () => {
-      if (document.visibilityState === 'hidden') {
+      if (document.visibilityState === 'hidden' && !isRateLimited()) {
         void runPeriodicExport({ force: false });
       }
     };
     const handlePageHide = () => {
-      void runPeriodicExport({ force: false });
+      if (!isRateLimited()) {
+        void runPeriodicExport({ force: false });
+      }
     };
 
     window.addEventListener('schoolInfoChanged', handleSchoolInfoChanged);

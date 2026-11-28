@@ -41,7 +41,7 @@ import { LanguageSelector } from '../LanguageSelector';
 import { onAuthStateChanged, signInWithPopup } from 'firebase/auth';
 import { auth, googleProvider } from '../../lib/firebase';
 import { syncCloudVaultWithFirestore } from '../../utils/cloudVaultSync';
-import { isRateLimited, markRateLimited } from '../../utils/api';
+import { apiFetch, isRateLimited, markRateLimited } from '../../utils/api';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -208,11 +208,11 @@ export default function SuperAdminLayout() {
       if (isRateLimited()) return;
       const token = localStorage.getItem('token');
       if (!token) return;
-      const res = await fetch('/api/super-admin/notifications', {
+      const res = await apiFetch('/api/super-admin/notifications', {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       if (res.status === 429) {
-        markRateLimited(8000);
+        markRateLimited(10000);
         return;
       }
       if (res.ok) {
@@ -295,7 +295,7 @@ export default function SuperAdminLayout() {
       mutationSyncTimer = window.setTimeout(() => {
         mutationSyncTimer = null;
         if (active && !isRateLimited()) runCloudSync(false);
-      }, 2500);
+      }, 6000);
     };
     const handleVisibilityOrHide = () => {
       if (!active || isRateLimited()) return;
@@ -310,8 +310,8 @@ export default function SuperAdminLayout() {
     window.addEventListener('pagehide', handleMutationEvent);
 
     const token = localStorage.getItem('token');
-    if (token) {
-      fetch('/api/super-admin/persistence-status', {
+    if (token && !isRateLimited()) {
+      apiFetch('/api/super-admin/persistence-status', {
         headers: { 'Authorization': `Bearer ${token}` }
       })
         .then(r => (r.ok ? r.json() : null))
@@ -369,7 +369,7 @@ export default function SuperAdminLayout() {
   const markNotificationsAsRead = async (id?: number) => {
     try {
       const token = localStorage.getItem('token');
-      await fetch('/api/super-admin/notifications/mark-read', {
+      await apiFetch('/api/super-admin/notifications/mark-read', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

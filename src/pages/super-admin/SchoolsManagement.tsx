@@ -40,6 +40,7 @@ import toast from 'react-hot-toast';
 import SchoolRequestsManagement from '../../components/super-admin/SchoolRequestsManagement';
 import SchoolMessagingModal from '../../components/super-admin/SchoolMessagingModal';
 import { syncCloudVaultWithFirestore } from '../../utils/cloudVaultSync';
+import { apiFetch } from '../../utils/api';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -137,10 +138,10 @@ export default function SchoolsManagement() {
     try {
       const token = localStorage.getItem('token');
       const [schoolsRes, plansRes] = await Promise.all([
-        fetch('/api/super-admin/schools', {
+        apiFetch('/api/super-admin/schools', {
           headers: { 'Authorization': `Bearer ${token}` }
         }),
-        fetch('/api/super-admin/plans', {
+        apiFetch('/api/super-admin/plans', {
           headers: { 'Authorization': `Bearer ${token}` }
         })
       ]);
@@ -171,7 +172,7 @@ export default function SchoolsManagement() {
     try {
       setLoadingArchives(true);
       const token = localStorage.getItem('token');
-      const res = await fetch('/api/super-admin/deleted-schools', {
+      const res = await apiFetch('/api/super-admin/deleted-schools', {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       if (res.ok) {
@@ -191,7 +192,7 @@ export default function SchoolsManagement() {
 
     // Fetch pending school requests count
     const token = localStorage.getItem('token');
-    fetch('/api/super-admin/school-requests', {
+    apiFetch('/api/super-admin/school-requests', {
       headers: { 'Authorization': `Bearer ${token}` }
     })
       .then(res => res.json())
@@ -231,7 +232,7 @@ export default function SchoolsManagement() {
     setSubmittingAdd(true);
     try {
       const token = localStorage.getItem('token');
-      const res = await fetch('/api/super-admin/schools', {
+      const res = await apiFetch('/api/super-admin/schools', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -282,7 +283,7 @@ export default function SchoolsManagement() {
     setSelectedSchoolDetails(null);
     try {
       const token = localStorage.getItem('token');
-      const res = await fetch(`/api/super-admin/schools/${school.id}/details`, {
+      const res = await apiFetch(`/api/super-admin/schools/${school.id}/details`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       const data = await res.json();
@@ -339,7 +340,7 @@ export default function SchoolsManagement() {
     setSubmittingSpacesLock(true);
     try {
       const token = localStorage.getItem('token');
-      const res = await fetch(`/api/super-admin/schools/${targetId}/spaces-lock`, {
+      const res = await apiFetch(`/api/super-admin/schools/${targetId}/spaces-lock`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -386,7 +387,7 @@ export default function SchoolsManagement() {
     setSubmittingEdit(true);
     try {
       const token = localStorage.getItem('token');
-      const res = await fetch(`/api/super-admin/schools/${editingSchool.id}`, {
+      const res = await apiFetch(`/api/super-admin/schools/${editingSchool.id}`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -425,7 +426,7 @@ export default function SchoolsManagement() {
     setSubmittingReset(true);
     try {
       const token = localStorage.getItem('token');
-      const res = await fetch(`/api/super-admin/schools/${resettingPasswordSchool.id}/reset-password`, {
+      const res = await apiFetch(`/api/super-admin/schools/${resettingPasswordSchool.id}/reset-password`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -469,7 +470,7 @@ export default function SchoolsManagement() {
     setSubmittingDelete(true);
     try {
       const token = localStorage.getItem('token');
-      const res = await fetch(`/api/super-admin/schools/${deletingSchool.id}`, {
+      const res = await apiFetch(`/api/super-admin/schools/${deletingSchool.id}`, {
         method: 'DELETE',
         headers: {
           'Content-Type': 'application/json',
@@ -510,7 +511,7 @@ export default function SchoolsManagement() {
     setSelectedArchiveDetails(null);
     try {
       const token = localStorage.getItem('token');
-      const res = await fetch(`/api/super-admin/deleted-schools/${archiveId}`, {
+      const res = await apiFetch(`/api/super-admin/deleted-schools/${archiveId}`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       const data = await res.json();
@@ -526,7 +527,7 @@ export default function SchoolsManagement() {
   const handleDownloadArchive = async (archive: any) => {
     try {
       const token = localStorage.getItem('token');
-      const res = await fetch(`/api/super-admin/deleted-schools/${archive.id}/download`, {
+      const res = await apiFetch(`/api/super-admin/deleted-schools/${archive.id}/download`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       if (!res.ok) throw new Error("Échec du téléchargement de l'archive.");
@@ -551,7 +552,7 @@ export default function SchoolsManagement() {
     setRestoringArchiveId(confirmRestoreArchive.id);
     try {
       const token = localStorage.getItem('token');
-      const res = await fetch(`/api/super-admin/deleted-schools/${confirmRestoreArchive.id}/restore`, {
+      const res = await apiFetch(`/api/super-admin/deleted-schools/${confirmRestoreArchive.id}/restore`, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${token}` }
       });

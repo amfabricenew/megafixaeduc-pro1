@@ -180,7 +180,7 @@ export async function checkForAppUpdate(): Promise<void> {
   if (typeof window === 'undefined' || isApplyingUpdate || isStaticFallbackHost()) return;
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
   const now = Date.now();
-  if (now - lastUpdateCheckAt < 5000) return;
+  if (now - lastUpdateCheckAt < 10000) return;
   lastUpdateCheckAt = now;
 
   try {
@@ -192,7 +192,7 @@ export async function checkForAppUpdate(): Promise<void> {
       }
     });
     if (res.status === 429) {
-      lastUpdateCheckAt = Date.now() + 15000;
+      lastUpdateCheckAt = Date.now() + 25000;
       return;
     }
     if (!res.ok) return;
@@ -240,10 +240,10 @@ export function initAutoUpdateMonitor(): void {
     });
   }
 
-  // Periodic background poll (every 60 seconds) so idle connected dashboards also auto-update without request bursts
+  // Periodic background poll (every 90 seconds) so idle connected dashboards also auto-update without request bursts
   window.setInterval(() => {
     if (document.visibilityState !== 'hidden') {
       void checkForAppUpdate();
     }
-  }, 60000);
+  }, 90000);
 }

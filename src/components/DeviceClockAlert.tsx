@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { AlertTriangle, Clock, RefreshCw, X } from 'lucide-react';
-import { apiFetch } from '../utils/api';
+import { apiFetch, isRateLimited } from '../utils/api';
 
 export interface ClockInfo {
   timezone: string;
@@ -39,7 +39,11 @@ export function useSchoolClock() {
 
   useEffect(() => {
     checkClock();
-    const interval = setInterval(checkClock, 60000);
+    const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      if (isRateLimited()) return;
+      checkClock();
+    }, 120000);
     return () => clearInterval(interval);
   }, []);
 

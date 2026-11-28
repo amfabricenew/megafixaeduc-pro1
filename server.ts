@@ -7189,8 +7189,8 @@ async function startServer() {
   const app = express();
   app.disable('x-powered-by');
 
-  // Trust first proxy hop (e.g. Cloud Run, NGINX reverse proxy)
-  app.set('trust proxy', 1);
+  // Trust all upstream reverse proxy hops (Cloud Run, Google Frontend, Render, Cloudflare)
+  app.set('trust proxy', true);
 
   // Basic Security & Performance Middleware (xFrameOptions disabled to preserve AI Studio iframe compatibility)
   app.use(helmet({
@@ -7340,10 +7340,16 @@ async function startServer() {
     next();
   }, express.static(uploadsStaticDir));
 
-  // Global Rate Limiter
+  // Global Rate Limiter (keyed by authenticated user or client IP with generous quota)
   const globalLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 10000, // relaxed limit for school app, dashboards and media
+    max: 25000,
+    keyGenerator: (req: any) => {
+      if (req.userId) return `u:${req.userId}`;
+      const xff = req.headers?.['x-forwarded-for'];
+      const clientIp = typeof xff === 'string' ? xff.split(',')[0].trim() : req.ip;
+      return clientIp || 'anon';
+    },
     skip: (req) => {
       const p = req.path || '';
       return p === '/health' || p === '/app-version' || p === '/offline/status';
@@ -7354,7 +7360,8 @@ async function startServer() {
     validate: {
       trustProxy: false,
       xForwardedForHeader: false,
-      forwardedHeader: false
+      forwardedHeader: false,
+      keyGeneratorIpFallback: false
     }
   });
   app.use("/api/", globalLimiter);

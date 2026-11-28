@@ -1,6 +1,6 @@
 import { auth, db, doc, getDocFromServer, setDoc, handleFirestoreError, OperationType } from '../lib/firebase';
 import { firestoreDbService } from '../services/firestoreDbService';
-import { isRateLimited, markRateLimited } from './api';
+import { apiFetch, isRateLimited, markRateLimited } from './api';
 
 const SUPER_ADMIN_CLOUD_EMAILS = ['ayedeguef@gmail.com', 'amfabricenew@gmail.com'];
 const VAULT_DOC_PATH = 'backups/school_accounts_registry';
@@ -32,7 +32,7 @@ export async function syncCloudVaultWithFirestore(options: {
     return null;
   }
   const now = Date.now();
-  if (!options.throwOnError && !options.prioritizeRemote && now - lastBackgroundSyncAt < 5000) {
+  if (!options.throwOnError && !options.prioritizeRemote && now - lastBackgroundSyncAt < 15000) {
     return null;
   }
 
@@ -92,7 +92,7 @@ export async function syncCloudVaultWithFirestore(options: {
       let latestStats: any = null;
 
       if (remoteVault && remoteVault.tables) {
-        const reconcileRes = await fetch('/api/super-admin/cloud-vault/reconcile', {
+        const reconcileRes = await apiFetch('/api/super-admin/cloud-vault/reconcile', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -104,7 +104,7 @@ export async function syncCloudVaultWithFirestore(options: {
           })
         });
         if (reconcileRes.status === 429) {
-          markRateLimited(8000);
+          markRateLimited(10000);
           return { reconciled: 0, pushed: false };
         }
         if (reconcileRes.ok) {
@@ -116,11 +116,11 @@ export async function syncCloudVaultWithFirestore(options: {
       }
 
       if (!latestVault) {
-        const exportRes = await fetch('/api/super-admin/cloud-vault', {
+        const exportRes = await apiFetch('/api/super-admin/cloud-vault', {
           headers: { 'Authorization': `Bearer ${token}` }
         });
         if (exportRes.status === 429) {
-          markRateLimited(8000);
+          markRateLimited(10000);
           return { reconciled, pushed: false };
         }
         if (!exportRes.ok) return { reconciled, pushed: false };

@@ -16,7 +16,7 @@ import {
   RotateCcw,
   Globe
 } from 'lucide-react';
-import { apiFetch } from '../utils/api';
+import { apiFetch, isRateLimited } from '../utils/api';
 import { useAuth } from '../contexts/AuthContext';
 import { useNotifications } from '../contexts/NotificationContext';
 
@@ -142,10 +142,12 @@ export default function TeacherCourses() {
 
   useEffect(() => {
     fetchSessions();
-    // Auto refresh every 15 seconds so admin actions are reflected quickly
+    // Auto refresh every 30 seconds while visible
     const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      if (isRateLimited()) return;
       fetchSessions();
-    }, 15000);
+    }, 30000);
     return () => clearInterval(interval);
   }, [currentDate]);
 
